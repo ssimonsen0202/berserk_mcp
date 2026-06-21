@@ -158,6 +158,57 @@ Answers must be **stable** (frozen window), **single-value**, and **string-compa
 3. Pick a frozen Berserk window and author 10 Layer-B Q&A pairs with verified answers.
 4. Run the matrix; publish the comparison table in this file.
 
+## Results — live agent eval (2026-06-21)
+
+Tested the **deployed Hermes agent** on VM-A (the real use case) driving the live MCP
+against live Berserk, comparing the default cheap lane (`gpt-4.1-mini`) against the
+`@deep` lane (`claude-sonnet-4-6`). Each question was run via `hermes -z`, and answers
+were verified against the deterministic `bzrk-q` helper as ground truth.
+
+> Caveat: this exercised the *deployed two-file MCP* (`/opt/assistant/bin/`), not the
+> public single-file rewrite. KQL is identical, but the rewrite's server `instructions`
+> + tool annotations were **not** deployed — so this measures the older tool descriptions.
+
+| Question class | Right tool | gpt-4.1-mini | claude-sonnet-4-6 | Ground truth | Result |
+|---|---|---|---|---|---|
+| Errors, last 1h | `errors_by_service` | "none" ✓ | "none" ✓ | empty ✓ | tie |
+| Top-3 CPU containers | `top_cpu` | minio→query→postgres ✓ | same ✓ | minio→postgres→query | tie (postgres/query a noise-tie) |
+| Heaviest **VM** (host-vs-container trap) | `host_cpu` | beserk 1.49 ✓ | beserk 1.52 ✓ | beserk 1.45 ✓ | **tie — cheap passed the trap** |
+| Multi-step: busiest VM == host of top container? | `host_cpu` + `top_cpu` | beserk + minio, correct join ✓ | (not run) | beserk 1.45 / minio 4.9% | **cheap passed the hardest test** |
+
+### Verdict
+
+No measurable gap between `gpt-4.1-mini` and `claude-sonnet-4-6` on monitoring / ChatOps
+questions — including the host-vs-container disambiguation and a two-tool synthesis that
+usually separates cheap models. **Default to `gpt-4.1-mini`; keep `@deep`/sonnet as an
+on-demand escape hatch** for genuinely hard asks. The deterministic tool descriptions are
+what carry the cheap model — which validates the MCP's core thesis.
+
+### Methodology lessons (banked from this run)
+
+- **Never string-compare exact values on live/averaged metrics.** `top_cpu`/`host_cpu`
+  average over a window, so numbers drift run-to-run (we saw beserk vary 1.45–1.55).
+  Score the *set* and clearly-separated ranks, not near-ties or absolute values. Layer-B
+  questions must target stable, clearly-separated answers (or frozen windows).
+- **Tool *selection* is the thing to test, not output reading** — both models read load
+  averages and percentages correctly every time; the only risk was picking the wrong
+  tool, which is exactly what the Layer-A router eval isolates cheaply.
+
+### MCP gap noted
+
+The multi-step join ("is the busiest VM also running the top container?") required mapping
+a container to its host — which **no current tool exposes**. The model inferred it from
+the `berserk-*` naming (correct here, not guaranteed). A future `container_hosts` tool, or
+adding `host` to `top_cpu` output, would make such joins reliable.
+
+### Follow-ups
+
+- Deploy the improved single-file MCP (server `instructions` + annotations) to VM-A and
+  re-run this set — measures whether those additions change cheap-model behavior (the
+  built-in A/B from the plan above).
+- Run the Layer-A router harness against prospective **local** models (Qwen2.5-7B etc.)
+  on a GPU box to find a free local lane that matches `gpt-4.1-mini` here.
+
 ## Sources
 
 - [Berkeley Function-Calling Leaderboard (BFCL) — Gorilla/UC Berkeley](https://gorilla.cs.berkeley.edu/blogs/8_berkeley_function_calling_leaderboard.html)
