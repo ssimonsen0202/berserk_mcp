@@ -128,23 +128,80 @@ replace any of it — it sits next to it and adds the agent-facing surface. Conc
 | **Two-lane cost model** (cheap default · on-demand `@deep`) | n/a (UX concern) | ✅ tool descriptions + annotations make this safe |
 | **KQL-injection guards** on free-text inputs | n/a (humans) | ✅ service-name allowlist · `claude_search` reject-list |
 
-### Use cases it supports or enhances
+### What it looks like — worked examples
 
-- **ChatOps.** A Slack / Discord / Teams bot answering "any errors in the last hour?"
-  or "which container is eating CPU?" in plain language, backed by *your own* Berserk —
-  no third-party SaaS, no telemetry leaving your network.
-- **Autonomous monitoring agents.** A scheduled agent calls the tools to write a daily
-  health digest, flag anomalies, or open a ticket — deterministic enough to run
-  unattended on a cheap or local model.
-- **On-call triage from your editor.** Ask about production from inside Claude Code or
+Concrete prompts you can paste into any MCP-aware client (Claude Code, Claude Desktop,
+a Slack/Discord bot, an agent framework). Each shows the natural-language ask, which
+tools the model ends up calling, and the kind of answer you get back. These all work on
+the cheap default lane — no frontier model required.
+
+**ChatOps: "any errors in the last hour?"**
+
+```
+Have there been any errors in the last hour, and from which service?
+```
+
+> Calls `errors_by_service` (`since="1h ago"`). The model replies with the per-service
+> error count, or "no errors recorded" when the result is empty. Drop this in a Slack
+> bot and you've got a one-line health probe.
+
+**On-call triage: "which VM is loaded, and what's running on it?"**
+
+```
+Is the busiest VM by CPU load also the one running the highest-CPU container?
+Name both.
+```
+
+> Calls `host_cpu` *and* `top_cpu`, then joins the answer for you. With `container_hosts`
+> in the toolbox the model can map the container back to its host without guessing from
+> the name. Verified end-to-end on `gpt-4.1-mini` — see [evals/model-eval-plan.md](evals/model-eval-plan.md).
+
+**Onboarding a new telemetry source you just started shipping**
+
+```
+I just added HAProxy logs to Berserk. Show me the shape of those records and
+suggest a query that counts errors per backend.
+```
+
+> Calls `discover_schema(service="haproxy")` (returns the resource keys + a row sample),
+> then `search` for the proposed KQL. If you like the query, ask the model to
+> `save_query` it — next time anyone asks about HAProxy errors, `run_saved` answers
+> instantly on the cheap lane. This is the "self-extending" loop in practice.
+
+**Autonomous daily health digest (cron / scheduled agent)**
+
+```
+You are an on-call assistant. Use the Berserk MCP to:
+1) Check load per host (host_cpu, host_memory) over the last 6 hours.
+2) Count errors per service over the last 24 hours (errors_by_service).
+3) List the top 5 noisiest containers (top_memory).
+Write a 10-line digest, flag anything that looks anomalous, and stop.
+```
+
+> Deterministic enough to run unattended overnight on `gpt-4.1-mini` or a local
+> Qwen2.5-7B. Wire it to a cron job; the answer is short and parseable.
+
+**Claude Code observability (bonus)**
+
+```
+What tools has Claude Code used most this week, and were there any errors?
+```
+
+> Calls `claude_tools` + `claude_errors`. Only works if you ship Claude Code session
+> logs into Berserk (any OTLP forwarder will do — see [docs/claude-code.md](docs/claude-code.md));
+> if you don't, ignore — the other tools work without it.
+
+### Who it's for
+
+- **ChatOps** — Slack / Discord / Teams bot answering plain-language questions, backed
+  by *your own* Berserk. No third-party SaaS, no telemetry leaving your network.
+- **Autonomous monitoring agents** — scheduled jobs that summarise, flag, or open
+  tickets, cheap enough to run unattended.
+- **On-call triage from your editor** — ask about production from inside Claude Code or
   Claude Desktop without switching to a dashboard.
-- **Any telemetry source.** Tools query generically by service / host / metric, so
-  whatever feeds OTLP into Berserk — containers, VMs, Kubernetes, application code,
-  edge devices — is queryable the same way, with no per-source configuration.
-- **Claude Code observability (bonus).** If you ship Claude Code session logs into
-  Berserk, five extra tools turn that into a queryable record of your own agent
-  activity — sessions, tool histograms, errors, full-text search — which Berserk has
-  no opinion about out of the box. See [docs/claude-code.md](docs/claude-code.md).
+- **Any telemetry source** — tools query generically by service / host / metric, so any
+  OTLP feed (containers, VMs, Kubernetes, app code, edge devices) is queryable the same
+  way, with no per-source configuration.
 
 ## Requirements
 
@@ -373,7 +430,79 @@ routing surface that keeps the cheap model reliable.
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
-## Development
+## Extending — add a new tool in five minutes
+
+The whole point of this server is fixed, verified queries — so adding a tool is a
+small, mechanical ritual. Aim to keep the routing surface small (~20 tools) and let
+the long tail accumulate behind `save_query`/`run_saved` via the [learning loop](#self-extending-discovery--learning).
+
+**1. Find the KQL on a live instance.** Iterate with `bzrk` until the query returns
+clean rows — names, units, sort order, all the things a model would otherwise have
+to invent. *Don't ship a query you haven't seen succeed against real data.*
+
+```bash
+bzrk -P local search "default | where metric_name == 'system.network.io' \
+  | summarize bytes=sum(value) by host=tostring(resource['host.name'])" \
+  --since "1h ago"
+```
+
+**2. Drop it into `berserk_mcp.py`** — usually two lines for a fixed-query tool.
+The `Q_*` constant is the verified KQL; the `SIMPLE` entry wires it to the dispatcher
+with a sensible default time window.
+
+```python
+Q_HOST_NET = (
+    f"{T} | where metric_name == 'system.network.io' "
+    f"| summarize bytes=sum(value) by host=tostring(resource['host.name']) "
+    f"| sort by bytes desc"
+)
+SIMPLE = {
+    # ...
+    "host_network": (Q_HOST_NET, "30m ago"),
+}
+```
+
+**3. Tell the model what the tool is for.** Tool description = router signal. Write
+it narrowly enough that a small model can pick it without context — cross-reference
+the close cousins (`host_memory`, `top_memory`) so the model doesn't confuse per-host
+with per-container.
+
+```python
+TOOLS.append({
+    "name": "host_network",
+    "description": "Total network bytes (sum) per host. Per-HOST; for per-container "
+                   "network use `search` for now.",
+    "inputSchema": {"type": "object", "properties": _since()},
+})
+TITLES["host_network"] = "Per-Host Network I/O"
+```
+
+The default `_READ` annotations apply automatically. Override in `_ANNOTATIONS` only
+if the new tool isn't read-only or doesn't hit the network (rare).
+
+**4. Lock the query string with a test** so future refactors can't quietly change it:
+
+```python
+def test_q_host_net_locked(self):
+    self.assertEqual(bm.Q_HOST_NET,
+        "default | where metric_name == 'system.network.io' "
+        "| summarize bytes=sum(value) by host=tostring(resource['host.name']) "
+        "| sort by bytes desc")
+```
+
+**5. Run the suite + re-register with your MCP client.** Clients cache the tool list
+at `mcp add` time, so a `remove` + `add` cycle is needed after shipping the change.
+
+```bash
+python tests/test_berserk_mcp.py     # 31 (+yours) tests, no live Berserk required
+claude mcp remove berserk-q && claude mcp add berserk-q -- berserk-mcp
+```
+
+That's it. A tool that touches free-text input (a service name, a search term) needs an
+allow-list (see `logs_for_service`); a tool that needs two `bzrk` round-trips can
+follow `discover_schema`'s pattern. Both patterns are in the source as templates.
+
+## Testing
 
 ```bash
 python tests/test_berserk_mcp.py     # 31 tests, no live Berserk required
@@ -381,12 +510,24 @@ python tests/test_berserk_mcp.py     # 31 tests, no live Berserk required
 
 The tests stub the `bzrk` CLI, so they verify the generated KQL, default time
 windows, injection guards, `since` validation, tool annotations, the JSON-RPC
-protocol, and the learning loop — all offline.
+protocol, and the learning loop — all offline. Run them on every PR; CI does too.
 
-Adding a tool: add an entry to `SIMPLE` (for a fixed query) or handle it in
-`handle_call`, add its metadata to `TOOLS`, and lock its KQL with a test. Keep
-queries verified against a live instance before committing — determinism is the
-point.
+## Contributing
+
+Issues, ideas, and PRs are all welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for
+the short version (what's a good first contribution, how queries get verified, the
+two-line code style). The bar is low: if the tests pass, the description is narrow,
+and the query has been seen working against real data, it's mergeable.
+
+Good first contributions if you're looking for one:
+
+- A new fixed-query tool for telemetry you actually care about (cheapest win — the
+  five-step ritual above).
+- A worked example for your stack (Kubernetes, ECS, Nomad, …) under [docs/](docs/).
+- Sharpening a tool description that confused your model — the descriptions are the
+  router; a clearer one is a real correctness improvement.
+- Filing an issue when you hit something the server *should* have a tool for. We'd
+  rather know than guess.
 
 ## License
 
