@@ -94,6 +94,28 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertEqual(self.calls[-1][3], bm.Q_CONTAINER_HOSTS)
         self.assertEqual(self.calls[-1][-1], "1h ago")
 
+    def test_list_metrics_callable(self):
+        text, err = bm.handle_call("list_metrics", {})
+        self.assertFalse(err)
+        self.assertEqual(self.calls[-1][3], bm.Q_METRICS)
+
+    def test_discover_schema_no_service(self):
+        text, err = bm.handle_call("discover_schema", {})
+        self.assertFalse(err)
+        kql = self.calls[-1][3]
+        self.assertIn("take 8", kql)
+        self.assertNotIn("service.name", kql)  # no filter when no service given
+
+    def test_discover_schema_with_service(self):
+        text, err = bm.handle_call("discover_schema", {"service": "haproxy"})
+        self.assertFalse(err)
+        self.assertIn("resource['service.name'] == 'haproxy'", self.calls[-1][3])
+
+    def test_discover_schema_rejects_bad_service(self):
+        text, err = bm.handle_call("discover_schema", {"service": "a'; drop"})
+        self.assertTrue(err)
+        self.assertEqual(self.calls, [])  # must not shell out
+
     def test_all_simple_tools_callable(self):
         for name in bm.SIMPLE:
             self.calls.clear()

@@ -30,7 +30,7 @@ import re
 import os
 from pathlib import Path
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 # ---------- configuration (env-overridable) ----------
 BZRK_BIN = os.environ.get("BZRK_BIN", "bzrk")
@@ -123,6 +123,21 @@ Q_CONTAINER_HOSTS = (
     f"container=tostring(resource['container.name']), host=tostring(resource['host.name']) "
     f"| sort by host asc, container asc"
 )
+Q_METRICS = (
+    f"{T} | where isnotnull(metric_name) "
+    f"| summarize samples=count(), last_seen=max(timestamp) by metric_name "
+    f"| sort by samples desc"
+)
+
+
+def q_discover(service=None):
+    """Sample recent rows (optionally for one service) so a model can learn the
+    structure of the data being ingested — its resource + attributes shape."""
+    filt = f"| where resource['service.name'] == '{service}' " if service else ""
+    return (
+        f"{T} {filt}| take 8 "
+        f"| project resource, attributes, metric_name, severity_text"
+    )
 Q_CC_RECENT = (
     f"{CC} | project ts=timestamp, typ=tostring(attributes['claude.type']), "
     f"role=tostring(attributes['claude.message_role']), "
@@ -261,6 +276,7 @@ SIMPLE = {
     "host_cpu": (Q_HOST_CPU, "30m ago"),
     "host_memory": (Q_HOST_MEM, "30m ago"),
     "container_hosts": (Q_CONTAINER_HOSTS, "1h ago"),
+    "list_metrics": (Q_METRICS, "1h ago"),
     "claude_recent": (Q_CC_RECENT, "1h ago"),
     "claude_sessions": (Q_CC_SESSIONS, "6h ago"),
     "claude_tools": (Q_CC_TOOLS, "6h ago"),
@@ -279,6 +295,8 @@ TOOLS = [
     {"name": "container_hosts", "description": "Map each container to the host/VM it runs on. Use to answer 'which host runs container X' or to JOIN per-container metrics (top_cpu/top_memory) with per-host metrics (host_cpu/host_memory) — don't infer the host from the container's name.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "logs_for_service", "description": "Recent log lines for a specific service e.g. 'nginx', 'postgres'.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "service.name value"}}, **_since()), "required": ["service"]}},
     {"name": "schema", "description": "Show Berserk tables + column schema (live introspection).", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "list_metrics", "description": "List every metric name currently being ingested, with sample counts + last-seen. Use to DISCOVER what telemetry exists before writing a `search` query.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "discover_schema", "description": "Sample recent rows (optionally for one service) and return their full resource + attributes structure — use to learn the shape of a new or unknown data source before querying it. Pair with list_services / list_metrics. Once you work out a query with `search`, persist it with save_query so it becomes reusable.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "optional: limit the sample to one service.name"}}, **_since())}},
     {"name": "search", "description": "Run an arbitrary Kusto/KQL query against the Berserk table. Use when the other tools do not fit; once it works, persist it with save_query.", "inputSchema": {"type": "object", "properties": dict({"kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'"}}, **_since()), "required": ["kql"]}},
     # --- Claude Code activity (service.name == 'claude-code'); low-volume, keep windows bounded ---
     {"name": "claude_recent", "description": "Recent Claude Code activity (timestamp, type, role, model, tool names, error flag), newest first. Default window 1h.", "inputSchema": {"type": "object", "properties": _since()}},
@@ -318,6 +336,8 @@ TITLES = {
     "container_hosts": "Container → Host Map",
     "logs_for_service": "Service Logs",
     "schema": "Schema Introspection",
+    "list_metrics": "List Metrics",
+    "discover_schema": "Discover Schema",
     "search": "Run KQL",
     "claude_recent": "Claude Code: Recent Activity",
     "claude_sessions": "Claude Code: Sessions",
@@ -379,6 +399,12 @@ def handle_call(name, arguments):
     # --- tools needing input validation or extra calls ---
     if name == "schema":
         return do_schema()
+    if name == "discover_schema":
+        svc = arguments.get("service")
+        if svc and not re.match(r"^[A-Za-z0-9._-]+$", str(svc)):
+            return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
+        since = arguments.get("since") or "1h ago"
+        return bzrk_search(q_discover(str(svc) if svc else None), since)
     if name == "logs_for_service":
         svc = arguments.get("service")
         if not svc:

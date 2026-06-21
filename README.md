@@ -209,6 +209,8 @@ that way if you add tools.
 | `container_hosts` | Which host/VM each container runs on (join key for container↔host questions). |
 | `logs_for_service` | Recent log lines for one service. |
 | `schema` | Live tables + column schema introspection. |
+| `list_metrics` | Every metric name being ingested, with counts (discovery). |
+| `discover_schema` | Sample rows to learn an unknown source's `resource`/`attributes` shape (discovery). |
 | `search` | Run arbitrary KQL (escape hatch). |
 
 Every query tool takes an optional `since` argument (`"15m ago"`, `"1h ago"`,
@@ -240,6 +242,35 @@ saved. The store is capped at 500 entries. Saved queries live in
 `BERSERK_MCP_LEARNED_PATH` (default: your platform config dir, e.g.
 `~/.config/berserk-mcp/learned.json`).
 
+## Self-extending: discovery + learning
+
+The fixed tools cover known telemetry. For data the server *doesn't* have a tool for
+yet — a log source you just started shipping — there's a loop that lets the MCP extend
+itself without hand-editing code, while staying deterministic for the cheap lane:
+
+```
+DISCOVER   list_metrics / discover_schema / list_services  →  "what's in here now?"
+AUTHOR     search "<KQL for the new data>"                  →  a working query
+PERSIST    save_query                                       →  a permanent, named tool
+REUSE      run_saved <name>                                 →  cheap model, free, forever
+```
+
+The intended division of labour (cost-efficient):
+
+- **A capable model does the rare, hard part** — discover the new shape, author + verify
+  the query, `save_query` it. Trigger it two ways: on a **schedule** (a daily job that
+  diffs `list_metrics`/`discover_schema` against a stored baseline and only authors when
+  something new appears), or **on demand** ("I'm now shipping HAProxy logs to Berserk —
+  add support"). Authoring KQL is the one thing small models are weak at, so gate this
+  behind the stronger model or a human; `save_query` verifies the query runs before it
+  persists, as a guardrail.
+- **The cheap model reaps the result** — every saved query is reusable for free via
+  `run_saved`, deterministically.
+
+This scales because **learned queries live behind `list_saved`/`run_saved`, not as
+first-class tools** — so you can learn dozens of new sources without growing the ~20-tool
+routing surface that keeps the cheap model reliable.
+
 ## Security
 
 - **Injection guards.** `logs_for_service` validates the service name against
@@ -266,7 +297,7 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 ## Development
 
 ```bash
-python tests/test_berserk_mcp.py     # 26 tests, no live Berserk required
+python tests/test_berserk_mcp.py     # 31 tests, no live Berserk required
 ```
 
 The tests stub the `bzrk` CLI, so they verify the generated KQL, default time
