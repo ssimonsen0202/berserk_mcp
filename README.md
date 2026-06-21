@@ -16,9 +16,20 @@ instead of hand-authoring KQL.
 - **Cross-platform.** Runs anywhere the `bzrk` CLI is installed, Windows included.
 - **Safe by construction.** Fixed queries, input validation on the two free-text tools, no `shell=True`, and the Berserk token never touches this code.
 
-> **Unofficial integration.** This is a community-maintained project. It is not
-> affiliated with, sponsored by, or endorsed by the Berserk project. It talks to
-> Berserk only through the official `bzrk` CLI.
+> ## ⚠️ Disclaimer — please read
+>
+> This is an **unofficial, community-built** project. It is **not affiliated with,
+> sponsored by, endorsed by, or supported by the Berserk project or its maintainers.**
+> It interacts with Berserk only through the public `bzrk` CLI — no internal APIs, no
+> reverse engineering.
+>
+> Provided **as-is, with no warranty and no liability** for any use, outcome, downtime,
+> data loss, cost incurred, or other consequence (see [LICENSE](LICENSE)). You run it
+> at your own risk against your own infrastructure. If you point it at a production
+> Berserk, that's your call.
+>
+> Bugs, feature requests, and questions about *this* server: open an issue here.
+> Anything about Berserk itself goes to the Berserk project — not us.
 
 ## Why this exists
 
