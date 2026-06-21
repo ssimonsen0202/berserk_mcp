@@ -206,6 +206,7 @@ that way if you add tools.
 | `list_hosts` | All hosts reporting telemetry, by record count. |
 | `host_cpu` | Per-**host** CPU (1-minute load average). |
 | `host_memory` | Per-**host** memory used (GB). |
+| `container_hosts` | Which host/VM each container runs on (join key for container↔host questions). |
 | `logs_for_service` | Recent log lines for one service. |
 | `schema` | Live tables + column schema introspection. |
 | `search` | Run arbitrary KQL (escape hatch). |

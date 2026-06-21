@@ -194,12 +194,16 @@ what carry the cheap model — which validates the MCP's core thesis.
   averages and percentages correctly every time; the only risk was picking the wrong
   tool, which is exactly what the Layer-A router eval isolates cheaply.
 
-### MCP gap noted
+### MCP gap noted → addressed
 
 The multi-step join ("is the busiest VM also running the top container?") required mapping
-a container to its host — which **no current tool exposes**. The model inferred it from
-the `berserk-*` naming (correct here, not guaranteed). A future `container_hosts` tool, or
-adding `host` to `top_cpu` output, would make such joins reliable.
+a container to its host — which **no tool exposed** at eval time. The model inferred it from
+the `berserk-*` naming (correct here, not guaranteed).
+
+**Fixed in v1.4.0:** added a `container_hosts` tool that reads the mapping directly from the
+telemetry (`resource['container.name']` + `resource['host.name']` on the same rows), so the
+join is data-backed rather than name-inferred. Pending one live check that container metric
+rows actually carry `resource['host.name']` (run `bzrk-q` with the tool's query).
 
 ### Follow-ups
 

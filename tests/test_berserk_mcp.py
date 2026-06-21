@@ -80,6 +80,19 @@ class BerserkMcpTest(unittest.TestCase):
             "| summarize load_1m=avg(value) by host=tostring(resource['host.name']) "
             "| sort by load_1m desc",
         )
+        self.assertEqual(
+            bm.Q_CONTAINER_HOSTS,
+            "default | where isnotempty(resource['container.name']) "
+            "| summarize last_seen=max(timestamp) by "
+            "container=tostring(resource['container.name']), host=tostring(resource['host.name']) "
+            "| sort by host asc, container asc",
+        )
+
+    def test_container_hosts_callable(self):
+        text, err = bm.handle_call("container_hosts", {})
+        self.assertFalse(err)
+        self.assertEqual(self.calls[-1][3], bm.Q_CONTAINER_HOSTS)
+        self.assertEqual(self.calls[-1][-1], "1h ago")
 
     def test_all_simple_tools_callable(self):
         for name in bm.SIMPLE:

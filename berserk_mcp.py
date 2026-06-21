@@ -30,7 +30,7 @@ import re
 import os
 from pathlib import Path
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 # ---------- configuration (env-overridable) ----------
 BZRK_BIN = os.environ.get("BZRK_BIN", "bzrk")
@@ -116,6 +116,12 @@ Q_HOST_MEM = (
     f"| where tostring(attributes['state']) == 'used' "
     f"| summarize used_gb=avg(value)/1073741824 by host=tostring(resource['host.name']) "
     f"| sort by used_gb desc"
+)
+Q_CONTAINER_HOSTS = (
+    f"{T} | where isnotempty(resource['container.name']) "
+    f"| summarize last_seen=max(timestamp) by "
+    f"container=tostring(resource['container.name']), host=tostring(resource['host.name']) "
+    f"| sort by host asc, container asc"
 )
 Q_CC_RECENT = (
     f"{CC} | project ts=timestamp, typ=tostring(attributes['claude.type']), "
@@ -254,6 +260,7 @@ SIMPLE = {
     "list_hosts": (Q_HOSTS, "1h ago"),
     "host_cpu": (Q_HOST_CPU, "30m ago"),
     "host_memory": (Q_HOST_MEM, "30m ago"),
+    "container_hosts": (Q_CONTAINER_HOSTS, "1h ago"),
     "claude_recent": (Q_CC_RECENT, "1h ago"),
     "claude_sessions": (Q_CC_SESSIONS, "6h ago"),
     "claude_tools": (Q_CC_TOOLS, "6h ago"),
@@ -269,6 +276,7 @@ TOOLS = [
     {"name": "list_hosts", "description": "All hosts reporting telemetry, by record count.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "host_cpu", "description": "Average CPU load (1-minute load average) per host. Use this for per-host CPU questions (top_cpu is per-CONTAINER).", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "host_memory", "description": "Used memory in GB per host. Use this for per-host memory questions (top_memory is per-CONTAINER).", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "container_hosts", "description": "Map each container to the host/VM it runs on. Use to answer 'which host runs container X' or to JOIN per-container metrics (top_cpu/top_memory) with per-host metrics (host_cpu/host_memory) — don't infer the host from the container's name.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "logs_for_service", "description": "Recent log lines for a specific service e.g. 'nginx', 'postgres'.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "service.name value"}}, **_since()), "required": ["service"]}},
     {"name": "schema", "description": "Show Berserk tables + column schema (live introspection).", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "search", "description": "Run an arbitrary Kusto/KQL query against the Berserk table. Use when the other tools do not fit; once it works, persist it with save_query.", "inputSchema": {"type": "object", "properties": dict({"kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'"}}, **_since()), "required": ["kql"]}},
@@ -307,6 +315,7 @@ TITLES = {
     "list_hosts": "List Hosts",
     "host_cpu": "Per-Host CPU Load",
     "host_memory": "Per-Host Memory",
+    "container_hosts": "Container → Host Map",
     "logs_for_service": "Service Logs",
     "schema": "Schema Introspection",
     "search": "Run KQL",
