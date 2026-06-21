@@ -49,6 +49,85 @@ a one-off query into a permanent, named tool.
 | A generic "text-to-KQL" MCP | Still *authors* queries → same guessing problem, one layer up. |
 | **berserk-mcp** | Fixed, verified queries → deterministic answers, even from a 7B local model. |
 
+### How the lanes talk to each other and to Berserk
+
+```mermaid
+flowchart TB
+  classDef user      fill:#0d1117,stroke:#58a6ff,color:#c9d1d9
+  classDef cheap     fill:#0d3a1d,stroke:#3fb950,color:#c9d1d9
+  classDef deep      fill:#3a1d0d,stroke:#d29922,color:#c9d1d9
+  classDef mcp       fill:#161b22,stroke:#8b949e,color:#c9d1d9
+  classDef berserk   fill:#1d1d3a,stroke:#a371f7,color:#c9d1d9
+  classDef store     fill:#0d1117,stroke:#8b949e,color:#c9d1d9,stroke-dasharray:3 3
+
+  User([User · Slack bot · agent framework]):::user
+
+  subgraph H["MCP Host  (Claude Code · Claude Desktop · LangChain · ChatOps bot)"]
+    direction TB
+    Cheap["⚡ DEFAULT lane<br/>cheap / local model<br/>gpt-4.1-mini · Qwen2.5-7B · Haiku<br/>only picks tools + time windows"]:::cheap
+    Deep["🧠 @deep / scheduled lane<br/>capable model<br/>sonnet · GPT-class<br/>authors + verifies KQL"]:::deep
+  end
+
+  subgraph M["berserk-mcp  (stdio · JSON-RPC 2.0 · zero-dep stdlib Python)"]
+    direction TB
+    Tools["Fixed tools — verified KQL<br/>top_cpu · errors_by_service · host_cpu<br/>logs_for_service · claude_*"]:::mcp
+    Disc["Discovery tools<br/>list_metrics · discover_schema<br/>container_hosts · list_services · schema"]:::mcp
+    Learn["Learning loop<br/>search → save_query → run_saved<br/>verify-before-persist · 500 cap"]:::mcp
+    Store[("learned.json<br/>~/.config/berserk-mcp")]:::store
+  end
+
+  Bzrk["bzrk CLI<br/>bearer token lives only in bzrk's own 0600 config<br/>MCP never reads or stores it"]:::berserk
+
+  subgraph B["Your Berserk instance"]
+    direction TB
+    Gw["Berserk gateway · KQL engine"]:::berserk
+    Tbl[("default table<br/>OTLP logs · metrics · traces")]:::berserk
+  end
+
+  User -- "natural-language Q" --> Cheap
+  User -- "@deep prompt · once-a-day cron" --> Deep
+
+  Cheap -- "tools/call — one of ~20 fixed tools" --> Tools
+  Cheap -- "list_metrics · discover_schema" --> Disc
+  Cheap -- "run_saved name=&lt;X&gt;" --> Learn
+
+  Deep -- "discover → search KQL → save_query" --> Learn
+  Deep -- "list_metrics · discover_schema" --> Disc
+
+  Tools -. "argv list (no shell)" .-> Bzrk
+  Disc  -. "argv list (no shell)" .-> Bzrk
+  Learn -. "verifies query before persist" .-> Bzrk
+  Learn <-->|persist · reuse| Store
+
+  Bzrk -- "read-only KQL over bearer auth" --> Gw
+  Gw --> Tbl
+
+  Learn -. "saved queries reusable by Cheap forever" .-> Cheap
+```
+
+Two things the diagram makes obvious that the prose doesn't:
+
+1. **The bearer token never enters this code.** `bzrk` owns it in its own 0600 config; the MCP shells out via an argv list (no shell, no token in process memory, no token in logs).
+2. **The learning loop closes back into the cheap lane.** Pay the capable model once to author + verify a query, and the cheap lane runs it free forever via `run_saved` — that's the cost story in one arrow.
+
+### What this adds vs. default Berserk
+
+Berserk is a great human-facing observability backend on its own. This server doesn't
+replace any of it — it sits next to it and adds the agent-facing surface. Concretely:
+
+| Capability | Default Berserk | berserk-mcp |
+|---|---|---|
+| Ingest OTLP logs / metrics / traces | ✅ core | reuses |
+| KQL query engine + storage | ✅ core | reuses (read-only) |
+| Web UI + `bzrk` CLI for humans | ✅ core | reuses |
+| Token auth, profiles | ✅ core | reuses (`bzrk` holds the token) |
+| **MCP surface for LLMs / agents** | — | ✅ |
+| **Common questions answered without authoring KQL** | requires the model write correct KQL → small models fail | ✅ fixed verified tools (`top_cpu`, `errors_by_service`, …) |
+| **Telemetry-shape discovery** (what metrics? what keys? container → host?) | partial (`.show tables`, `getschema`) | ✅ `list_metrics` · `discover_schema` · `container_hosts` |
+| **Custom-query persistence** as named, reusable tools | n/a (CLI history only) | ✅ `save_query` (verify-before-persist) → `run_saved` |
+| **Two-lane cost model** (cheap default · on-demand `@deep`) | n/a (UX concern) | ✅ tool descriptions + annotations make this safe |
+| **KQL-injection guards** on free-text inputs | n/a (humans) | ✅ service-name allowlist · `claude_search` reject-list |
+
 ### Use cases it supports or enhances
 
 - **ChatOps.** A Slack / Discord / Teams bot answering "any errors in the last hour?"
