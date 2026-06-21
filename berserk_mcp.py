@@ -30,7 +30,7 @@ import re
 import os
 from pathlib import Path
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # ---------- configuration (env-overridable) ----------
 BZRK_BIN = os.environ.get("BZRK_BIN", "bzrk")
@@ -52,8 +52,20 @@ def _default_learned_path() -> Path:
 
 
 LEARNED_PATH = _default_learned_path()
-PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "berserk-q", "version": __version__}
+PROTOCOL_VERSION = "2025-06-18"
+SERVER_INFO = {"name": "berserk-q", "title": "Berserk Query", "version": __version__}
+
+# Surfaced to clients in the initialize response. Primes models (especially small
+# / local ones) to answer by *calling a specific tool* rather than authoring KQL.
+INSTRUCTIONS = (
+    "Answer observability questions by calling these tools — do not write KQL by hand. "
+    "Prefer the most specific tool (e.g. top_cpu, errors_by_service, logs_for_service, "
+    "host_cpu) over the generic `search`. Per-host metrics (host_cpu, host_memory) and "
+    "per-container metrics (top_cpu, top_memory) are different — pick by what's asked. "
+    "Every query tool takes an optional `since` like '15m ago' or '2h ago'. For a "
+    "recurring custom question, get it working with `search`, then `save_query` so it "
+    "can be re-run deterministically with `run_saved`."
+)
 
 
 def log(msg):
@@ -172,8 +184,27 @@ def run_bzrk(args, timeout=DEFAULT_TIMEOUT):
         return ("error running bzrk: " + str(e)), True
 
 
+# Accepts "now" or "<n> <unit> [ago]" — e.g. "15m ago", "2 hours ago", "1d".
+_SINCE_RE = re.compile(
+    r"^(now|\d+\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|"
+    r"h|hr|hrs|hour|hours|d|day|days|w|wk|week|weeks)(\s+ago)?)$",
+    re.IGNORECASE,
+)
+
+
+def valid_since(s):
+    """Lightweight validation of a time window. Not a security control (the value
+    is passed as an argv element, never a shell string) — purely a better error."""
+    return bool(_SINCE_RE.match(str(s).strip())) and len(str(s)) <= 32
+
+
 def bzrk_search(kql, since):
     """Run a KQL search on the configured profile and time window."""
+    if not valid_since(since):
+        return (
+            f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
+            f"'2d ago', or 'now'."
+        ), True
     return run_bzrk(["-P", PROFILE, "search", kql, "--since", since])
 
 
@@ -256,6 +287,45 @@ MGMT_TOOLS = [
 ]
 
 
+# ---------- tool metadata: titles + behavioral annotations (MCP 2025-06-18) ----------
+# Annotations are advisory hints that let clients reason about a tool's behavior.
+# Every tool here is read-only against Berserk (KQL cannot mutate) EXCEPT save_query,
+# which writes to the local learned-query store. list_saved only reads that local
+# store, so it carries openWorldHint=false.
+_READ = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+_READ_LOCAL = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
+_WRITE_LOCAL = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+
+_ANNOTATIONS = {"save_query": _WRITE_LOCAL, "list_saved": _READ_LOCAL}
+
+TITLES = {
+    "list_containers": "List Containers",
+    "top_cpu": "Top Containers by CPU",
+    "top_memory": "Top Containers by Memory",
+    "errors_by_service": "Errors by Service",
+    "list_services": "List Services",
+    "list_hosts": "List Hosts",
+    "host_cpu": "Per-Host CPU Load",
+    "host_memory": "Per-Host Memory",
+    "logs_for_service": "Service Logs",
+    "schema": "Schema Introspection",
+    "search": "Run KQL",
+    "claude_recent": "Claude Code: Recent Activity",
+    "claude_sessions": "Claude Code: Sessions",
+    "claude_tools": "Claude Code: Tool Histogram",
+    "claude_errors": "Claude Code: Tool Errors",
+    "claude_search": "Claude Code: Full-Text Search",
+    "list_saved": "List Saved Queries",
+    "run_saved": "Run Saved Query",
+    "save_query": "Save Query",
+}
+
+
+def annotations_for(name):
+    """Read-only by default; only the two store-management tools differ."""
+    return _ANNOTATIONS.get(name, _READ)
+
+
 def handle_call(name, arguments):
     """Dispatch a tools/call. Returns (text, is_error)."""
     # --- learning-loop management tools ---
@@ -334,14 +404,25 @@ def dispatch(req):
     if method == "initialize":
         pv = (req.get("params") or {}).get("protocolVersion") or PROTOCOL_VERSION
         return {"jsonrpc": "2.0", "id": id_, "result": {
-            "protocolVersion": pv, "capabilities": {"tools": {}}, "serverInfo": SERVER_INFO}}
+            "protocolVersion": pv,
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": SERVER_INFO,
+            "instructions": INSTRUCTIONS}}
     if method == "notifications/initialized":
         return None
     if method == "ping":
         return {"jsonrpc": "2.0", "id": id_, "result": {}}
     if method == "tools/list":
         allt = TOOLS + MGMT_TOOLS
-        tl = [{"name": t["name"], "description": t["description"], "inputSchema": t["inputSchema"]} for t in allt]
+        tl = []
+        for t in allt:
+            tl.append({
+                "name": t["name"],
+                "title": TITLES.get(t["name"], t["name"]),
+                "description": t["description"],
+                "inputSchema": t["inputSchema"],
+                "annotations": annotations_for(t["name"]),
+            })
         return {"jsonrpc": "2.0", "id": id_, "result": {"tools": tl}}
     if method == "tools/call":
         params = req.get("params") or {}

@@ -53,6 +53,19 @@ class BerserkMcpTest(unittest.TestCase):
         bm.handle_call("errors_by_service", {})
         self.assertEqual(self.calls[-1][-1], "1h ago")
 
+    def test_since_rejected(self):
+        text, err = bm.handle_call("top_cpu", {"since": "garbage; rm -rf /"})
+        self.assertTrue(err)
+        self.assertIn("invalid 'since'", text)
+        self.assertEqual(self.calls, [])  # must not have shelled out
+
+    def test_since_various_valid(self):
+        for s in ("now", "15m ago", "2 hours ago", "1d", "30 minutes ago", "3w ago"):
+            self.calls.clear()
+            text, err = bm.handle_call("top_cpu", {"since": s})
+            self.assertFalse(err, s)
+            self.assertEqual(self.calls[-1][-1], s)
+
     def test_locked_query_strings(self):
         """Guard the most-used KQL against accidental edits during refactors."""
         self.assertEqual(
@@ -154,22 +167,42 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertEqual(len(bm.load_learned()), 500)
 
     # ---- JSON-RPC protocol ----
-    def test_initialize(self):
-        resp = bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                            "params": {"protocolVersion": "2024-11-05"}})
+    def test_initialize_defaults_to_current_protocol(self):
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        self.assertEqual(resp["result"]["protocolVersion"], "2025-06-18")
         self.assertEqual(resp["result"]["serverInfo"]["name"], "berserk-q")
         self.assertIn("tools", resp["result"]["capabilities"])
+        self.assertTrue(resp["result"]["instructions"])
 
-    def test_tools_list_count(self):
+    def test_initialize_echoes_client_protocol(self):
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                            "params": {"protocolVersion": "2024-11-05"}})
+        self.assertEqual(resp["result"]["protocolVersion"], "2024-11-05")
+
+    def test_tools_list_count_and_metadata(self):
         resp = bm.dispatch({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         names = [t["name"] for t in resp["result"]["tools"]]
         self.assertEqual(len(names), len(bm.TOOLS) + len(bm.MGMT_TOOLS))
         self.assertIn("search", names)
         self.assertIn("save_query", names)
-        # every tool has a non-empty description and an inputSchema
+        # every tool has title, description, inputSchema, and annotations
         for t in resp["result"]["tools"]:
+            self.assertTrue(t["title"], t["name"])
             self.assertTrue(t["description"])
             self.assertEqual(t["inputSchema"]["type"], "object")
+            self.assertIn("readOnlyHint", t["annotations"])
+
+    def test_annotations_read_only_except_save(self):
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        ann = {t["name"]: t["annotations"] for t in resp["result"]["tools"]}
+        for n in ("top_cpu", "errors_by_service", "search", "run_saved",
+                  "claude_errors", "logs_for_service", "schema"):
+            self.assertTrue(ann[n]["readOnlyHint"], n)
+        # save_query writes the local store -> not read-only
+        self.assertFalse(ann["save_query"]["readOnlyHint"])
+        # list_saved only touches the local store -> not open-world
+        self.assertFalse(ann["list_saved"]["openWorldHint"])
+        self.assertTrue(ann["top_cpu"]["openWorldHint"])
 
     def test_tools_call_shape(self):
         resp = bm.dispatch({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
