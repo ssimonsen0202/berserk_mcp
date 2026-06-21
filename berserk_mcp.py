@@ -130,13 +130,24 @@ Q_METRICS = (
 )
 
 
-def q_discover(service=None):
-    """Sample recent rows (optionally for one service) so a model can learn the
-    structure of the data being ingested — its resource + attributes shape."""
+def q_discover_keys(service=None):
+    """Enumerate the keys present in `resource` (optionally for one service) with
+    counts — verified-working fallback for buildschema() which bzrk doesn't ship."""
     filt = f"| where resource['service.name'] == '{service}' " if service else ""
     return (
-        f"{T} {filt}| take 8 "
-        f"| project resource, attributes, metric_name, severity_text"
+        f"{T} | where isnotnull(resource) {filt}"
+        f"| project k=bag_keys(resource) | mv-expand k "
+        f"| summarize n=count() by key=tostring(k) | sort by n desc"
+    )
+
+
+def q_discover_sample(service=None):
+    """Sample real rows (optionally for one service) so a model can read the
+    nested resource + attributes values, not just key names."""
+    filt = f"| where resource['service.name'] == '{service}' " if service else ""
+    return (
+        f"{T} {filt}| take 6 "
+        f"| project resource, attributes, metric_name, severity_text, body"
     )
 Q_CC_RECENT = (
     f"{CC} | project ts=timestamp, typ=tostring(attributes['claude.type']), "
@@ -296,7 +307,7 @@ TOOLS = [
     {"name": "logs_for_service", "description": "Recent log lines for a specific service e.g. 'nginx', 'postgres'.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "service.name value"}}, **_since()), "required": ["service"]}},
     {"name": "schema", "description": "Show Berserk tables + column schema (live introspection).", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "list_metrics", "description": "List every metric name currently being ingested, with sample counts + last-seen. Use to DISCOVER what telemetry exists before writing a `search` query.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "discover_schema", "description": "Sample recent rows (optionally for one service) and return their full resource + attributes structure — use to learn the shape of a new or unknown data source before querying it. Pair with list_services / list_metrics. Once you work out a query with `search`, persist it with save_query so it becomes reusable.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "optional: limit the sample to one service.name"}}, **_since())}},
+    {"name": "discover_schema", "description": "Discover the shape of a data source: returns (1) every key present under `resource` with row counts, AND (2) a small sample of real rows so you can read the actual values. Use to learn an unknown or newly-ingested source before querying it. Optional `service` filter. Pair with list_services / list_metrics. Once you work out a query with `search`, persist it with save_query so it becomes reusable.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "optional: limit to one service.name"}}, **_since())}},
     {"name": "search", "description": "Run an arbitrary Kusto/KQL query against the Berserk table. Use when the other tools do not fit; once it works, persist it with save_query.", "inputSchema": {"type": "object", "properties": dict({"kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'"}}, **_since()), "required": ["kql"]}},
     # --- Claude Code activity (service.name == 'claude-code'); low-volume, keep windows bounded ---
     {"name": "claude_recent", "description": "Recent Claude Code activity (timestamp, type, role, model, tool names, error flag), newest first. Default window 1h.", "inputSchema": {"type": "object", "properties": _since()}},
@@ -404,7 +415,11 @@ def handle_call(name, arguments):
         if svc and not re.match(r"^[A-Za-z0-9._-]+$", str(svc)):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "1h ago"
-        return bzrk_search(q_discover(str(svc) if svc else None), since)
+        svc_str = str(svc) if svc else None
+        # Two perspectives: keys+counts (compact, sortable) and a row sample (real values).
+        out1, e1 = bzrk_search(q_discover_keys(svc_str), since)
+        out2, e2 = bzrk_search(q_discover_sample(svc_str), since)
+        return f"== resource keys (count) ==\n{out1}\n\n== sample rows ==\n{out2}", (e1 or e2)
     if name == "logs_for_service":
         svc = arguments.get("service")
         if not svc:

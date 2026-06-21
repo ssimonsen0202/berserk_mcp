@@ -102,14 +102,19 @@ class BerserkMcpTest(unittest.TestCase):
     def test_discover_schema_no_service(self):
         text, err = bm.handle_call("discover_schema", {})
         self.assertFalse(err)
-        kql = self.calls[-1][3]
-        self.assertIn("take 8", kql)
-        self.assertNotIn("service.name", kql)  # no filter when no service given
+        # makes TWO calls: bag_keys then row sample
+        self.assertEqual(len(self.calls), 2)
+        self.assertIn("bag_keys(resource)", self.calls[0][3])
+        self.assertIn("take 6", self.calls[1][3])
+        # neither call filters by service when none given
+        for c in self.calls:
+            self.assertNotIn("service.name", c[3])
 
     def test_discover_schema_with_service(self):
         text, err = bm.handle_call("discover_schema", {"service": "haproxy"})
         self.assertFalse(err)
-        self.assertIn("resource['service.name'] == 'haproxy'", self.calls[-1][3])
+        for c in self.calls:
+            self.assertIn("resource['service.name'] == 'haproxy'", c[3])
 
     def test_discover_schema_rejects_bad_service(self):
         text, err = bm.handle_call("discover_schema", {"service": "a'; drop"})
