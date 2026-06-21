@@ -1,0 +1,22 @@
+{"id": "containers_metrics", "prompt": "Which containers are currently sending metrics?", "expect_tool": "list_containers"}
+{"id": "top_cpu_container", "prompt": "Which container is using the most CPU right now?", "expect_tool": "top_cpu"}
+{"id": "top_mem_container", "prompt": "Show me the containers using the most memory.", "expect_tool": "top_memory"}
+{"id": "errors_1h", "prompt": "Have there been any errors in the last hour, and from which services?", "expect_tool": "errors_by_service"}
+{"id": "errors_24h", "prompt": "Which service produced the most errors over the past 24 hours?", "expect_tool": "errors_by_service", "expect_since_any": ["24", "1d", "day"]}
+{"id": "services", "prompt": "What services or sources are currently sending data into Berserk?", "expect_tool": "list_services"}
+{"id": "hosts", "prompt": "Which hosts are reporting telemetry?", "expect_tool": "list_hosts"}
+{"id": "host_cpu", "prompt": "What is the CPU load on each host over the last half hour?", "expect_tool": "host_cpu"}
+{"id": "host_mem", "prompt": "How much memory is each machine using?", "expect_tool": "host_memory"}
+{"id": "logs_postgres", "prompt": "Show me the most recent log lines for the postgres service.", "expect_tool": "logs_for_service", "expect_args": {"service": "postgres"}}
+{"id": "logs_nginx", "prompt": "What has nginx been logging lately?", "expect_tool": "logs_for_service", "expect_args": {"service": "nginx"}}
+{"id": "schema", "prompt": "What tables and columns are available to query?", "expect_tool": "schema"}
+{"id": "raw_kql", "prompt": "Run this KQL for me: default | summarize n=count() by severity_text", "expect_tool": "search"}
+{"id": "cc_recent", "prompt": "What has Claude Code been doing in the last hour?", "expect_tool": "claude_recent"}
+{"id": "cc_sessions", "prompt": "Give me a rollup of Claude Code sessions today.", "expect_tool": "claude_sessions"}
+{"id": "cc_tools", "prompt": "Which tools has Claude Code used the most?", "expect_tool": "claude_tools"}
+{"id": "cc_errors", "prompt": "Were there any failed tool calls in Claude Code recently?", "expect_tool": "claude_errors"}
+{"id": "cc_search", "prompt": "Search the Claude Code logs for the word timeout.", "expect_tool": "claude_search", "expect_args": {"term": "timeout"}}
+{"id": "ambiguous_load", "prompt": "Which of my VMs is the most overloaded on CPU?", "expect_tool": "host_cpu"}
+{"id": "ambiguous_hot_container", "prompt": "Find the single hottest container by processor usage.", "expect_tool": "top_cpu"}
+{"id": "list_saved", "prompt": "What custom queries have I saved so far?", "expect_tool": "list_saved"}
+{"id": "save_query", "prompt": "Save this as a query named daily_errors: default | where severity_text=='ERROR' | count", "expect_tool": "save_query"}

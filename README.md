@@ -85,7 +85,7 @@ uvx berserk-mcp
 From source:
 
 ```bash
-git clone https://github.com/USERNAME/berserk-mcp
+git clone https://github.com/ssi0202/berserk-mcp
 cd berserk-mcp
 pip install .
 ```

@@ -1,0 +1,207 @@
+{
+  "backend": "mock",
+  "model": "",
+  "repeats": 1,
+  "tool_accuracy": 0.9090909090909091,
+  "arg_accuracy": 0.8181818181818182,
+  "rows": [
+    {
+      "id": "containers_metrics",
+      "expect": "list_containers",
+      "got": "list_containers",
+      "tool_ok": true,
+      "arg_ok": true,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "top_cpu_container",
+      "expect": "top_cpu",
+      "got": "top_cpu",
+      "tool_ok": true,
+      "arg_ok": true,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "top_mem_container",
+      "expect": "top_memory",
+      "got": "top_memory",
+      "tool_ok": true,
+      "arg_ok": true,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "errors_1h",
+      "expect": "errors_by_service",
+      "got": "errors_by_service",
+      "tool_ok": true,
+      "arg_ok": true,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "errors_24h",
+      "expect": "errors_by_service",
+      "got": "errors_by_service",
+      "tool_ok": true,
+      "arg_ok": false,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "services",
+      "expect": "list_services",
+      "got": "list_services",
+      "tool_ok": true,
+      "arg_ok": true,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "hosts",
+      "expect": "list_hosts",
+      "got": "list_hosts",
+      "tool_ok": true,
+      "arg_ok": true,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "host_cpu",
+      "expect": "host_cpu",
+      "got": "host_cpu",
+      "tool_ok": true,
+      "arg_ok": true,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "host_mem",
+      "expect": "host_memory",
+      "got": "host_memory",
+      "tool_ok": true,
+      "arg_ok": true,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "logs_postgres",
+      "expect": "logs_for_service",
+      "got": "logs_for_service",
+      "tool_ok": true,
+      "arg_ok": false,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "logs_nginx",
+      "expect": "logs_for_service",
+      "got": "logs_for_service",
+      "tool_ok": true,
+      "arg_ok": false,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "schema",
+      "expect": "schema",
+      "got": "schema",
+      "tool_ok": true,
+      "arg_ok": true,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "raw_kql",
+      "expect": "search",
+      "got": "search",
+      "tool_ok": true,
+      "arg_ok": true,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "cc_recent",
+      "expect": "claude_recent",
+      "got": "claude_recent",
+      "tool_ok": true,
+      "arg_ok": true,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "cc_sessions",
+      "expect": "claude_sessions",
+      "got": "claude_sessions",
+      "tool_ok": true,
+      "arg_ok": true,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "cc_tools",
+      "expect": "claude_tools",
+      "got": "claude_tools",
+      "tool_ok": true,
+      "arg_ok": true,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "cc_errors",
+      "expect": "claude_errors",
+      "got": "claude_recent",
+      "tool_ok": false,
+      "arg_ok": true,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "cc_search",
+      "expect": "claude_search",
+      "got": "claude_search",
+      "tool_ok": true,
+      "arg_ok": false,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "ambiguous_load",
+      "expect": "host_cpu",
+      "got": "host_cpu",
+      "tool_ok": true,
+      "arg_ok": true,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "ambiguous_hot_container",
+      "expect": "top_cpu",
+      "got": "list_containers",
+      "tool_ok": false,
+      "arg_ok": true,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "list_saved",
+      "expect": "list_saved",
+      "got": "list_saved",
+      "tool_ok": true,
+      "arg_ok": true,
+      "args": {},
+      "ms": 0
+    },
+    {
+      "id": "save_query",
+      "expect": "save_query",
+      "got": "save_query",
+      "tool_ok": true,
+      "arg_ok": true,
+      "args": {},
+      "ms": 0
+    }
+  ]
+}
