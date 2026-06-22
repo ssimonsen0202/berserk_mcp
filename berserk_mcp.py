@@ -417,9 +417,13 @@ def handle_call(name, arguments):
         since = arguments.get("since") or "1h ago"
         svc_str = str(svc) if svc else None
         # Two perspectives: keys+counts (compact, sortable) and a row sample (real values).
+        # NOTE: bag_keys() is listed as a "missing function" in Berserk's docs but works
+        # in practice. The row sample uses only documented features (where/take/project),
+        # so we treat the call as a failure ONLY if BOTH halves fail — if bag_keys ever
+        # gets removed, the sample still answers.
         out1, e1 = bzrk_search(q_discover_keys(svc_str), since)
         out2, e2 = bzrk_search(q_discover_sample(svc_str), since)
-        return f"== resource keys (count) ==\n{out1}\n\n== sample rows ==\n{out2}", (e1 or e2)
+        return f"== resource keys (count) ==\n{out1}\n\n== sample rows ==\n{out2}", (e1 and e2)
     if name == "logs_for_service":
         svc = arguments.get("service")
         if not svc:
