@@ -19,7 +19,7 @@ python tests/test_berserk_mcp.py     # must pass before you touch anything
 You don't need a live Berserk to develop. The tests stub the `bzrk` CLI and verify
 the generated KQL, time defaults, injection guards, JSON-RPC protocol, and the
 learning loop offline. To run the server against a real Berserk locally, install
-the [`bzrk`](https://berserk.dev) CLI and log in to a profile — see the
+the [`bzrk`](https://docs.bzrk.dev) CLI and log in to a profile — see the
 [README](README.md#requirements).
 
 ## What kinds of contributions land easily

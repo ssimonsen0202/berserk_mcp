@@ -1,7 +1,7 @@
 # berserk-mcp
 
 An [MCP](https://modelcontextprotocol.io) server that lets an LLM answer
-[Berserk](https://berserk.dev) observability questions by **calling tools**
+[Berserk](https://bzrk.dev) observability questions by **calling tools**
 instead of hand-authoring KQL.
 
 > **Why this matters:** when you hand a model a raw query language, it guesses —
@@ -217,7 +217,7 @@ What tools has Claude Code used most this week, and were there any errors?
 ## Requirements
 
 - Python 3.8+
-- The [`bzrk`](https://berserk.dev) CLI, installed and authenticated to your Berserk instance (a working profile that `bzrk -P <profile> search "..."` can use). The bearer token lives in `bzrk`'s own config — this server never reads or stores it.
+- The [`bzrk`](https://docs.bzrk.dev) CLI, installed and authenticated to your Berserk instance (a working profile that `bzrk -P <profile> search "..."` can use). The bearer token lives in `bzrk`'s own config — this server never reads or stores it.
 
 ## Install
 
