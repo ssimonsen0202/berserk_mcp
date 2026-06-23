@@ -580,7 +580,9 @@ def handle_call(name, arguments):
         out, is_err = bzrk_search(kql, since)
         if is_err:
             return "NOT saved - the query failed when verified:\n" + out, True
-        items = [it for it in load_learned() if it["name"] != nm]
+        all_items = load_learned()
+        is_amendment = any(it["name"] == nm for it in all_items)
+        items = [it for it in all_items if it["name"] != nm]
         entry = {"name": nm, "description": desc, "kql": kql, "since": since}
         roles = normalize_roles(arguments.get("roles"))
         if roles:
@@ -588,6 +590,18 @@ def handle_call(name, arguments):
         items.append(entry)
         items = items[-500:]  # cap learned store to prevent unbounded growth
         save_learned(items)
+        log_entry = {
+            "ts": now_iso(),
+            "name": nm,
+            "description": desc,
+            "kql_preview": kql[:120],
+            "action": "updated" if is_amendment else "created",
+            "role": ACTIVE_ROLE,
+        }
+        amendments_path = Path(LEARNED_PATH).parent / "amendments_log.json"
+        amendments = load_json_list(amendments_path)
+        amendments.append(log_entry)
+        save_json_list(amendments_path, amendments)
         return "Saved '" + nm + "'. Reusable now via run_saved name=" + nm + " (verified, returned data).", False
 
     # --- discovery queue tools ---
