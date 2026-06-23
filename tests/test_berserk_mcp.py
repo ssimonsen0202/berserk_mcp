@@ -99,6 +99,12 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertFalse(err)
         self.assertEqual(self.calls[-1][3], bm.Q_METRICS)
 
+    def test_bzrk_query_perf_callable(self):
+        text, err = bm.handle_call("bzrk_query_perf", {})
+        self.assertFalse(err)
+        self.assertIn("$raw", self.calls[-1][3])
+        self.assertIn("bzrk.query.execution_duration", self.calls[-1][3])
+
     def test_discover_schema_no_service(self):
         text, err = bm.handle_call("discover_schema", {})
         self.assertFalse(err)
