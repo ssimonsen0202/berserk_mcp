@@ -274,5 +274,190 @@ class BerserkMcpTest(unittest.TestCase):
             self.assertNotIn(leak, blob, leak)
 
 
+class RoleFilterTest(unittest.TestCase):
+    """tool_visible / item_visible / tools-list filtering by ACTIVE_ROLE."""
+
+    def setUp(self):
+        self._orig_role = bm.ACTIVE_ROLE
+        self.calls = []
+
+        def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
+            self.calls.append(list(args))
+            return ("OK", False)
+
+        self._orig_run = bm.run_bzrk
+        bm.run_bzrk = fake_run_bzrk
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_learned = bm.LEARNED_PATH
+        self._orig_queue = bm.DISCOVERY_QUEUE_PATH
+        bm.LEARNED_PATH = Path(self._tmp.name) / "learned.json"
+        bm.DISCOVERY_QUEUE_PATH = Path(self._tmp.name) / "queue.json"
+
+    def tearDown(self):
+        bm.ACTIVE_ROLE = self._orig_role
+        bm.run_bzrk = self._orig_run
+        bm.LEARNED_PATH = self._orig_learned
+        bm.DISCOVERY_QUEUE_PATH = self._orig_queue
+        self._tmp.cleanup()
+
+    def _list_names(self, role):
+        bm.ACTIVE_ROLE = role
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        return {t["name"] for t in resp["result"]["tools"]}
+
+    def test_all_role_sees_everything(self):
+        names = self._list_names("all")
+        # sre and soc tagged tools must appear when role=all
+        self.assertIn("sre_error_rate", names)
+        self.assertIn("soc_high_severity_logs", names)
+        self.assertIn("claude_errors", names)
+
+    def test_sre_role_sees_sre_not_soc_or_claude(self):
+        names = self._list_names("sre")
+        self.assertIn("sre_error_rate", names)
+        self.assertIn("sre_service_health", names)
+        self.assertNotIn("soc_high_severity_logs", names)
+        self.assertNotIn("claude_errors", names)
+        # untagged tools (no "roles" key) always visible
+        self.assertIn("list_hosts", names)
+
+    def test_soc_role_sees_soc_not_sre_or_claude(self):
+        names = self._list_names("soc")
+        self.assertIn("soc_high_severity_logs", names)
+        self.assertIn("soc_timeline", names)
+        self.assertNotIn("sre_error_rate", names)
+        self.assertNotIn("claude_errors", names)
+
+    def test_claude_role_sees_claude_not_sre_or_soc(self):
+        names = self._list_names("claude")
+        self.assertIn("claude_errors", names)
+        self.assertNotIn("sre_error_rate", names)
+        self.assertNotIn("soc_high_severity_logs", names)
+
+    def test_untagged_tools_always_visible(self):
+        for role in ("sre", "soc", "claude", "ops"):
+            names = self._list_names(role)
+            for always in ("list_hosts", "errors_by_service", "search", "save_query"):
+                self.assertIn(always, names, f"role={role} missing {always}")
+
+    def test_list_saved_filters_by_role(self):
+        bm.ACTIVE_ROLE = "sre"
+        bm.save_learned([
+            {"name": "sre_q", "description": "SRE query", "kql": "x", "roles": ["sre"]},
+            {"name": "soc_q", "description": "SOC query", "kql": "y", "roles": ["soc"]},
+            {"name": "any_q", "description": "open query", "kql": "z"},
+        ])
+        text, err = bm.handle_call("list_saved", {})
+        self.assertFalse(err)
+        self.assertIn("sre_q", text)
+        self.assertNotIn("soc_q", text)
+        self.assertIn("any_q", text)
+
+    def test_save_query_attaches_role(self):
+        bm.ACTIVE_ROLE = "soc"
+        bm.handle_call("save_query", {"name": "myq", "description": "test", "kql": "x | take 1"})
+        items = bm.load_learned()
+        match = next((it for it in items if it["name"] == "myq"), None)
+        self.assertIsNotNone(match)
+        # normalize_roles falls back to ACTIVE_ROLE when no roles arg given
+        self.assertEqual(match.get("roles"), ["soc"])
+
+
+class DiscoveryToolTest(unittest.TestCase):
+    """request_discovery / discovery_status handlers."""
+
+    def setUp(self):
+        self.calls = []
+        self._orig_role = bm.ACTIVE_ROLE
+        bm.ACTIVE_ROLE = "sre"
+
+        def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
+            self.calls.append(list(args))
+            # Return a result that includes the target so visibility check passes
+            return (self._search_result, False)
+
+        self._search_result = "my-new-service"
+        self._orig_run = bm.run_bzrk
+        bm.run_bzrk = fake_run_bzrk
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_queue = bm.DISCOVERY_QUEUE_PATH
+        bm.DISCOVERY_QUEUE_PATH = Path(self._tmp.name) / "queue.json"
+
+    def tearDown(self):
+        bm.ACTIVE_ROLE = self._orig_role
+        bm.run_bzrk = self._orig_run
+        bm.DISCOVERY_QUEUE_PATH = self._orig_queue
+        self._tmp.cleanup()
+
+    def test_request_discovery_queues_service(self):
+        text, err = bm.handle_call("request_discovery", {"service": "my-new-service"})
+        self.assertFalse(err, text)
+        self.assertIn("queued", text)
+        queue = bm.load_json_list(bm.DISCOVERY_QUEUE_PATH)
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(queue[0]["source"], "my-new-service")
+        self.assertEqual(queue[0]["kind"], "service")
+        self.assertEqual(queue[0]["status"], "pending")
+
+    def test_request_discovery_deduplicates(self):
+        bm.handle_call("request_discovery", {"service": "my-new-service"})
+        bm.handle_call("request_discovery", {"service": "my-new-service"})
+        queue = bm.load_json_list(bm.DISCOVERY_QUEUE_PATH)
+        self.assertEqual(len(queue), 1)
+
+    def test_request_discovery_rejects_both_service_and_metric(self):
+        text, err = bm.handle_call("request_discovery", {"service": "s", "metric": "m"})
+        self.assertTrue(err)
+        self.assertIn("exactly one", text)
+
+    def test_request_discovery_rejects_neither(self):
+        text, err = bm.handle_call("request_discovery", {})
+        self.assertTrue(err)
+
+    def test_request_discovery_rejects_invalid_name(self):
+        text, err = bm.handle_call("request_discovery", {"service": "bad name!"})
+        self.assertTrue(err)
+
+    def test_request_discovery_rejects_unseen_source(self):
+        self._search_result = "other-service"  # target not in result
+        text, err = bm.handle_call("request_discovery", {"service": "my-new-service"})
+        self.assertTrue(err)
+        self.assertIn("not currently visible", text)
+
+    def test_discovery_status_empty(self):
+        text, err = bm.handle_call("discovery_status", {})
+        self.assertFalse(err)
+        self.assertIn("No discovery jobs", text)
+
+    def test_discovery_status_lists_jobs(self):
+        bm.handle_call("request_discovery", {"service": "my-new-service"})
+        text, err = bm.handle_call("discovery_status", {})
+        self.assertFalse(err)
+        self.assertIn("my-new-service", text)
+        self.assertIn("pending", text)
+
+    def test_sre_service_health_dispatches(self):
+        text, err = bm.handle_call("sre_service_health", {"service": "api-gateway"})
+        self.assertFalse(err)
+        kql_arg = self.calls[-1][3]
+        self.assertIn("api-gateway", kql_arg)
+
+    def test_soc_timeline_dispatches(self):
+        text, err = bm.handle_call("soc_timeline", {"service": "api-gateway"})
+        self.assertFalse(err)
+        kql_arg = self.calls[-1][3]
+        self.assertIn("api-gateway", kql_arg)
+
+    def test_sre_service_health_rejects_bad_service(self):
+        _, err = bm.handle_call("sre_service_health", {"service": "bad name!"})
+        self.assertTrue(err)
+
+    def test_soc_timeline_rejects_bad_service(self):
+        _, err = bm.handle_call("soc_timeline", {"service": "bad name!"})
+        self.assertTrue(err)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

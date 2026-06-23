@@ -28,15 +28,17 @@ import json
 import subprocess
 import re
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 # ---------- configuration (env-overridable) ----------
 BZRK_BIN = os.environ.get("BZRK_BIN", "bzrk")
 PROFILE = os.environ.get("BZRK_PROFILE", "local")
 TABLE = os.environ.get("BERSERK_TABLE", "default")
 DEFAULT_TIMEOUT = int(os.environ.get("BZRK_TIMEOUT", "120"))
+ACTIVE_ROLE = os.environ.get("BERSERK_MCP_ROLE", "all").strip().lower() or "all"
 
 
 def _default_learned_path() -> Path:
@@ -52,12 +54,12 @@ def _default_learned_path() -> Path:
 
 
 LEARNED_PATH = _default_learned_path()
+DISCOVERY_QUEUE_PATH = _default_learned_path().parent / "discovery_queue.json"
+KNOWN_SOURCES_PATH = _default_learned_path().parent / "known_sources.json"
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_INFO = {"name": "berserk-q", "title": "Berserk Query", "version": __version__}
 
-# Surfaced to clients in the initialize response. Primes models (especially small
-# / local ones) to answer by *calling a specific tool* rather than authoring KQL.
-INSTRUCTIONS = (
+_BASE_INSTRUCTIONS = (
     "Answer observability questions by calling these tools — do not write KQL by hand. "
     "Prefer the most specific tool (e.g. top_cpu, errors_by_service, logs_for_service, "
     "host_cpu) over the generic `search`. Per-host metrics (host_cpu, host_memory) and "
@@ -66,10 +68,60 @@ INSTRUCTIONS = (
     "recurring custom question, get it working with `search`, then `save_query` so it "
     "can be re-run deterministically with `run_saved`."
 )
+_ROLE_PREFIX = {
+    "sre": "You are in the SRE lane; focus on reliability, headroom, saturation, error rates, and rollback signals. ",
+    "soc": "You are in the SOC lane; focus on anomalies, spikes, first-seen behavior, repeated failures, and incident timelines. ",
+    "claude": "You are in the Claude Code lane; focus on Claude session activity, tool errors, and developer workflow traces. ",
+    "ops": "You are in the operations lane; focus on service health, hosts, containers, and actionable operator checks. ",
+}
+INSTRUCTIONS = _ROLE_PREFIX.get(ACTIVE_ROLE, "") + _BASE_INSTRUCTIONS
 
 
 def log(msg):
     print("[berserk-mcp] " + str(msg), file=sys.stderr, flush=True)
+
+
+def tool_visible(tool):
+    roles = tool.get("roles")
+    return not roles or ACTIVE_ROLE == "all" or ACTIVE_ROLE in roles
+
+
+def item_visible(item):
+    roles = item.get("roles")
+    return not roles or ACTIVE_ROLE == "all" or ACTIVE_ROLE in roles
+
+
+def normalize_roles(value):
+    if value is None:
+        return [ACTIVE_ROLE] if ACTIVE_ROLE not in {"all", ""} else None
+    if isinstance(value, str):
+        parts = [p.strip().lower() for p in value.split(",") if p.strip()]
+    elif isinstance(value, list):
+        parts = [str(p).strip().lower() for p in value if str(p).strip()]
+    else:
+        parts = [str(value).strip().lower()]
+    valid = [r for r in parts if r in {"sre", "soc", "claude", "ops"}]
+    return valid or None
+
+
+def now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def load_json_list(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_json_list(path, items):
+    tmp = str(path) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(items, f, indent=2)
+    os.replace(tmp, path)
 
 
 # ---------- verified queries (do not edit field names; they are confirmed
@@ -138,6 +190,72 @@ Q_QUERY_PERF = (
     f"p95=otel_histogram_percentile($raw, 95), "
     f"p99=otel_histogram_percentile($raw, 99)"
 )
+
+# --- SRE Tier-A queries (verified aggregates: countif/avg/max/min all confirmed in Berserk) ---
+Q_SRE_ERROR_RATE = (
+    f"{T} | where isnotnull(body) | where severity_text == 'ERROR' "
+    f"| summarize errors=count() by service=tostring(resource['service.name']), minute=bin(timestamp, 1m) "
+    f"| sort by minute desc, errors desc | take 120"
+)
+Q_SRE_HOST_HEADROOM = (
+    f"{T} | where metric_name in ('system.cpu.load_average.1m', 'system.memory.usage') "
+    f"| summarize samples=count(), avg_value=avg(value) "
+    f"by host=tostring(resource['host.name']), metric=tostring(metric_name), state=tostring(attributes['state']) "
+    f"| where metric == 'system.cpu.load_average.1m' or (metric == 'system.memory.usage' and state == 'used') "
+    f"| sort by host asc, metric asc"
+)
+Q_SRE_INGEST_HEALTH = (
+    f"{T} | where metric_name in ('bzrk.nursery.ingest_lag_seconds', 'bzrk.ingest.data_dropped') "
+    f"| summarize samples=count(), avg_value=avg(value), max_value=max(value), last_seen=max(timestamp) "
+    f"by host=tostring(resource['host.name']), metric=tostring(metric_name) "
+    f"| sort by host asc, metric asc"
+)
+Q_SRE_TOP_ERRORS = (
+    f"{T} | where isnotnull(body) | where severity_text == 'ERROR' "
+    f"| summarize hits=count(), last_seen=max(timestamp) "
+    f"by service=tostring(resource['service.name']), msg=substring(tostring(body), 0, 160) "
+    f"| sort by hits desc | take 40"
+)
+
+# --- SOC Tier-A queries ---
+Q_SOC_HIGH_SEV = (
+    f"{T} | where isnotnull(body) | where severity_text in ('CRITICAL', 'FATAL', 'ERROR') "
+    f"| project timestamp, severity_text, service=tostring(resource['service.name']), "
+    f"body=substring(tostring(body), 0, 240) "
+    f"| sort by timestamp desc | take 60"
+)
+Q_SOC_LOG_SPIKE = (
+    f"{T} | where isnotnull(body) "
+    f"| summarize hits=count() by service=tostring(resource['service.name']), minute=bin(timestamp, 1m) "
+    f"| sort by hits desc, minute desc | take 60"
+)
+Q_SOC_NEW_SERVICES = (
+    f"{T} | summarize first_seen=min(timestamp), last_seen=max(timestamp), events=count() "
+    f"by service=tostring(resource['service.name']) "
+    f"| sort by first_seen desc | take 40"
+)
+Q_SOC_REPEATED_ERRORS = (
+    f"{T} | where isnotnull(body) | where severity_text == 'ERROR' "
+    f"| summarize hits=count(), last_seen=max(timestamp) by msg=substring(tostring(body), 0, 160) "
+    f"| where hits > 5 | sort by hits desc | take 40"
+)
+
+
+def q_sre_service_health(svc: str) -> str:
+    return (
+        f"{T} | where resource['service.name'] == '{svc}' "
+        f"| summarize total=count(), logs=countif(isnotnull(body)), "
+        f"metrics=countif(isnotnull(metric_name)), errors=countif(severity_text == 'ERROR'), "
+        f"last_seen=max(timestamp)"
+    )
+
+
+def q_soc_timeline(svc: str) -> str:
+    return (
+        f"{T} | where resource['service.name'] == '{svc}' "
+        f"| project timestamp, severity_text, metric_name, body=substring(tostring(body), 0, 200) "
+        f"| sort by timestamp desc | take 100"
+    )
 
 
 def q_discover_keys(service=None):
@@ -299,6 +417,14 @@ SIMPLE = {
     "container_hosts": (Q_CONTAINER_HOSTS, "1h ago"),
     "list_metrics": (Q_METRICS, "1h ago"),
     "bzrk_query_perf": (Q_QUERY_PERF, "1h ago"),
+    "sre_error_rate": (Q_SRE_ERROR_RATE, "1h ago"),
+    "sre_host_headroom": (Q_SRE_HOST_HEADROOM, "30m ago"),
+    "sre_ingest_health": (Q_SRE_INGEST_HEALTH, "1h ago"),
+    "sre_top_error_messages": (Q_SRE_TOP_ERRORS, "1h ago"),
+    "soc_high_severity_logs": (Q_SOC_HIGH_SEV, "1h ago"),
+    "soc_log_spike": (Q_SOC_LOG_SPIKE, "1h ago"),
+    "soc_new_services": (Q_SOC_NEW_SERVICES, "7d ago"),
+    "soc_repeated_errors": (Q_SOC_REPEATED_ERRORS, "6h ago"),
     "claude_recent": (Q_CC_RECENT, "1h ago"),
     "claude_sessions": (Q_CC_SESSIONS, "6h ago"),
     "claude_tools": (Q_CC_TOOLS, "6h ago"),
@@ -321,18 +447,32 @@ TOOLS = [
     {"name": "bzrk_query_perf", "description": "Berserk query engine latency percentiles: p50, p95, p99 in µs. Use for 'how fast is Berserk?', 'query latency', or 'p50/p95/p99 execution time'. Uses otel_histogram_percentile($raw, N) — the native Berserk histogram aggregate.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "discover_schema", "description": "Discover the shape of a data source: returns (1) every key present under `resource` with row counts, AND (2) a small sample of real rows so you can read the actual values. Use to learn an unknown or newly-ingested source before querying it. Optional `service` filter. Pair with list_services / list_metrics. Once you work out a query with `search`, persist it with save_query so it becomes reusable.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "optional: limit to one service.name"}}, **_since())}},
     {"name": "search", "description": "Run an arbitrary Kusto/KQL query against the Berserk table. Use when the other tools do not fit; once it works, persist it with save_query.", "inputSchema": {"type": "object", "properties": dict({"kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'"}}, **_since()), "required": ["kql"]}},
+    # --- SRE role tools (reliability, headroom, saturation, error rates, rollback signals) ---
+    {"name": "sre_error_rate", "roles": ["sre"], "description": "SRE view of ERROR log events grouped by service and minute. Use for 'is the error rate climbing', 'which service is burning error budget', or 'what should we rollback first'.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "sre_host_headroom", "roles": ["sre"], "description": "SRE view of host CPU load and memory used side-by-side. Use for 'which host is hottest', 'where is headroom lowest', or 'which VM is nearest saturation'.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "sre_ingest_health", "roles": ["sre"], "description": "SRE view of Berserk ingest lag and dropped-data signals per host. Use for 'is ingest healthy', 'are we dropping telemetry', or 'is observability lagging'.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "sre_service_health", "roles": ["sre"], "description": "SRE health rollup for one service: total events, error count, logs, metrics, last seen. Use for 'is service X healthy' or 'rollback signal for X'.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "service.name value"}}, **_since()), "required": ["service"]}},
+    {"name": "sre_top_error_messages", "roles": ["sre"], "description": "SRE summary of the most repeated error messages by service. Use for 'what error is dominating', 'top error signatures', or 'which message to investigate first'.", "inputSchema": {"type": "object", "properties": _since()}},
+    # --- SOC role tools (anomalies, spikes, first-seen, repeated failures, incident timelines) ---
+    {"name": "soc_high_severity_logs", "roles": ["soc"], "description": "SOC view of recent CRITICAL/FATAL/ERROR logs with service and message text. Use for 'show critical events', 'recent incident logs', or 'what looks severe right now'.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "soc_log_spike", "roles": ["soc"], "description": "SOC view of services with the largest log volume per minute. Use for 'anything anomalous', 'which source is spiking', or 'suspicious burst of logs'.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "soc_new_services", "roles": ["soc"], "description": "SOC view of services ordered by first-seen time. Use for 'what is new', 'anything first-seen', or 'did a new source appear'.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "soc_repeated_errors", "roles": ["soc"], "description": "SOC view of error messages that appear more than 5 times — potential probes, loops, or persistent incidents. Use for 'what keeps repeating' or 'show recurring failures'.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "soc_timeline", "roles": ["soc"], "description": "SOC incident timeline for one service: timestamps, severity, metric names, and message snippets. Use for 'timeline for service X' or 'reconstruct incident for X'.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "service.name value"}}, **_since()), "required": ["service"]}},
     # --- Claude Code activity (service.name == 'claude-code'); low-volume, keep windows bounded ---
-    {"name": "claude_recent", "description": "Recent Claude Code activity (timestamp, type, role, model, tool names, error flag), newest first. Default window 1h.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "claude_sessions", "description": "Claude Code sessions rollup: events, first/last seen, assistant turns, tool turns, and error count per session. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "claude_tools", "description": "Claude Code tool-use histogram — how many times each tool (Bash, Edit, Read, ...) was used. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "claude_errors", "description": "Claude Code tool errors — failed tool results (is_error=true) with a body snippet. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "claude_search", "description": "Full-text search across Claude Code message and tool bodies for a substring. Default 6h.", "inputSchema": {"type": "object", "properties": dict({"term": {"type": "string", "description": "substring to find; may not contain quotes, pipe, backslash, or backtick"}}, **_since()), "required": ["term"]}},
+    {"name": "claude_recent", "roles": ["claude"], "description": "Recent Claude Code activity (timestamp, type, role, model, tool names, error flag), newest first. Default window 1h.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "claude_sessions", "roles": ["claude"], "description": "Claude Code sessions rollup: events, first/last seen, assistant turns, tool turns, and error count per session. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "claude_tools", "roles": ["claude"], "description": "Claude Code tool-use histogram — how many times each tool (Bash, Edit, Read, ...) was used. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "claude_errors", "roles": ["claude"], "description": "Claude Code tool errors — failed tool results (is_error=true) with a body snippet. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "claude_search", "roles": ["claude"], "description": "Full-text search across Claude Code message and tool bodies for a substring. Default 6h.", "inputSchema": {"type": "object", "properties": dict({"term": {"type": "string", "description": "substring to find; may not contain quotes, pipe, backslash, or backtick"}}, **_since()), "required": ["term"]}},
 ]
 
 MGMT_TOOLS = [
     {"name": "list_saved", "description": "List previously-saved custom queries (name + description). For a non-standard question, CHECK HERE FIRST before writing new KQL.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "run_saved", "description": "Run a previously-saved query by name (see list_saved). Deterministic - no KQL authoring.", "inputSchema": {"type": "object", "properties": dict({"name": {"type": "string", "description": "saved query name"}}, **_since()), "required": ["name"]}},
-    {"name": "save_query", "description": "Persist a WORKING KQL query as a reusable named query so it never has to be figured out again. Call this after you answer a non-standard question with a custom search query. The query is run once to verify it works; if it errors it is NOT saved.", "inputSchema": {"type": "object", "properties": dict({"name": {"type": "string", "description": "short snake_case name"}, "description": {"type": "string", "description": "what the query answers"}, "kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'"}}, **_since()), "required": ["name", "description", "kql"]}},
+    {"name": "save_query", "description": "Persist a WORKING KQL query as a reusable named query so it never has to be figured out again. Call this after you answer a non-standard question with a custom search query. The query is run once to verify it works; if it errors it is NOT saved.", "inputSchema": {"type": "object", "properties": dict({"name": {"type": "string", "description": "short snake_case name"}, "description": {"type": "string", "description": "what the query answers"}, "kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'"}, "roles": {"type": ["array", "string"], "description": "optional role(s) this query serves: sre, soc, claude, ops"}}, **_since()), "required": ["name", "description", "kql"]}},
+    {"name": "request_discovery", "description": "Queue a newly-added service or metric for author-lane integration. Validates the source is currently visible in Berserk, then records a job for the discovery worker to drain. Use when a user says 'I added / connected / started shipping SOURCE'.", "inputSchema": {"type": "object", "properties": {"service": {"type": "string", "description": "service.name to integrate"}, "metric": {"type": "string", "description": "metric name to integrate"}, "role_hint": {"type": "string", "description": "optional target role: sre, soc, claude, ops"}, "requested_by": {"type": "string", "description": "optional requester label"}, **_since()}}},
+    {"name": "discovery_status", "description": "List pending and completed discovery jobs for new services or metrics.", "inputSchema": {"type": "object", "properties": {}}},
 ]
 
 
@@ -345,7 +485,12 @@ _READ = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True,
 _READ_LOCAL = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
 _WRITE_LOCAL = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 
-_ANNOTATIONS = {"save_query": _WRITE_LOCAL, "list_saved": _READ_LOCAL}
+_ANNOTATIONS = {
+    "save_query": _WRITE_LOCAL,
+    "list_saved": _READ_LOCAL,
+    "request_discovery": _WRITE_LOCAL,
+    "discovery_status": _READ_LOCAL,
+}
 
 TITLES = {
     "list_containers": "List Containers",
@@ -361,6 +506,16 @@ TITLES = {
     "schema": "Schema Introspection",
     "list_metrics": "List Metrics",
     "bzrk_query_perf": "Berserk Query Performance",
+    "sre_error_rate": "SRE: Error Rate",
+    "sre_host_headroom": "SRE: Host Headroom",
+    "sre_ingest_health": "SRE: Ingest Health",
+    "sre_service_health": "SRE: Service Health",
+    "sre_top_error_messages": "SRE: Top Error Messages",
+    "soc_high_severity_logs": "SOC: High Severity Logs",
+    "soc_log_spike": "SOC: Log Spike",
+    "soc_new_services": "SOC: New Services",
+    "soc_repeated_errors": "SOC: Repeated Errors",
+    "soc_timeline": "SOC: Incident Timeline",
     "discover_schema": "Discover Schema",
     "search": "Run KQL",
     "claude_recent": "Claude Code: Recent Activity",
@@ -371,6 +526,8 @@ TITLES = {
     "list_saved": "List Saved Queries",
     "run_saved": "Run Saved Query",
     "save_query": "Save Query",
+    "request_discovery": "Request Discovery",
+    "discovery_status": "Discovery Status",
 }
 
 
@@ -383,7 +540,7 @@ def handle_call(name, arguments):
     """Dispatch a tools/call. Returns (text, is_error)."""
     # --- learning-loop management tools ---
     if name == "list_saved":
-        items = load_learned()
+        items = [it for it in load_learned() if item_visible(it)]
         if not items:
             return "No saved queries yet.", False
         return "Saved queries:\n" + "\n".join(
@@ -391,7 +548,7 @@ def handle_call(name, arguments):
         ), False
     if name == "run_saved":
         qn = sanitize_name(arguments.get("name", ""))
-        items = load_learned()
+        items = [it for it in load_learned() if item_visible(it)]
         match = next((it for it in items if it["name"] == qn), None)
         if not match:
             avail = ", ".join(it["name"] for it in items) or "(none)"
@@ -409,10 +566,54 @@ def handle_call(name, arguments):
         if is_err:
             return "NOT saved - the query failed when verified:\n" + out, True
         items = [it for it in load_learned() if it["name"] != nm]
-        items.append({"name": nm, "description": desc, "kql": kql, "since": since})
+        entry = {"name": nm, "description": desc, "kql": kql, "since": since}
+        roles = normalize_roles(arguments.get("roles"))
+        if roles:
+            entry["roles"] = roles
+        items.append(entry)
         items = items[-500:]  # cap learned store to prevent unbounded growth
         save_learned(items)
         return "Saved '" + nm + "'. Reusable now via run_saved name=" + nm + " (verified, returned data).", False
+
+    # --- discovery queue tools ---
+    if name == "request_discovery":
+        service = str(arguments.get("service") or "").strip()
+        metric = str(arguments.get("metric") or "").strip()
+        if bool(service) == bool(metric):
+            return "request_discovery needs exactly one of 'service' or 'metric'.", True
+        target = service or metric
+        if not re.match(r"^[A-Za-z0-9._-]+$", target):
+            return "invalid source name (allowed: letters, digits, '.', '_', '-')", True
+        kind = "service" if service else "metric"
+        since = arguments.get("since") or "1h ago"
+        check_kql = Q_SERVICES if kind == "service" else Q_METRICS
+        visible, is_err = bzrk_search(check_kql, since)
+        if is_err:
+            return "Could not verify source visibility:\n" + visible, True
+        if target not in visible:
+            return f"{target} is not currently visible in Berserk; verify it is ingesting before queueing.", True
+        role_hint = normalize_roles(arguments.get("role_hint"))
+        queue = load_json_list(DISCOVERY_QUEUE_PATH)
+        job = {
+            "source": target, "kind": kind,
+            "role_hint": role_hint[0] if role_hint else (ACTIVE_ROLE if ACTIVE_ROLE != "all" else ""),
+            "requested_by": str(arguments.get("requested_by") or "").strip() or "manual",
+            "status": "pending", "ts": now_iso(),
+        }
+        queue = [it for it in queue if not (it.get("source") == target and it.get("kind") == kind and it.get("status") == "pending")]
+        queue.append(job)
+        save_json_list(DISCOVERY_QUEUE_PATH, queue)
+        return f"{target} queued for integration ({kind}). The author lane will author, verify, and save a query for it.", False
+    if name == "discovery_status":
+        items = load_json_list(DISCOVERY_QUEUE_PATH)
+        if not items:
+            return "No discovery jobs queued.", False
+        lines = [
+            f"- {it.get('source','?')} [{it.get('kind','?')}] status={it.get('status','?')} "
+            f"role={it.get('role_hint','') or 'none'} requested_by={it.get('requested_by','?')} ts={it.get('ts','?')}"
+            for it in items
+        ]
+        return "Discovery jobs:\n" + "\n".join(lines), False
 
     # --- simple fixed-query tools ---
     if name in SIMPLE:
@@ -445,6 +646,22 @@ def handle_call(name, arguments):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "1h ago"
         return bzrk_search(q_logs(str(svc)), since)
+    if name == "sre_service_health":
+        svc = arguments.get("service")
+        if not svc:
+            return "missing required 'service'", True
+        if not re.match(r"^[A-Za-z0-9._-]+$", str(svc)):
+            return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
+        since = arguments.get("since") or "1h ago"
+        return bzrk_search(q_sre_service_health(str(svc)), since)
+    if name == "soc_timeline":
+        svc = arguments.get("service")
+        if not svc:
+            return "missing required 'service'", True
+        if not re.match(r"^[A-Za-z0-9._-]+$", str(svc)):
+            return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
+        since = arguments.get("since") or "6h ago"
+        return bzrk_search(q_soc_timeline(str(svc)), since)
     if name == "search":
         kql = arguments.get("kql")
         if not kql:
@@ -480,7 +697,7 @@ def dispatch(req):
     if method == "ping":
         return {"jsonrpc": "2.0", "id": id_, "result": {}}
     if method == "tools/list":
-        allt = TOOLS + MGMT_TOOLS
+        allt = [t for t in TOOLS + MGMT_TOOLS if tool_visible(t)]
         tl = []
         for t in allt:
             tl.append({
