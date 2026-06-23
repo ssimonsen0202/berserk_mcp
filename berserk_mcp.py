@@ -74,7 +74,22 @@ _ROLE_PREFIX = {
     "claude": "You are in the Claude Code lane; focus on Claude session activity, tool errors, and developer workflow traces. ",
     "ops": "You are in the operations lane; focus on service health, hosts, containers, and actionable operator checks. ",
 }
-INSTRUCTIONS = _ROLE_PREFIX.get(ACTIVE_ROLE, "") + _BASE_INSTRUCTIONS
+
+
+def _load_primer(role: str) -> str:
+    """Load primers/<role>.md adjacent to this script, or from BERSERK_MCP_PRIMERS_DIR."""
+    env_dir = os.environ.get("BERSERK_MCP_PRIMERS_DIR", "")
+    primer_dir = Path(env_dir) if env_dir else Path(__file__).parent / "primers"
+    if role in {"sre", "soc", "claude", "ops"}:
+        f = primer_dir / f"{role}.md"
+        try:
+            return f.read_text(encoding="utf-8").strip() + "\n\n"
+        except OSError:
+            pass
+    return ""
+
+
+INSTRUCTIONS = _load_primer(ACTIVE_ROLE) + _ROLE_PREFIX.get(ACTIVE_ROLE, "") + _BASE_INSTRUCTIONS
 
 
 def log(msg):
