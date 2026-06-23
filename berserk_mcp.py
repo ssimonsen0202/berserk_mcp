@@ -128,14 +128,15 @@ Q_METRICS = (
     f"| summarize samples=count(), last_seen=max(timestamp) by metric_name "
     f"| sort by samples desc"
 )
-# bzrk.query.execution_duration is a cumulative OTel histogram — value is null,
-# data lives in $raw. avg(value) always returns NaN; use $raw fields instead.
+# bzrk.query.execution_duration is a cumulative OTel histogram — value is null.
+# otel_histogram_percentile($raw, N) is a native Berserk aggregate that reads the
+# internal histogram representation directly; subscript access ($raw['count'] etc.)
+# still works for count/sum/max if needed.
 Q_QUERY_PERF = (
     f"{T} | where metric_name == 'bzrk.query.execution_duration' "
-    f"| summarize cnt=sum(todouble($raw['count'])), "
-    f"total=sum(todouble($raw['sum'])), "
-    f"mx=max(todouble($raw['max'])) "
-    f"| project avg_us=total/cnt, max_us=mx, total_queries=cnt"
+    f"| summarize p50=otel_histogram_percentile($raw, 50), "
+    f"p95=otel_histogram_percentile($raw, 95), "
+    f"p99=otel_histogram_percentile($raw, 99)"
 )
 
 
@@ -317,7 +318,7 @@ TOOLS = [
     {"name": "logs_for_service", "description": "Recent log lines for a specific service e.g. 'nginx', 'postgres'. Use for 'show me the errors/logs from X' — returns actual log text. For error COUNTS across all services, use errors_by_service first, then drill into a specific service here.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "service.name value"}}, **_since()), "required": ["service"]}},
     {"name": "schema", "description": "Show Berserk tables + column schema (live introspection).", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "list_metrics", "description": "List every metric name currently being ingested, with sample counts + last-seen. Use to DISCOVER what telemetry exists before writing a `search` query.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "bzrk_query_perf", "description": "Berserk query engine performance: total queries, average latency (µs), and max latency (µs). Use for 'how fast is Berserk?', 'query latency', or 'p95/avg execution time'. NOTE: this metric is a histogram — avg(value) returns NaN; this tool reads $raw fields correctly instead.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "bzrk_query_perf", "description": "Berserk query engine latency percentiles: p50, p95, p99 in µs. Use for 'how fast is Berserk?', 'query latency', or 'p50/p95/p99 execution time'. Uses otel_histogram_percentile($raw, N) — the native Berserk histogram aggregate.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "discover_schema", "description": "Discover the shape of a data source: returns (1) every key present under `resource` with row counts, AND (2) a small sample of real rows so you can read the actual values. Use to learn an unknown or newly-ingested source before querying it. Optional `service` filter. Pair with list_services / list_metrics. Once you work out a query with `search`, persist it with save_query so it becomes reusable.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "optional: limit to one service.name"}}, **_since())}},
     {"name": "search", "description": "Run an arbitrary Kusto/KQL query against the Berserk table. Use when the other tools do not fit; once it works, persist it with save_query.", "inputSchema": {"type": "object", "properties": dict({"kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'"}}, **_since()), "required": ["kql"]}},
     # --- Claude Code activity (service.name == 'claude-code'); low-volume, keep windows bounded ---
