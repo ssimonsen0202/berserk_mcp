@@ -31,7 +31,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "1.6.0"
+__version__ = "1.6.1"
 
 # ---------- configuration (env-overridable) ----------
 BZRK_BIN = os.environ.get("BZRK_BIN", "bzrk")
@@ -128,7 +128,10 @@ def load_json_list(path):
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
             return data if isinstance(data, list) else []
-    except Exception:
+    except FileNotFoundError:
+        return []
+    except (OSError, json.JSONDecodeError) as e:
+        log(f"load_json_list({path}): {type(e).__name__}: {e}")
         return []
 
 
@@ -396,7 +399,10 @@ def load_learned():
         with open(LEARNED_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
             return data if isinstance(data, list) else []
-    except Exception:
+    except FileNotFoundError:
+        return []
+    except (OSError, json.JSONDecodeError) as e:
+        log(f"load_learned({LEARNED_PATH}): {type(e).__name__}: {e}")
         return []
 
 
@@ -739,7 +745,11 @@ def dispatch(req):
         return {"jsonrpc": "2.0", "id": id_, "result": {"tools": tl}}
     if method == "tools/call":
         params = req.get("params") or {}
-        text, is_err = handle_call(params.get("name"), params.get("arguments") or {})
+        try:
+            text, is_err = handle_call(params.get("name"), params.get("arguments") or {})
+        except Exception as e:
+            log(f"handle_call crashed: {type(e).__name__}: {e}")
+            text, is_err = f"internal error: {type(e).__name__}", True
         return {"jsonrpc": "2.0", "id": id_, "result": {
             "content": [{"type": "text", "text": text}], "isError": is_err}}
     if "id" not in req:
@@ -763,8 +773,8 @@ def main():
             continue
         try:
             req = json.loads(line)
-        except Exception as e:
-            log("bad json: " + str(e))
+        except json.JSONDecodeError as e:
+            log(f"bad json from client ({type(e).__name__})")
             continue
         resp = dispatch(req)
         if resp is not None:
