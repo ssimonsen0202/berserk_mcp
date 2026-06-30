@@ -217,9 +217,11 @@ Q_SRE_ERROR_RATE = (
 )
 Q_SRE_HOST_HEADROOM = (
     f"{T} | where metric_name in ('system.cpu.load_average.1m', 'system.memory.usage') "
-    f"| summarize samples=count(), avg_value=avg(value) "
-    f"by host=tostring(resource['host.name']), metric=tostring(metric_name), state=tostring(attributes['state']) "
-    f"| where metric == 'system.cpu.load_average.1m' or (metric == 'system.memory.usage' and state == 'used') "
+    f"| extend val = iff(metric_name == 'system.memory.usage', value / 1073741824.0, value), "
+    f"unit = iff(metric_name == 'system.memory.usage', 'GB', 'load_avg') "
+    f"| where metric_name == 'system.cpu.load_average.1m' or tostring(attributes['state']) == 'used' "
+    f"| summarize samples=count(), avg_value=avg(val) "
+    f"by host=tostring(resource['host.name']), metric=tostring(metric_name), unit "
     f"| sort by host asc, metric asc"
 )
 Q_SRE_INGEST_HEALTH = (
