@@ -1,5 +1,7 @@
 # berserk-mcp
 
+[![CI](https://github.com/ssimonsen0202/berserk_mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ssimonsen0202/berserk_mcp/actions/workflows/ci.yml)
+
 An [MCP](https://modelcontextprotocol.io) server that lets an LLM answer
 [Berserk](https://bzrk.dev) observability questions by **calling tools**
 instead of hand-authoring KQL.
@@ -80,7 +82,7 @@ replace any of it — it sits next to it and adds the agent-facing surface. Conc
 | **Role-aware tool filtering** (SRE / SOC / Claude / Ops lanes) | — | ✅ `BERSERK_MCP_ROLE` env var |
 | **Role primers** injected at `initialize` | — | ✅ KQL rules, thresholds, routing guidance per lane |
 | **Telemetry-shape discovery** | partial (`.show tables`) | ✅ `list_metrics` · `discover_schema` · `container_hosts` |
-| **Custom-query persistence** as named, reusable tools | n/a (CLI history only) | ✅ `save_query` (verify-before-persist) → `run_saved` |
+| **Custom-query persistence** as named, reusable tools | UI has a Query Library, but Berserk documents no API or CLI verb to create, list, or share a saved query programmatically | ✅ `save_query` (verify-before-persist) → `run_saved`, agent-readable |
 | **Automated source onboarding** | — | ✅ `request_discovery` → worker → saved query, no KQL authoring needed |
 | **Query changelog / amendments log** | — | ✅ every `save_query` write tracked; worker posts Discord diff |
 | **Two-lane cost model** (cheap default · on-demand `@deep`) | — | ✅ tool descriptions + annotations make this safe |
@@ -538,6 +540,23 @@ The tests stub the `bzrk` CLI, so they verify: KQL content and lock strings, def
 time windows, role isolation (which tools appear in which lane), injection guards,
 `since` validation, tool annotations, JSON-RPC protocol, learning loop, discovery queue
 deduplication, and amendments log behaviour.
+
+### Live-verified, not just unit-tested
+
+The stubbed suite proves the server's logic is internally consistent; it can't prove the
+KQL actually executes correctly against a real cluster. Separately, every SRE and SOC
+tool has been run through this server's real dispatch path against a live Berserk
+deployment — and that process caught two real bugs unit tests alone couldn't surface:
+
+- `soc_new_services`'s default 7-day window had no shard-field filter, so it scanned
+  unindexed and timed out under real data volume. Narrowed to `24h ago`; confirmed
+  returning full results in ~28s.
+- `sre_host_headroom` returned raw bytes for memory instead of converting to GB (unlike
+  `host_memory`, which already did) — summarized by a model as "1.61 billion bytes."
+  Fixed: memory now reports in GB with an explicit `unit` column distinguishing it from
+  the CPU load-average rows.
+
+Both fixes are in the current release.
 
 ## Extending — add a new tool in five minutes
 
