@@ -444,7 +444,7 @@ SIMPLE = {
     "sre_top_error_messages": (Q_SRE_TOP_ERRORS, "1h ago"),
     "soc_high_severity_logs": (Q_SOC_HIGH_SEV, "1h ago"),
     "soc_log_spike": (Q_SOC_LOG_SPIKE, "1h ago"),
-    "soc_new_services": (Q_SOC_NEW_SERVICES, "7d ago"),
+    "soc_new_services": (Q_SOC_NEW_SERVICES, "24h ago"),
     "soc_repeated_errors": (Q_SOC_REPEATED_ERRORS, "6h ago"),
     "claude_recent": (Q_CC_RECENT, "1h ago"),
     "claude_sessions": (Q_CC_SESSIONS, "6h ago"),
