@@ -31,3 +31,15 @@ scrutiny:
 The Berserk bearer token is never read or stored by this code — it lives in
 `bzrk`'s own configuration. Token handling is therefore out of scope for this
 project (report those to the Berserk project).
+
+## Untrusted data
+
+Query results returned to the model — log bodies, error messages, discovered
+resource keys — come from whatever is being monitored and must be treated as
+**data, not instructions**. A crafted log line is a plausible indirect prompt
+injection vector.
+
+The main mitigation for persistence is `save_query`: replacing an existing
+saved query requires the caller to pass `overwrite=true` explicitly. Silent
+overwrite is refused, and every create/update is recorded in
+`amendments_log.json` as an audit trail.

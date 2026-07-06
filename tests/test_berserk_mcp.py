@@ -59,6 +59,17 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertIn("invalid 'since'", text)
         self.assertEqual(self.calls, [])  # must not have shelled out
 
+    def test_search_rejects_kql_not_starting_with_table(self):
+        text, err = bm.handle_call("search", {"kql": "--profile x"})
+        self.assertTrue(err)
+        self.assertIn("invalid KQL", text)
+        self.assertEqual(self.calls, [])  # must not have shelled out
+
+    def test_search_accepts_kql_starting_with_table(self):
+        text, err = bm.handle_call("search", {"kql": f"{bm.TABLE} | take 1"})
+        self.assertFalse(err)
+        self.assertEqual(self.calls[-1][3], f"{bm.TABLE} | take 1")
+
     def test_since_various_valid(self):
         for s in ("now", "15m ago", "2 hours ago", "1d", "30 minutes ago", "3w ago"):
             self.calls.clear()
@@ -202,6 +213,43 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertIn("NOT saved", text)
         self.assertEqual(bm.load_learned(), [])
 
+    def test_save_query_refuses_silent_overwrite(self):
+        bm.handle_call("save_query", {
+            "name": "dup", "description": "first", "kql": "default | count"})
+        text, err = bm.handle_call("save_query", {
+            "name": "dup", "description": "second", "kql": "default | take 1"})
+        self.assertTrue(err)
+        self.assertIn("already exists", text)
+        self.assertIn("overwrite=true", text)
+        # original entry must be untouched
+        items = bm.load_learned()
+        match = next(it for it in items if it["name"] == "dup")
+        self.assertEqual(match["description"], "first")
+
+    def test_save_query_overwrite_requires_real_boolean(self):
+        bm.handle_call("save_query", {
+            "name": "dup", "description": "first", "kql": "default | count"})
+        # The string "false" is truthy in Python but must not authorize overwrite.
+        text, err = bm.handle_call("save_query", {
+            "name": "dup", "description": "second", "kql": "default | take 1",
+            "overwrite": "false"})
+        self.assertTrue(err)
+        items = bm.load_learned()
+        match = next(it for it in items if it["name"] == "dup")
+        self.assertEqual(match["description"], "first")
+
+    def test_save_query_overwrite_true_replaces_entry(self):
+        bm.handle_call("save_query", {
+            "name": "dup", "description": "first", "kql": "default | count"})
+        text, err = bm.handle_call("save_query", {
+            "name": "dup", "description": "second", "kql": "default | take 1",
+            "overwrite": True})
+        self.assertFalse(err)
+        items = bm.load_learned()
+        match = next(it for it in items if it["name"] == "dup")
+        self.assertEqual(match["description"], "second")
+        self.assertEqual(match["kql"], "default | take 1")
+
     def test_run_saved_missing(self):
         text, err = bm.handle_call("run_saved", {"name": "nope"})
         self.assertTrue(err)
@@ -211,6 +259,19 @@ class BerserkMcpTest(unittest.TestCase):
         bm.save_learned([{"name": f"q{i}", "description": "x", "kql": "default | count"} for i in range(600)])
         bm.handle_call("save_query", {"name": "one_more", "description": "x", "kql": "default | count"})
         self.assertEqual(len(bm.load_learned()), 500)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    def test_saved_store_has_private_permissions(self):
+        bm.handle_call("save_query", {
+            "name": "perms", "description": "x", "kql": "default | count"})
+        self.assertEqual(oct(bm.LEARNED_PATH.stat().st_mode & 0o777), oct(0o600))
+        self.assertEqual(oct(bm.LEARNED_PATH.parent.stat().st_mode & 0o777), oct(0o700))
+
+    def test_amendments_log_capped_at_1000(self):
+        amendments_path = Path(bm.LEARNED_PATH).parent / "amendments_log.json"
+        bm.save_json_list(amendments_path, [{"ts": "x", "name": f"q{i}"} for i in range(1200)])
+        bm.handle_call("save_query", {"name": "one_more", "description": "x", "kql": "default | count"})
+        self.assertEqual(len(bm.load_json_list(amendments_path)), 1000)
 
     # ---- JSON-RPC protocol ----
     def test_initialize_defaults_to_current_protocol(self):
@@ -356,7 +417,7 @@ class RoleFilterTest(unittest.TestCase):
 
     def test_save_query_attaches_role(self):
         bm.ACTIVE_ROLE = "soc"
-        bm.handle_call("save_query", {"name": "myq", "description": "test", "kql": "x | take 1"})
+        bm.handle_call("save_query", {"name": "myq", "description": "test", "kql": f"{bm.TABLE} | take 1"})
         items = bm.load_learned()
         match = next((it for it in items if it["name"] == "myq"), None)
         self.assertIsNotNone(match)
@@ -374,10 +435,12 @@ class DiscoveryToolTest(unittest.TestCase):
 
         def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
             self.calls.append(list(args))
-            # Return a result that includes the target so visibility check passes
+            # request_discovery's visibility check now runs a `summarize
+            # n=count()` query and reads the trailing numeric token, so the
+            # canned result must look like a count, not a raw service name.
             return (self._search_result, False)
 
-        self._search_result = "my-new-service"
+        self._search_result = "1"
         self._orig_run = bm.run_bzrk
         bm.run_bzrk = fake_run_bzrk
 
@@ -421,10 +484,17 @@ class DiscoveryToolTest(unittest.TestCase):
         self.assertTrue(err)
 
     def test_request_discovery_rejects_unseen_source(self):
-        self._search_result = "other-service"  # target not in result
+        self._search_result = "0"  # count query reports zero matches
         text, err = bm.handle_call("request_discovery", {"service": "my-new-service"})
         self.assertTrue(err)
         self.assertIn("not currently visible", text)
+
+    def test_discovery_queue_capped_at_500(self):
+        bm.save_json_list(bm.DISCOVERY_QUEUE_PATH, [
+            {"source": f"svc{i}", "kind": "service", "status": "done"} for i in range(600)
+        ])
+        bm.handle_call("request_discovery", {"service": "my-new-service"})
+        self.assertEqual(len(bm.load_json_list(bm.DISCOVERY_QUEUE_PATH)), 500)
 
     def test_discovery_status_empty(self):
         text, err = bm.handle_call("discovery_status", {})

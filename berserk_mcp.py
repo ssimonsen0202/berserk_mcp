@@ -31,7 +31,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "1.6.1"
+__version__ = "1.6.2"
 
 # ---------- configuration (env-overridable) ----------
 BZRK_BIN = os.environ.get("BZRK_BIN", "bzrk")
@@ -123,6 +123,17 @@ def now_iso():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _ensure_private_dir(path):
+    """Create path's parent directory, chmod'd 0700, if it doesn't already exist.
+
+    mkdir(mode=...) alone is masked by the process umask and doesn't fix a
+    directory that already exists with looser permissions, so chmod
+    explicitly every time rather than relying on the mkdir call.
+    """
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(Path(path).parent, 0o700)
+
+
 def load_json_list(path):
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -136,9 +147,11 @@ def load_json_list(path):
 
 
 def save_json_list(path, items):
+    _ensure_private_dir(path)
     tmp = str(path) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(items, f, indent=2)
+    os.chmod(tmp, 0o600)
     os.replace(tmp, path)
 
 
@@ -364,6 +377,25 @@ def run_bzrk(args, timeout=DEFAULT_TIMEOUT):
         return ("error running bzrk: " + str(e)), True
 
 
+def count_result_is_zero(text):
+    """True if a `summarize n=count()`-style single-row result reports zero.
+
+    `summarize count()` always emits one row even when nothing matches (n=0),
+    so it never hits run_bzrk's "(no rows)" empty-stdout sentinel. Read the
+    last whitespace-separated token of the last non-empty line — the count —
+    regardless of whether bzrk renders it as a table, CSV, or plain value.
+    """
+    if not text or text.strip() == "(no rows)":
+        return True
+    lines = [ln for ln in text.strip().splitlines() if ln.strip()]
+    if not lines:
+        return True
+    tokens = lines[-1].split()
+    if tokens and tokens[-1].lstrip("-").isdigit():
+        return int(tokens[-1]) == 0
+    return False
+
+
 # Accepts "now" or "<n> <unit> [ago]" — e.g. "15m ago", "2 hours ago", "1d".
 _SINCE_RE = re.compile(
     r"^(now|\d+\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|"
@@ -378,8 +410,20 @@ def valid_since(s):
     return bool(_SINCE_RE.match(str(s).strip())) and len(str(s)) <= 32
 
 
+# Free-text KQL is passed as a positional argv element to the bzrk CLI. If it
+# began with '-', some CLI parsers would interpret it as an option rather than
+# the query (e.g. a stray "--profile x"), silently changing what runs. Require
+# every query to actually start with the configured table.
+_KQL_PREFIX_RE = re.compile(r"^\s*" + re.escape(TABLE) + r"\b")
+
+
 def bzrk_search(kql, since):
     """Run a KQL search on the configured profile and time window."""
+    if not _KQL_PREFIX_RE.match(str(kql)):
+        return (
+            f"invalid KQL: query must start with '{TABLE} | ...' "
+            f"(got: {str(kql)[:40]!r})"
+        ), True
     if not valid_since(since):
         return (
             f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
@@ -409,10 +453,11 @@ def load_learned():
 
 
 def save_learned(items):
-    LEARNED_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_private_dir(LEARNED_PATH)
     tmp = str(LEARNED_PATH) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(items, f, indent=2)
+    os.chmod(tmp, 0o600)
     os.replace(tmp, LEARNED_PATH)
 
 
@@ -493,7 +538,7 @@ TOOLS = [
 MGMT_TOOLS = [
     {"name": "list_saved", "description": "List previously-saved custom queries (name + description). For a non-standard question, CHECK HERE FIRST before writing new KQL.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "run_saved", "description": "Run a previously-saved query by name (see list_saved). Deterministic - no KQL authoring.", "inputSchema": {"type": "object", "properties": dict({"name": {"type": "string", "description": "saved query name"}}, **_since()), "required": ["name"]}},
-    {"name": "save_query", "description": "Persist a WORKING KQL query as a reusable named query so it never has to be figured out again. Call this after you answer a non-standard question with a custom search query. The query is run once to verify it works; if it errors it is NOT saved.", "inputSchema": {"type": "object", "properties": dict({"name": {"type": "string", "description": "short snake_case name"}, "description": {"type": "string", "description": "what the query answers"}, "kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'"}, "roles": {"type": ["array", "string"], "description": "optional role(s) this query serves: sre, soc, claude, ops"}}, **_since()), "required": ["name", "description", "kql"]}},
+    {"name": "save_query", "description": "Persist a WORKING KQL query as a reusable named query so it never has to be figured out again. Call this after you answer a non-standard question with a custom search query. The query is run once to verify it works; if it errors it is NOT saved. Replacing an existing saved query of the same name requires overwrite=true.", "inputSchema": {"type": "object", "properties": dict({"name": {"type": "string", "description": "short snake_case name"}, "description": {"type": "string", "description": "what the query answers"}, "kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'"}, "roles": {"type": ["array", "string"], "description": "optional role(s) this query serves: sre, soc, claude, ops"}, "overwrite": {"type": "boolean", "description": "must be true to replace an existing saved query of the same name"}}, **_since()), "required": ["name", "description", "kql"]}},
     {"name": "request_discovery", "description": "Queue a newly-added service or metric for author-lane integration. Validates the source is currently visible in Berserk, then records a job for the discovery worker to drain. Use when a user says 'I added / connected / started shipping SOURCE'.", "inputSchema": {"type": "object", "properties": {"service": {"type": "string", "description": "service.name to integrate"}, "metric": {"type": "string", "description": "metric name to integrate"}, "role_hint": {"type": "string", "description": "optional target role: sre, soc, claude, ops"}, "requested_by": {"type": "string", "description": "optional requester label"}, **_since()}}},
     {"name": "discovery_status", "description": "List pending and completed discovery jobs for new services or metrics.", "inputSchema": {"type": "object", "properties": {}}},
 ]
@@ -501,12 +546,12 @@ MGMT_TOOLS = [
 
 # ---------- tool metadata: titles + behavioral annotations (MCP 2025-06-18) ----------
 # Annotations are advisory hints that let clients reason about a tool's behavior.
-# Every tool here is read-only against Berserk (KQL cannot mutate) EXCEPT save_query,
-# which writes to the local learned-query store. list_saved only reads that local
-# store, so it carries openWorldHint=false.
+# Every tool here is read-only against Berserk (KQL cannot mutate) EXCEPT save_query
+# and request_discovery, which write to local stores (learned-query store / discovery
+# queue) rather than any external system, so both carry openWorldHint=false.
 _READ = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 _READ_LOCAL = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
-_WRITE_LOCAL = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+_WRITE_LOCAL = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
 
 _ANNOTATIONS = {
     "save_query": _WRITE_LOCAL,
@@ -590,6 +635,13 @@ def handle_call(name, arguments):
             return "NOT saved - the query failed when verified:\n" + out, True
         all_items = load_learned()
         is_amendment = any(it["name"] == nm for it in all_items)
+        # Require a real JSON boolean true — a string like "false" is truthy
+        # in Python and must not authorize an overwrite.
+        if is_amendment and arguments.get("overwrite") is not True:
+            return (
+                f"A saved query named '{nm}' already exists. Pass overwrite=true "
+                f"to replace it (this will be logged)."
+            ), True
         items = [it for it in all_items if it["name"] != nm]
         entry = {"name": nm, "description": desc, "kql": kql, "since": since}
         roles = normalize_roles(arguments.get("roles"))
@@ -609,6 +661,7 @@ def handle_call(name, arguments):
         amendments_path = Path(LEARNED_PATH).parent / "amendments_log.json"
         amendments = load_json_list(amendments_path)
         amendments.append(log_entry)
+        amendments = amendments[-1000:]  # cap to prevent unbounded growth
         save_json_list(amendments_path, amendments)
         return "Saved '" + nm + "'. Reusable now via run_saved name=" + nm + " (verified, returned data).", False
 
@@ -623,11 +676,18 @@ def handle_call(name, arguments):
             return "invalid source name (allowed: letters, digits, '.', '_', '-')", True
         kind = "service" if service else "metric"
         since = arguments.get("since") or "1h ago"
-        check_kql = Q_SERVICES if kind == "service" else Q_METRICS
+        # Exact-match count, not a substring check against the raw output —
+        # a short target would otherwise match as a substring of an unrelated
+        # service name. `target` is allowlist-validated above, so it is safe
+        # to interpolate into the single-quoted KQL literal.
+        if kind == "service":
+            check_kql = f"{T} | where resource['service.name'] == '{target}' | summarize n=count()"
+        else:
+            check_kql = f"{T} | where metric_name == '{target}' | summarize n=count()"
         visible, is_err = bzrk_search(check_kql, since)
         if is_err:
             return "Could not verify source visibility:\n" + visible, True
-        if target not in visible:
+        if count_result_is_zero(visible):
             return f"{target} is not currently visible in Berserk; verify it is ingesting before queueing.", True
         role_hint = normalize_roles(arguments.get("role_hint"))
         queue = load_json_list(DISCOVERY_QUEUE_PATH)
@@ -639,6 +699,7 @@ def handle_call(name, arguments):
         }
         queue = [it for it in queue if not (it.get("source") == target and it.get("kind") == kind and it.get("status") == "pending")]
         queue.append(job)
+        queue = queue[-500:]  # cap to prevent unbounded growth
         save_json_list(DISCOVERY_QUEUE_PATH, queue)
         return f"{target} queued for integration ({kind}). The author lane will author, verify, and save a query for it.", False
     if name == "discovery_status":
@@ -750,7 +811,10 @@ def dispatch(req):
         try:
             text, is_err = handle_call(params.get("name"), params.get("arguments") or {})
         except Exception as e:
-            log(f"handle_call crashed: {type(e).__name__}: {e}")
+            # Log the exception type only, not its message — the message can
+            # echo attacker-controlled argument content (e.g. a KeyError key)
+            # into stderr. Same rationale as the bad-JSON log path below.
+            log(f"handle_call crashed: {type(e).__name__}")
             text, is_err = f"internal error: {type(e).__name__}", True
         return {"jsonrpc": "2.0", "id": id_, "result": {
             "content": [{"type": "text", "text": text}], "isError": is_err}}
