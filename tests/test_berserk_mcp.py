@@ -529,5 +529,90 @@ class DiscoveryToolTest(unittest.TestCase):
         self.assertTrue(err)
 
 
+class ParserFactoryToolsTest(unittest.TestCase):
+    """MCP-level wiring for the parser-factory tools (P5): tools/list
+    metadata, dispatch, and basic error paths. Pipeline internals are
+    covered in tests/test_parser_factory.py."""
+
+    def setUp(self):
+        self.calls = []
+
+        def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
+            self.calls.append(list(args))
+            return ("OK\n1", False)
+
+        self._orig_run = bm.run_bzrk
+        bm.run_bzrk = fake_run_bzrk
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_learned = bm.LEARNED_PATH
+        self._orig_queue = bm.DISCOVERY_QUEUE_PATH
+        bm.LEARNED_PATH = Path(self._tmp.name) / "learned.json"
+        bm.DISCOVERY_QUEUE_PATH = Path(self._tmp.name) / "queue.json"
+
+    def tearDown(self):
+        bm.run_bzrk = self._orig_run
+        bm.LEARNED_PATH = self._orig_learned
+        bm.DISCOVERY_QUEUE_PATH = self._orig_queue
+        self._tmp.cleanup()
+
+    def test_tools_list_includes_new_tools_with_annotations(self):
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        ann = {t["name"]: t["annotations"] for t in resp["result"]["tools"]}
+        for n in ("detect_new_sources", "generate_parser", "run_discovery_worker", "review_generated"):
+            self.assertIn(n, ann)
+        for n in ("detect_new_sources", "generate_parser", "run_discovery_worker"):
+            self.assertTrue(ann[n]["openWorldHint"], n)
+            self.assertFalse(ann[n]["readOnlyHint"], n)
+        self.assertTrue(ann["review_generated"]["readOnlyHint"])
+
+    def test_generate_parser_rejects_both_service_and_metric(self):
+        text, err = bm.handle_call("generate_parser", {"service": "s", "metric": "m"})
+        self.assertTrue(err)
+        self.assertIn("exactly one", text)
+
+    def test_generate_parser_rejects_neither(self):
+        text, err = bm.handle_call("generate_parser", {})
+        self.assertTrue(err)
+
+    def test_generate_parser_rejects_invalid_name(self):
+        text, err = bm.handle_call("generate_parser", {"service": "bad name!"})
+        self.assertTrue(err)
+
+    def test_run_discovery_worker_empty_queue(self):
+        text, err = bm.handle_call("run_discovery_worker", {})
+        self.assertFalse(err)
+        self.assertIn("No pending discovery jobs", text)
+
+    def test_review_generated_lists_only_generated_entries(self):
+        bm.save_learned([
+            {"name": "manual_q", "description": "human", "kql": "default | take 1"},
+            {"name": "gen_q", "description": "auto", "kql": "default | take 1",
+             "generated_by": {"provider": "hermes", "model": "m", "ts": "t", "job_source": "x"}},
+        ])
+        text, err = bm.handle_call("review_generated", {})
+        self.assertFalse(err)
+        self.assertIn("gen_q", text)
+        self.assertNotIn("manual_q", text)
+
+    def test_review_generated_empty(self):
+        text, err = bm.handle_call("review_generated", {})
+        self.assertFalse(err)
+        self.assertIn("No generated queries", text)
+
+    def test_review_generated_by_name(self):
+        bm.save_learned([
+            {"name": "gen_q", "description": "auto", "kql": "default | take 1",
+             "generated_by": {"provider": "hermes", "model": "m", "ts": "t", "job_source": "x"}},
+        ])
+        text, err = bm.handle_call("review_generated", {"name": "gen_q"})
+        self.assertFalse(err)
+        self.assertIn("default | take 1", text)
+
+    def test_detect_new_sources_dispatches(self):
+        text, err = bm.handle_call("detect_new_sources", {})
+        self.assertFalse(err)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

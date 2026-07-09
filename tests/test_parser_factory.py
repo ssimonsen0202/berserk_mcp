@@ -1,0 +1,403 @@
+"""Tests for parser_factory (LLM-driven parser generation, spec
+docs/parser-factory-spec-2026-07-09.md). Pure stdlib (unittest); no live
+Berserk or LLM backend needed.
+
+Strategy: monkeypatch bm.run_bzrk the same way test_berserk_mcp.py does
+(parser_factory calls berserk_mcp.bzrk_search, which calls run_bzrk as a
+module global looked up at call time, so patching bm.run_bzrk propagates
+through). LLM calls are faked by monkeypatching parser_factory's
+_http_post_json / _http_get_json seams directly.
+"""
+import json
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import berserk_mcp as bm  # noqa: E402
+import parser_factory as pf  # noqa: E402
+
+
+class ParserFactoryTestBase(unittest.TestCase):
+    """Shared fixture: fake bzrk backend + isolated stores + fake LLM HTTP."""
+
+    def setUp(self):
+        self.calls = []
+        self.responses = {}  # KQL substring -> (text, is_error)
+        self.default_response = ("OK\n1", False)
+
+        def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
+            self.calls.append(list(args))
+            kql = args[3] if len(args) > 3 else ""
+            for substr, resp in self.responses.items():
+                if substr in kql:
+                    return resp
+            return self.default_response
+
+        self._orig_run = bm.run_bzrk
+        bm.run_bzrk = fake_run_bzrk
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_learned = bm.LEARNED_PATH
+        self._orig_queue = bm.DISCOVERY_QUEUE_PATH
+        bm.LEARNED_PATH = Path(self._tmp.name) / "learned.json"
+        bm.DISCOVERY_QUEUE_PATH = Path(self._tmp.name) / "queue.json"
+
+        self.llm_responses = []  # list of (json_or_None, err_or_None), consumed in order
+        self._llm_calls = []  # (url, headers, payload)
+        self._llm_get_calls = []
+
+        def fake_post(url, headers, payload, timeout=pf.LLM_TIMEOUT):
+            self._llm_calls.append((url, headers, payload))
+            if self.llm_responses:
+                return self.llm_responses.pop(0)
+            return None, "no fake response configured"
+
+        def fake_get(url, headers, timeout=pf.LLM_TIMEOUT):
+            self._llm_get_calls.append((url, headers))
+            return {"data": [{"id": "discovered-model"}]}, None
+
+        self._orig_post = pf._http_post_json
+        self._orig_get = pf._http_get_json
+        pf._http_post_json = fake_post
+        pf._http_get_json = fake_get
+
+        self._env_keys = [
+            "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "HERMES_API_KEY",
+            "BERSERK_LLM_LADDER", "BERSERK_LLM_HERMES_MODEL",
+            "BERSERK_LLM_OPENAI_MODEL", "BERSERK_LLM_ANTHROPIC_MODEL",
+            "BERSERK_LLM_HERMES_URL",
+        ]
+        self._orig_env = {k: os.environ.get(k) for k in self._env_keys}
+        for k in self._env_keys:
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        bm.run_bzrk = self._orig_run
+        bm.LEARNED_PATH = self._orig_learned
+        bm.DISCOVERY_QUEUE_PATH = self._orig_queue
+        pf._http_post_json = self._orig_post
+        pf._http_get_json = self._orig_get
+        for k, v in self._orig_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self._tmp.cleanup()
+
+    # convenience for the profiling responses every generation test needs
+    def _stub_profile_responses(self):
+        self.responses["bag_keys(resource)"] = ("key n\nservice.name 5\n", False)
+        self.responses["take 6"] = ("resource attributes metric_name severity_text body\n", False)
+        self.responses[f"{bm.TABLE} | getschema"] = ("col1 string\n", False)
+
+
+# ---------- P1: LLM client with escalation ladder ----------
+class LlmClientTest(ParserFactoryTestBase):
+    def test_anthropic_no_key_returns_error_without_http_call(self):
+        text, err = pf.llm_complete("anthropic", "s", "u")
+        self.assertIsNone(text)
+        self.assertEqual(err, "anthropic: no ANTHROPIC_API_KEY")
+        self.assertEqual(self._llm_calls, [])
+
+    def test_openai_returns_message_content(self):
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        self.llm_responses = [({"choices": [{"message": {"content": "hello"}}]}, None)]
+        text, err = pf.llm_complete("openai", "s", "u")
+        self.assertIsNone(err)
+        self.assertEqual(text, "hello")
+
+    def test_hermes_returns_message_content(self):
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        self.llm_responses = [({"choices": [{"message": {"content": "hi hermes"}}]}, None)]
+        text, err = pf.llm_complete("hermes", "s", "u")
+        self.assertIsNone(err)
+        self.assertEqual(text, "hi hermes")
+
+    def test_hermes_discovers_model_when_unset(self):
+        # no BERSERK_LLM_HERMES_MODEL -> should GET /api/models once
+        self.llm_responses = [({"choices": [{"message": {"content": "ok"}}]}, None)]
+        text, err = pf.llm_complete("hermes", "s", "u")
+        self.assertIsNone(err)
+        self.assertEqual(len(self._llm_get_calls), 1)
+        self.assertEqual(self._llm_calls[0][2]["model"], "discovered-model")
+
+    def test_http_error_propagates_without_key_material(self):
+        os.environ["OPENAI_API_KEY"] = "sk-secret-value"
+        self.llm_responses = [(None, "HTTP 500: boom")]
+        text, err = pf.llm_complete("openai", "s", "u")
+        self.assertIsNone(text)
+        self.assertIn("HTTP 500", err)
+        self.assertNotIn("sk-secret-value", err)
+
+    def test_ladder_default(self):
+        self.assertEqual(pf.ladder(), ["hermes", "openai", "anthropic"])
+
+    def test_ladder_custom(self):
+        os.environ["BERSERK_LLM_LADDER"] = "anthropic"
+        self.assertEqual(pf.ladder(), ["anthropic"])
+
+
+# ---------- P2: source profiling and schema knowledge store ----------
+class SourceProfileTest(ParserFactoryTestBase):
+    def test_build_source_profile_truncates_and_persists_private_files(self):
+        self.responses["bag_keys(resource)"] = ("key n\nservice.name 5\nhost.name 3\n", False)
+        self.responses["take 6"] = ("x" * 10000, False)
+        self.responses[f"{bm.TABLE} | getschema"] = ("y" * 5000, False)
+
+        profile, err = pf.build_source_profile("mysvc", "service", "24h ago")
+        self.assertIsNone(err)
+        self.assertEqual(profile["resource_keys"], ["service.name", "host.name"])
+        self.assertLessEqual(len(profile["sample_excerpt"]), pf.SAMPLE_EXCERPT_CAP)
+        self.assertLessEqual(len(profile["getschema_excerpt"]), pf.GETSCHEMA_EXCERPT_CAP)
+
+        schema_path = Path(bm.LEARNED_PATH).parent / pf.SCHEMA_KNOWLEDGE_PATH_NAME
+        self.assertTrue(schema_path.exists())
+        knowledge = json.loads(schema_path.read_text())
+        self.assertIn("service:mysvc", knowledge["sources"])
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    def test_schema_knowledge_store_has_private_permissions(self):
+        self._stub_profile_responses()
+        pf.build_source_profile("x", "service", "1h ago")
+        schema_path = Path(bm.LEARNED_PATH).parent / pf.SCHEMA_KNOWLEDGE_PATH_NAME
+        self.assertEqual(oct(schema_path.stat().st_mode & 0o777), oct(0o600))
+        self.assertEqual(oct(schema_path.parent.stat().st_mode & 0o777), oct(0o700))
+
+    def test_all_subqueries_error_returns_none_and_writes_nothing(self):
+        self.default_response = ("boom", True)
+        profile, err = pf.build_source_profile("x", "service", "1h ago")
+        self.assertIsNone(profile)
+        self.assertTrue(err)
+        schema_path = Path(bm.LEARNED_PATH).parent / pf.SCHEMA_KNOWLEDGE_PATH_NAME
+        self.assertFalse(schema_path.exists())
+
+
+# ---------- P3: new-source detection ----------
+class DetectNewSourcesTest(ParserFactoryTestBase):
+    def _detect(self, **kw):
+        return pf.detect_new_sources(
+            since=kw.pop("since", "24h ago"),
+            auto_queue=kw.pop("auto_queue", False),
+            check_drift=kw.pop("check_drift", False),
+            load_json_list=bm.load_json_list,
+            save_json_list=bm.save_json_list,
+            discovery_queue_path=bm.DISCOVERY_QUEUE_PATH,
+            active_role=kw.pop("active_role", "all"),
+        )
+
+    def test_first_run_initializes_baseline_no_queue(self):
+        self.responses["by service=tostring(resource['service.name'])"] = (
+            "service total\nsvcA 5\nsvcB 3\n", False)
+        self.responses["summarize samples=count() by metric_name"] = (
+            "metric_name samples\nmetricA 5\n", False)
+        summary = self._detect(auto_queue=True)
+        self.assertIn("baseline initialized with 2 services, 1 metrics", summary)
+        queue = bm.load_json_list(bm.DISCOVERY_QUEUE_PATH)
+        self.assertEqual(queue, [])
+
+    def test_second_run_detects_new_service_and_auto_queues(self):
+        self.responses["by service=tostring(resource['service.name'])"] = (
+            "service total\nsvcA 5\n", False)
+        self.responses["summarize samples=count() by metric_name"] = (
+            "metric_name samples\n", False)
+        self._detect(auto_queue=False)
+
+        self.responses["by service=tostring(resource['service.name'])"] = (
+            "service total\nsvcA 5\nsvcC 2\n", False)
+        summary = self._detect(auto_queue=True)
+        self.assertIn("svcC", summary)
+        queue = bm.load_json_list(bm.DISCOVERY_QUEUE_PATH)
+        match = next((j for j in queue if j["source"] == "svcC"), None)
+        self.assertIsNotNone(match)
+        self.assertEqual(match["requested_by"], "auto-detect")
+        self.assertEqual(match["status"], "pending")
+
+    def test_drift_detection_flags_changed_keys(self):
+        self.responses["by service=tostring(resource['service.name'])"] = (
+            "service total\nsvcA 5\n", False)
+        self.responses["summarize samples=count() by metric_name"] = (
+            "metric_name samples\n", False)
+        self._detect(auto_queue=False)  # seed baseline (first run)
+
+        self.responses["bag_keys(resource)"] = ("key n\nservice.name 5\n", False)
+        self._detect(auto_queue=False, check_drift=True)  # seeds keys_hash, no drift yet
+
+        self.responses["bag_keys(resource)"] = ("key n\nservice.name 5\nnew_attr 2\n", False)
+        summary = self._detect(auto_queue=False, check_drift=True)
+        self.assertIn("drifted_services", summary)
+        self.assertIn("svcA", summary)
+
+    def test_malformed_rows_dont_crash(self):
+        self.responses["by service=tostring(resource['service.name'])"] = (
+            "service total\n\n   \nsvcA 5\n", False)
+        self.responses["summarize samples=count() by metric_name"] = ("(no rows)", False)
+        summary = self._detect(auto_queue=False)
+        self.assertIn("baseline initialized with 1 services, 0 metrics", summary)
+
+
+# ---------- P4: generation pipeline ----------
+class GenerationPipelineTest(ParserFactoryTestBase):
+    def _reply(self, queries):
+        return {"choices": [{"message": {"content": json.dumps({"queries": queries})}}]}
+
+    def test_happy_path_two_queries_saved_with_metadata(self):
+        os.environ["BERSERK_LLM_LADDER"] = "hermes"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        self._stub_profile_responses()
+        self.default_response = ("row1 col\nval 5", False)
+        queries = [
+            {"name": "overview", "description": "overview", "kql": f"{bm.TABLE} | where resource['service.name'] == 'mysvc' | summarize n=count()", "since": "1h ago"},
+            {"name": "errors", "description": "errors", "kql": f"{bm.TABLE} | where resource['service.name'] == 'mysvc' | where severity_text == 'ERROR' | take 10", "since": "1h ago"},
+        ]
+        self.llm_responses = [(self._reply(queries), None)]
+
+        report, ok = pf.generate_parser_for({"source": "mysvc", "kind": "service", "role_hint": "sre"})
+        self.assertTrue(ok, report)
+        self.assertEqual(report["status"], "done")
+        saved = report["report"]["queries_saved"]
+        self.assertEqual(len(saved), 2)
+        for nm in saved:
+            self.assertTrue(nm.startswith("mysvc_"), nm)
+
+        items = bm.load_learned()
+        names = [it["name"] for it in items]
+        for nm in saved:
+            self.assertIn(nm, names)
+        entry = next(it for it in items if it["name"] == saved[0])
+        self.assertEqual(entry["generated_by"]["provider"], "hermes")
+        self.assertEqual(entry.get("roles"), ["sre"])
+
+        amendments = bm.load_json_list(Path(bm.LEARNED_PATH).parent / "amendments_log.json")
+        gen_actions = [a for a in amendments if a["action"] == "generated"]
+        self.assertEqual(len(gen_actions), 2)
+
+    def test_invalid_kql_prefix_feeds_back_and_succeeds_next_attempt(self):
+        os.environ["BERSERK_LLM_LADDER"] = "hermes"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        self._stub_profile_responses()
+        self.default_response = ("row1\nval 5", False)
+        bad = [{"name": "bad", "description": "d", "kql": "NOT_TABLE | take 1", "since": "1h ago"}]
+        good = [{"name": "good", "description": "d", "kql": f"{bm.TABLE} | take 1", "since": "1h ago"}]
+        self.llm_responses = [(self._reply(bad), None), (self._reply(good), None)]
+
+        report, ok = pf.generate_parser_for({"source": "x", "kind": "service", "role_hint": ""})
+        self.assertTrue(ok, report)
+        self.assertEqual(report["report"]["attempts"], 2)
+        second_call_prompt = self._llm_calls[1][2]["messages"][-1]["content"]
+        self.assertIn("invalid KQL", second_call_prompt)
+
+    def test_escalation_to_next_provider_after_repeated_failures(self):
+        os.environ["BERSERK_LLM_LADDER"] = "hermes,openai"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        self._stub_profile_responses()
+        self.default_response = ("row1\nval 5", False)
+        good = [{"name": "ok", "description": "d", "kql": f"{bm.TABLE} | take 1", "since": "1h ago"}]
+        # 5 unparseable hermes replies exhaust that provider, then openai succeeds
+        self.llm_responses = (
+            [({"choices": [{"message": {"content": "not json"}}]}, None)] * 5
+            + [(self._reply(good), None)]
+        )
+        report, ok = pf.generate_parser_for({"source": "x", "kind": "service", "role_hint": ""})
+        self.assertTrue(ok, report)
+        self.assertEqual(report["report"]["provider"], "openai")
+
+    def test_all_providers_fail_first_call_needs_human(self):
+        os.environ["BERSERK_LLM_LADDER"] = "anthropic"  # no ANTHROPIC_API_KEY set
+        self._stub_profile_responses()
+        report, ok = pf.generate_parser_for({"source": "x", "kind": "service", "role_hint": ""})
+        self.assertFalse(ok)
+        self.assertEqual(report["status"], "needs_human")
+        self.assertEqual(bm.load_learned(), [])
+
+    def test_name_collision_appends_gen_suffix(self):
+        bm.save_learned([{"name": "x_overview", "description": "human", "kql": f"{bm.TABLE} | take 1"}])
+        os.environ["BERSERK_LLM_LADDER"] = "hermes"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        self._stub_profile_responses()
+        self.default_response = ("row1\nval 5", False)
+        queries = [{"name": "overview", "description": "d", "kql": f"{bm.TABLE} | take 1", "since": "1h ago"}]
+        self.llm_responses = [(self._reply(queries), None)]
+
+        report, ok = pf.generate_parser_for({"source": "x", "kind": "service", "role_hint": ""})
+        self.assertTrue(ok, report)
+        saved = report["report"]["queries_saved"]
+        self.assertEqual(saved, ["x_overview_gen"])
+
+        items = bm.load_learned()
+        human_entry = next(it for it in items if it["name"] == "x_overview")
+        self.assertEqual(human_entry["description"], "human")
+        gen_entry = next(it for it in items if it["name"] == "x_overview_gen")
+        self.assertIn("generated_by", gen_entry)
+
+    def test_fenced_reply_parses(self):
+        os.environ["BERSERK_LLM_LADDER"] = "hermes"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        self._stub_profile_responses()
+        self.default_response = ("row1\nval 5", False)
+        inner = json.dumps({"queries": [
+            {"name": "ok", "description": "d", "kql": f"{bm.TABLE} | take 1", "since": "1h ago"}
+        ]})
+        fenced = f"```json\n{inner}\n```"
+        self.llm_responses = [({"choices": [{"message": {"content": fenced}}]}, None)]
+
+        report, ok = pf.generate_parser_for({"source": "x", "kind": "service", "role_hint": ""})
+        self.assertTrue(ok, report)
+
+
+# ---------- P6: headless worker mode ----------
+class WorkerCliTest(ParserFactoryTestBase):
+    def test_run_worker_pass_no_jobs_exit_zero(self):
+        self.responses["by service=tostring(resource['service.name'])"] = ("service total\n", False)
+        self.responses["summarize samples=count() by metric_name"] = ("metric_name samples\n", False)
+        code = bm.run_worker_pass(auto_queue=False, max_jobs=1, check_drift=False)
+        self.assertEqual(code, 0)
+
+    def test_run_worker_pass_needs_human_exit_one(self):
+        bm.save_json_list(bm.DISCOVERY_QUEUE_PATH, [
+            {"source": "x", "kind": "service", "status": "pending",
+             "role_hint": "", "requested_by": "manual", "ts": "t"},
+        ])
+        os.environ["BERSERK_LLM_LADDER"] = "anthropic"  # no key -> immediate failure
+        self.responses["by service=tostring(resource['service.name'])"] = ("service total\n", False)
+        self.responses["summarize samples=count() by metric_name"] = ("metric_name samples\n", False)
+        self._stub_profile_responses()
+
+        code = bm.run_worker_pass(auto_queue=False, max_jobs=1, check_drift=False)
+        self.assertEqual(code, 1)
+        queue = bm.load_json_list(bm.DISCOVERY_QUEUE_PATH)
+        self.assertEqual(queue[0]["status"], "needs_human")
+
+
+# ---------- P7: security posture ----------
+class SecurityTest(ParserFactoryTestBase):
+    def test_no_key_material_in_report(self):
+        os.environ["OPENAI_API_KEY"] = "sk-supersecretvalue"
+        os.environ["BERSERK_LLM_LADDER"] = "openai"
+        self.llm_responses = [(None, "HTTP 401: unauthorized")]
+        self._stub_profile_responses()
+
+        report, ok = pf.generate_parser_for({"source": "x", "kind": "service", "role_hint": ""})
+        self.assertFalse(ok)
+        blob = json.dumps(report)
+        self.assertNotIn("sk-supersecretvalue", blob)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    def test_known_sources_store_has_private_permissions(self):
+        self.responses["by service=tostring(resource['service.name'])"] = ("service total\n", False)
+        self.responses["summarize samples=count() by metric_name"] = ("metric_name samples\n", False)
+        pf.detect_new_sources(
+            since="24h ago", auto_queue=False, check_drift=False,
+            load_json_list=bm.load_json_list, save_json_list=bm.save_json_list,
+            discovery_queue_path=bm.DISCOVERY_QUEUE_PATH, active_role="all",
+        )
+        known_path = Path(bm.LEARNED_PATH).parent / pf.KNOWN_SOURCES_PATH_NAME
+        self.assertEqual(oct(known_path.stat().st_mode & 0o777), oct(0o600))
+        self.assertEqual(oct(known_path.parent.stat().st_mode & 0o777), oct(0o700))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

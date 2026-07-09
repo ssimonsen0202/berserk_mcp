@@ -20,6 +20,19 @@ Configuration (all optional, via environment):
   BERSERK_TABLE            the Berserk table to query             (default: "default")
   BERSERK_MCP_LEARNED_PATH where saved queries persist  (default: per-user config dir)
 
+Parser factory (LLM-driven parser generation, see parser_factory.py) adds
+outbound HTTP to LLM providers -- all optional, a provider with no key
+configured is skipped:
+  BERSERK_LLM_LADDER          provider order for generation    (default: "hermes,openai,anthropic")
+  HERMES_API_KEY               bearer token for the Hermes endpoint
+  BERSERK_LLM_HERMES_URL       Hermes chat-completions endpoint
+  BERSERK_LLM_HERMES_MODEL     Hermes model id            (default: auto-discovered via /api/models)
+  OPENAI_API_KEY                OpenAI API key
+  BERSERK_LLM_OPENAI_MODEL     OpenAI model                     (default: "gpt-4o")
+  ANTHROPIC_API_KEY             Anthropic API key
+  BERSERK_LLM_ANTHROPIC_MODEL  Anthropic model                  (default: "claude-opus-4-8")
+  BERSERK_LLM_TIMEOUT          per-LLM-call timeout in seconds  (default: "120")
+
 This is an unofficial, community-maintained integration. It is not affiliated
 with or endorsed by the Berserk project.
 """
@@ -31,7 +44,9 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "1.6.2"
+import parser_factory
+
+__version__ = "1.7.0"
 
 # ---------- configuration (env-overridable) ----------
 BZRK_BIN = os.environ.get("BZRK_BIN", "bzrk")
@@ -466,6 +481,64 @@ def sanitize_name(n):
     return n or "query"
 
 
+def persist_learned_query(entry, action_source):
+    """Storage core shared by the save_query tool and the parser-factory
+    pipeline: dedupe by name, append, cap at 500, and log the amendment.
+    Returns the log_entry dict (whose 'name' reflects any rename below).
+
+    action_source == "generated": pipeline-authored entries must never
+    silently replace a human's saved query — on name collision, rename to
+    '<name>_gen' rather than overwrite (a human save always outranks a
+    generated one). Callers with a manual origin (save_query) are expected
+    to have already resolved any overwrite confirmation before calling
+    this helper, so a same-name entry here simply replaces, matching the
+    pre-refactor behavior.
+    """
+    all_items = load_learned()
+    nm = entry["name"]
+    is_amendment = any(it["name"] == nm for it in all_items)
+    if action_source == "generated" and is_amendment:
+        nm = nm + "_gen"
+        entry = {**entry, "name": nm}
+        is_amendment = any(it["name"] == nm for it in all_items)
+
+    items = [it for it in all_items if it["name"] != nm]
+    items.append(entry)
+    items = items[-500:]  # cap learned store to prevent unbounded growth
+    save_learned(items)
+
+    log_entry = {
+        "ts": now_iso(),
+        "name": nm,
+        "description": entry.get("description", ""),
+        "kql_preview": entry.get("kql", "")[:120],
+        "action": "generated" if action_source == "generated" else ("updated" if is_amendment else "created"),
+        "role": ACTIVE_ROLE,
+    }
+    amendments_path = Path(LEARNED_PATH).parent / "amendments_log.json"
+    amendments = load_json_list(amendments_path)
+    amendments.append(log_entry)
+    amendments = amendments[-1000:]  # cap to prevent unbounded growth
+    save_json_list(amendments_path, amendments)
+    return log_entry
+
+
+parser_factory.configure(
+    bzrk_search=bzrk_search,
+    table=TABLE,
+    # A callable, not a captured Path: tests monkeypatch bm.LEARNED_PATH
+    # per-test to isolate stores into a tempdir, so this must resolve
+    # LEARNED_PATH fresh on every call rather than freezing it here at
+    # import time.
+    get_store_dir=lambda: Path(LEARNED_PATH).parent,
+    ensure_private_dir=_ensure_private_dir,
+    now_iso=now_iso,
+    log=log,
+    persist_learned_query=persist_learned_query,
+    sanitize_name=sanitize_name,
+)
+
+
 # ---------- tool definitions ----------
 def _since():
     return {"since": {"type": "string", "description": "Time window e.g. '15m ago', '1h ago', '2d ago'."}}
@@ -541,6 +614,10 @@ MGMT_TOOLS = [
     {"name": "save_query", "description": "Persist a WORKING KQL query as a reusable named query so it never has to be figured out again. Call this after you answer a non-standard question with a custom search query. The query is run once to verify it works; if it errors it is NOT saved. Replacing an existing saved query of the same name requires overwrite=true.", "inputSchema": {"type": "object", "properties": dict({"name": {"type": "string", "description": "short snake_case name"}, "description": {"type": "string", "description": "what the query answers"}, "kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'"}, "roles": {"type": ["array", "string"], "description": "optional role(s) this query serves: sre, soc, claude, ops"}, "overwrite": {"type": "boolean", "description": "must be true to replace an existing saved query of the same name"}}, **_since()), "required": ["name", "description", "kql"]}},
     {"name": "request_discovery", "description": "Queue a newly-added service or metric for author-lane integration. Validates the source is currently visible in Berserk, then records a job for the discovery worker to drain. Use when a user says 'I added / connected / started shipping SOURCE'.", "inputSchema": {"type": "object", "properties": {"service": {"type": "string", "description": "service.name to integrate"}, "metric": {"type": "string", "description": "metric name to integrate"}, "role_hint": {"type": "string", "description": "optional target role: sre, soc, claude, ops"}, "requested_by": {"type": "string", "description": "optional requester label"}, **_since()}}},
     {"name": "discovery_status", "description": "List pending and completed discovery jobs for new services or metrics.", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "detect_new_sources", "description": "Scan Berserk for services/metrics never seen before (and optionally schema drift on known ones). Use for 'anything new reporting?', or run with auto_queue=true to queue newcomers for parser generation.", "inputSchema": {"type": "object", "properties": {"since": {"type": "string", "description": "Time window e.g. '24h ago'."}, "auto_queue": {"type": "boolean", "description": "queue newly-detected sources for parser generation"}, "check_drift": {"type": "boolean", "description": "also check known services for resource-key schema drift"}}}},
+    {"name": "generate_parser", "description": "Generate and verify a query pack for one source right now (synchronous; may take minutes). An LLM authors 2-4 KQL queries from a live schema profile, validates each against Berserk, and saves the survivors. Requires at least one configured LLM provider (HERMES_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY).", "inputSchema": {"type": "object", "properties": {"service": {"type": "string", "description": "service.name to generate a parser for"}, "metric": {"type": "string", "description": "metric_name to generate a parser for"}, "role_hint": {"type": "string", "description": "optional target role: sre, soc, claude, ops"}}}},
+    {"name": "run_discovery_worker", "description": "Drain queued discovery jobs: for each one, an LLM authors a verified query pack for the new source. Requires at least one configured LLM provider; may take minutes per job.", "inputSchema": {"type": "object", "properties": {"max_jobs": {"type": "integer", "description": "max jobs to process this call, default 1, capped at 5"}}}},
+    {"name": "review_generated", "description": "List or inspect LLM-generated saved queries for audit before trusting them. No arg: list all generated queries with their provider/model/timestamp. With name: full entry including the KQL.", "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "description": "optional: a specific generated query name to inspect in full"}}}},
 ]
 
 
@@ -552,12 +629,21 @@ MGMT_TOOLS = [
 _READ = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 _READ_LOCAL = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
 _WRITE_LOCAL = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
+# Parser-factory tools query Berserk AND (generate_parser/run_discovery_worker)
+# call external LLM APIs, and are not idempotent (an LLM may generate different
+# queries across runs) -- openWorldHint=true distinguishes them from the
+# local-store-only _WRITE_LOCAL tools above.
+_WRITE_EXTERNAL = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 
 _ANNOTATIONS = {
     "save_query": _WRITE_LOCAL,
     "list_saved": _READ_LOCAL,
     "request_discovery": _WRITE_LOCAL,
     "discovery_status": _READ_LOCAL,
+    "detect_new_sources": _WRITE_EXTERNAL,
+    "generate_parser": _WRITE_EXTERNAL,
+    "run_discovery_worker": _WRITE_EXTERNAL,
+    "review_generated": _READ_LOCAL,
 }
 
 TITLES = {
@@ -596,12 +682,50 @@ TITLES = {
     "save_query": "Save Query",
     "request_discovery": "Request Discovery",
     "discovery_status": "Discovery Status",
+    "detect_new_sources": "Detect New Sources",
+    "generate_parser": "Generate Parser",
+    "run_discovery_worker": "Run Discovery Worker",
+    "review_generated": "Review Generated Queries",
 }
 
 
 def annotations_for(name):
     """Read-only by default; only the two store-management tools differ."""
     return _ANNOTATIONS.get(name, _READ)
+
+
+def _drain_pending_jobs(max_jobs):
+    """Drain up to max_jobs pending discovery jobs through the parser
+    factory pipeline. Mutates and persists the discovery queue. Shared by
+    the run_discovery_worker MCP tool and the --worker CLI mode.
+
+    Returns (outcome_lines, any_needs_human), or (None, False) if there was
+    nothing pending -- callers render their own "no jobs" message so the
+    MCP tool and the CLI can phrase it appropriately for their contexts.
+    """
+    queue = load_json_list(DISCOVERY_QUEUE_PATH)
+    pending = [it for it in queue if it.get("status") == "pending"]
+    if not pending:
+        return None, False
+    outcomes = []
+    any_needs_human = False
+    for job in pending[:max_jobs]:
+        report, ok = parser_factory.generate_parser_for(job)
+        if ok:
+            job["status"] = "done"
+            job["report"] = report.get("report", {})
+            names = ", ".join(job["report"].get("queries_saved", []))
+            outcomes.append(f"- {job['source']}: done ({names})")
+        else:
+            job["status"] = "needs_human"
+            job["report"] = {
+                "reason": report.get("reason"),
+                "last_errors": report.get("last_errors", []),
+            }
+            outcomes.append(f"- {job['source']}: needs_human ({report.get('reason','')})")
+            any_needs_human = True
+    save_json_list(DISCOVERY_QUEUE_PATH, queue)
+    return outcomes, any_needs_human
 
 
 def handle_call(name, arguments):
@@ -642,27 +766,11 @@ def handle_call(name, arguments):
                 f"A saved query named '{nm}' already exists. Pass overwrite=true "
                 f"to replace it (this will be logged)."
             ), True
-        items = [it for it in all_items if it["name"] != nm]
         entry = {"name": nm, "description": desc, "kql": kql, "since": since}
         roles = normalize_roles(arguments.get("roles"))
         if roles:
             entry["roles"] = roles
-        items.append(entry)
-        items = items[-500:]  # cap learned store to prevent unbounded growth
-        save_learned(items)
-        log_entry = {
-            "ts": now_iso(),
-            "name": nm,
-            "description": desc,
-            "kql_preview": kql[:120],
-            "action": "updated" if is_amendment else "created",
-            "role": ACTIVE_ROLE,
-        }
-        amendments_path = Path(LEARNED_PATH).parent / "amendments_log.json"
-        amendments = load_json_list(amendments_path)
-        amendments.append(log_entry)
-        amendments = amendments[-1000:]  # cap to prevent unbounded growth
-        save_json_list(amendments_path, amendments)
+        persist_learned_query(entry, action_source="manual")
         return "Saved '" + nm + "'. Reusable now via run_saved name=" + nm + " (verified, returned data).", False
 
     # --- discovery queue tools ---
@@ -706,12 +814,78 @@ def handle_call(name, arguments):
         items = load_json_list(DISCOVERY_QUEUE_PATH)
         if not items:
             return "No discovery jobs queued.", False
-        lines = [
-            f"- {it.get('source','?')} [{it.get('kind','?')}] status={it.get('status','?')} "
-            f"role={it.get('role_hint','') or 'none'} requested_by={it.get('requested_by','?')} ts={it.get('ts','?')}"
-            for it in items
-        ]
+        lines = []
+        for it in items:
+            lines.append(
+                f"- {it.get('source','?')} [{it.get('kind','?')}] status={it.get('status','?')} "
+                f"role={it.get('role_hint','') or 'none'} requested_by={it.get('requested_by','?')} ts={it.get('ts','?')}"
+            )
+            report = it.get("report")
+            if report:
+                if "queries_saved" in report:
+                    lines.append(f"  -> {report.get('provider','?')}: saved {', '.join(report.get('queries_saved', []))}")
+                else:
+                    lines.append(f"  -> {report.get('reason','')}")
         return "Discovery jobs:\n" + "\n".join(lines), False
+
+    # --- parser-factory tools ---
+    if name == "detect_new_sources":
+        since = arguments.get("since") or "24h ago"
+        auto_queue = arguments.get("auto_queue") is True
+        check_drift = arguments.get("check_drift") is True
+        text = parser_factory.detect_new_sources(
+            since=since, auto_queue=auto_queue, check_drift=check_drift,
+            load_json_list=load_json_list, save_json_list=save_json_list,
+            discovery_queue_path=DISCOVERY_QUEUE_PATH, active_role=ACTIVE_ROLE,
+        )
+        return text, False
+    if name == "generate_parser":
+        service = str(arguments.get("service") or "").strip()
+        metric = str(arguments.get("metric") or "").strip()
+        if bool(service) == bool(metric):
+            return "generate_parser needs exactly one of 'service' or 'metric'.", True
+        target = service or metric
+        if not re.match(r"^[A-Za-z0-9._-]+$", target):
+            return "invalid source name (allowed: letters, digits, '.', '_', '-')", True
+        kind = "service" if service else "metric"
+        role_hint = normalize_roles(arguments.get("role_hint"))
+        job = {
+            "source": target, "kind": kind,
+            "role_hint": role_hint[0] if role_hint else "",
+        }
+        report, ok = parser_factory.generate_parser_for(job)
+        return json.dumps(report, indent=2), not ok
+    if name == "run_discovery_worker":
+        raw_max = arguments.get("max_jobs")
+        try:
+            max_jobs = int(raw_max) if raw_max is not None else 1
+        except (TypeError, ValueError):
+            max_jobs = 1
+        max_jobs = max(1, min(max_jobs, 5))
+        outcomes, any_needs_human = _drain_pending_jobs(max_jobs)
+        if outcomes is None:
+            return "No pending discovery jobs.", False
+        return "\n".join(outcomes), any_needs_human
+    if name == "review_generated":
+        items = load_learned()
+        generated = [it for it in items if "generated_by" in it]
+        nm = arguments.get("name")
+        if nm:
+            nm = sanitize_name(nm)
+            match = next((it for it in generated if it["name"] == nm), None)
+            if not match:
+                return f"No generated query named '{nm}'.", True
+            return json.dumps(match, indent=2), False
+        if not generated:
+            return "No generated queries yet.", False
+        lines = []
+        for it in generated:
+            gb = it.get("generated_by", {})
+            lines.append(
+                f"- {it['name']}: {it.get('description','')} "
+                f"[{gb.get('provider','?')}/{gb.get('model','?')} @ {gb.get('ts','?')}]"
+            )
+        return "Generated queries:\n" + "\n".join(lines), False
 
     # --- simple fixed-query tools ---
     if name in SIMPLE:
@@ -848,5 +1022,41 @@ def main():
     log("stdin closed")
 
 
+def run_worker_pass(auto_queue=False, max_jobs=3, check_drift=False):
+    """One headless pass for cron/systemd: detect new sources, optionally
+    queue them, then drain up to max_jobs pending discovery jobs. Prints a
+    summary to stdout. Returns an exit code: 1 if any drained job ended
+    needs_human, else 0. No loop, no daemon -- the caller (cron) owns the
+    schedule.
+    """
+    detect_summary = parser_factory.detect_new_sources(
+        since="24h ago", auto_queue=auto_queue, check_drift=check_drift,
+        load_json_list=load_json_list, save_json_list=save_json_list,
+        discovery_queue_path=DISCOVERY_QUEUE_PATH, active_role=ACTIVE_ROLE,
+    )
+    print(detect_summary)
+
+    outcomes, any_needs_human = _drain_pending_jobs(max_jobs)
+    if outcomes is None:
+        print("No pending discovery jobs.")
+        return 0
+    for line in outcomes:
+        print(line)
+    return 1 if any_needs_human else 0
+
+
 if __name__ == "__main__":
+    import argparse
+    _cli = argparse.ArgumentParser(add_help=False)
+    _cli.add_argument("--worker", action="store_true")
+    _cli.add_argument("--auto-queue", action="store_true")
+    _cli.add_argument("--max-jobs", type=int, default=3)
+    _cli.add_argument("--check-drift", action="store_true")
+    _ns, _ = _cli.parse_known_args()
+    if _ns.worker:
+        sys.exit(run_worker_pass(
+            auto_queue=_ns.auto_queue,
+            max_jobs=max(1, min(_ns.max_jobs, 5)),
+            check_drift=_ns.check_drift,
+        ))
     main()

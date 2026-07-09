@@ -323,6 +323,80 @@ surface that keeps the cheap model reliable.
 
 ---
 
+## Parser factory: LLM-generated query packs
+
+Modeled on Microsoft's [ASIM parser AI agent for Sentinel](https://learn.microsoft.com/en-gb/azure/sentinel/normalization-create-parsers-ai-agent):
+sample the source → generate KQL → validate by executing it → refine on
+failure (capped at 5 cycles) → persist the survivors. Where Sentinel's agent
+produces stored ASIM parser functions, Berserk has no stored functions, so
+the output here is a **query pack**: 2–4 verified `save_query` entries per
+source (an overview, an errors/timeline view, and metric aggregates where
+appropriate).
+
+**Escalation ladder.** Generation tries providers in order — free/local
+first, expensive only on failure:
+
+```
+hermes (local/free) → openai → anthropic
+```
+
+Each provider gets up to 5 refinement attempts, with the previous failure's
+validator error fed back into the next prompt. A provider that isn't
+configured (no API key) is skipped after one attempt rather than burning the
+full 5.
+
+**Tools:**
+
+| Tool | What it does |
+|---|---|
+| `detect_new_sources` | Scans Berserk for services/metrics never seen before, and optionally schema drift on known ones (new attribute keys on an existing service). `auto_queue=true` feeds newcomers into the discovery queue. |
+| `generate_parser` | Synchronously generates and verifies a query pack for one named source right now. |
+| `run_discovery_worker` | Drains up to N pending discovery jobs through the pipeline. |
+| `review_generated` | Lists or inspects LLM-generated saved queries — audit before trusting them. |
+
+**Safety.** Generated KQL passes through the exact same `_KQL_PREFIX_RE`
+guard as human input, and is only saved if it executes successfully against
+Berserk. A generated query never silently overwrites a human-saved one — on
+a name collision it's saved as `<name>_gen` instead. Every generated entry
+carries `generated_by: {provider, model, ts, job_source}` so `review_generated`
+can audit it before anyone trusts it in production. See
+[SECURITY.md](SECURITY.md) for the full threat model, including the
+indirect-prompt-injection risk from log data fed into generation prompts.
+
+**Headless / cron mode.** MCP stdio servers only run while a client is
+attached, so there's a CLI path for unattended scheduling:
+
+```bash
+python3 berserk_mcp.py --worker --auto-queue --max-jobs 2 --check-drift
+```
+
+Detects new sources, queues them, drains up to `--max-jobs` pending jobs, and
+exits 0 (or 1 if any job needed human review). Example cron line:
+
+```
+*/30 * * * * cd /path/to/berserk-mcp && python3 berserk_mcp.py --worker --auto-queue --max-jobs 2 >> ~/.local/state/berserk-worker.log 2>&1
+```
+
+**Configuration** (all optional — a provider with no key configured is
+skipped):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BERSERK_LLM_LADDER` | `hermes,openai,anthropic` | Provider order for generation. |
+| `HERMES_API_KEY` | — | Bearer token for the Hermes/Open WebUI endpoint. |
+| `BERSERK_LLM_HERMES_URL` | — | Hermes chat-completions endpoint. |
+| `BERSERK_LLM_HERMES_MODEL` | auto-discovered via `/api/models` | Hermes model id. |
+| `OPENAI_API_KEY` | — | OpenAI API key. |
+| `BERSERK_LLM_OPENAI_MODEL` | `gpt-4o` | OpenAI model. |
+| `ANTHROPIC_API_KEY` | — | Anthropic API key. |
+| `BERSERK_LLM_ANTHROPIC_MODEL` | `claude-opus-4-8` | Anthropic model. |
+| `BERSERK_LLM_TIMEOUT` | `120` | Per-LLM-call timeout, seconds. |
+
+No new pip dependencies — LLM calls use `urllib.request` from the standard
+library, matching the rest of the server's zero-dependency design.
+
+---
+
 ## Worked examples
 
 Concrete prompts you can paste into any MCP-aware client. Each shows the natural-language
@@ -443,6 +517,9 @@ All configuration is via environment variables — all optional:
 | `BERSERK_MCP_ROLE` | `all` | Active role lane: `sre`, `soc`, `claude`, `ops`, or `all`. Controls tool visibility and primer injection. |
 | `BERSERK_MCP_PRIMERS_DIR` | adjacent `primers/` dir | Directory containing `<role>.md` primer files. |
 
+Parser-factory (LLM parser generation) has its own env vars — see
+[Parser factory](#parser-factory-llm-generated-query-packs) above.
+
 ## Connect it to a client
 
 ### Claude Desktop
@@ -533,13 +610,15 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ```bash
 python -m pytest tests/ -q
-# 70 tests: 51 core + 19 routing eval — no live Berserk required
+# 111 tests total, including the new parser-factory pipeline (tests/test_parser_factory.py)
 ```
 
 The tests stub the `bzrk` CLI, so they verify: KQL content and lock strings, default
 time windows, role isolation (which tools appear in which lane), injection guards,
 `since` validation, tool annotations, JSON-RPC protocol, learning loop, discovery queue
-deduplication, and amendments log behaviour.
+deduplication, and amendments log behaviour. The parser-factory suite additionally
+fakes the LLM HTTP layer to verify the escalation ladder, source profiling, new-source/
+drift detection, generation + validation + refinement, and headless worker mode.
 
 ### Live-verified, not just unit-tested
 
