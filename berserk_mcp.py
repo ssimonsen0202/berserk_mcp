@@ -46,7 +46,7 @@ from pathlib import Path
 
 import parser_factory
 
-__version__ = "1.7.0"
+__version__ = "1.7.1"
 
 # ---------- configuration (env-overridable) ----------
 BZRK_BIN = os.environ.get("BZRK_BIN", "bzrk")

@@ -363,6 +363,28 @@ can audit it before anyone trusts it in production. See
 [SECURITY.md](SECURITY.md) for the full threat model, including the
 indirect-prompt-injection risk from log data fed into generation prompts.
 
+**Runaway fail-safes.** Auto-discovery is deliberately bounded so it can never
+flood the queue or burn a pile of LLM tokens in one pass — a real cluster can
+have hundreds of metrics:
+
+- **Internal metrics are never auto-queued.** `detect_new_sources` records them
+  in the baseline (so they don't re-flag as "new") but only ever queues
+  *services* — the assistant never needs a per-metric query pack.
+- **Per-run service cap.** A single detect pass queues at most
+  `MAX_AUTOQUEUE_PER_RUN` new services (default **5**, override via
+  `BERSERK_MAX_AUTOQUEUE`); any remainder is picked up on later runs.
+- **Per-run drain cap.** `run_discovery_worker` / `--worker` generate for at
+  most a bounded number of jobs per invocation (`--max-jobs`, capped at 5), so
+  a large pending queue drains gradually rather than all at once.
+- **Ephemeral-name filter.** Service names with no letters (e.g. a bare PID or
+  changing numeric id emitted as `service.name` by a misconfigured source) are
+  skipped — otherwise they look "new" every run and would queue a junk pack
+  forever.
+
+The first `detect_new_sources` run against a fresh Berserk *seeds the baseline
+and queues nothing* — everything looks new on day one, so it records the
+current state as the "known" set rather than generating hundreds of packs.
+
 **Headless / cron mode.** MCP stdio servers only run while a client is
 attached, so there's a CLI path for unattended scheduling:
 
@@ -391,6 +413,7 @@ skipped):
 | `ANTHROPIC_API_KEY` | — | Anthropic API key. |
 | `BERSERK_LLM_ANTHROPIC_MODEL` | `claude-opus-4-8` | Anthropic model. |
 | `BERSERK_LLM_TIMEOUT` | `120` | Per-LLM-call timeout, seconds. |
+| `BERSERK_MAX_AUTOQUEUE` | `5` | Max new services a single `detect_new_sources` pass will queue (runaway fail-safe). |
 
 No new pip dependencies — LLM calls use `urllib.request` from the standard
 library, matching the rest of the server's zero-dependency design.

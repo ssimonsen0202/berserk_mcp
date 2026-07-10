@@ -237,6 +237,53 @@ class DetectNewSourcesTest(ParserFactoryTestBase):
         summary = self._detect(auto_queue=False)
         self.assertIn("baseline initialized with 1 services, 0 metrics", summary)
 
+    def test_metrics_never_autoqueued_and_services_capped(self):
+        # Seed an empty-ish baseline, then a big cluster appears on run 2.
+        self.responses["by service=tostring(resource['service.name'])"] = (
+            "service total\nknown 5\n", False)
+        self.responses["summarize samples=count() by metric_name"] = (
+            "metric_name samples\n", False)
+        self._detect(auto_queue=False)  # first run seeds {known}
+
+        svcs = "service total\nknown 5\n" + "\n".join(f"s{i} 1" for i in range(8))
+        mets = "metric_name samples\n" + "\n".join(f"bzrk.m{i} 1" for i in range(40))
+        self.responses["by service=tostring(resource['service.name'])"] = (svcs, False)
+        self.responses["summarize samples=count() by metric_name"] = (mets, False)
+        self._detect(auto_queue=True)
+
+        queue = bm.load_json_list(bm.DISCOVERY_QUEUE_PATH)
+        pending = [j for j in queue if j.get("status") == "pending"]
+        self.assertLessEqual(len(pending), pf.MAX_AUTOQUEUE_PER_RUN)
+        self.assertTrue(all(j["kind"] == "service" for j in pending))
+        self.assertFalse(any(j["kind"] == "metric" for j in queue))
+
+    def test_ephemeral_numeric_service_names_never_queued(self):
+        self.responses["by service=tostring(resource['service.name'])"] = (
+            "service total\nknown 5\n", False)
+        self.responses["summarize samples=count() by metric_name"] = (
+            "metric_name samples\n", False)
+        self._detect(auto_queue=False)  # seed {known}
+
+        self.responses["by service=tostring(resource['service.name'])"] = (
+            "service total\nknown 5\n3919786 2\nreal-svc 3\n", False)
+        self._detect(auto_queue=True)
+        queue = bm.load_json_list(bm.DISCOVERY_QUEUE_PATH)
+        sources = {j["source"] for j in queue if j.get("status") == "pending"}
+        self.assertIn("real-svc", sources)
+        self.assertNotIn("3919786", sources)
+        baseline = pf.load_json_dict(pf._known_sources_path())
+        self.assertNotIn("3919786", baseline.get("services", {}))
+
+    def test_seed_then_autoqueue_finds_nothing(self):
+        self.responses["by service=tostring(resource['service.name'])"] = (
+            "service total\nsvcA 5\nsvcB 3\n", False)
+        self.responses["summarize samples=count() by metric_name"] = (
+            "metric_name samples\nsystem.cpu 5\n", False)
+        self._detect(auto_queue=False)          # first run seeds
+        summary = self._detect(auto_queue=True)  # nothing new now
+        self.assertEqual(summary, "No new sources.")
+        self.assertEqual(bm.load_json_list(bm.DISCOVERY_QUEUE_PATH), [])
+
 
 # ---------- P4: generation pipeline ----------
 class GenerationPipelineTest(ParserFactoryTestBase):

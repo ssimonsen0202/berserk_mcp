@@ -73,6 +73,11 @@ FEEDBACK_ERROR_CAP = 400
 REPORT_CAP = 2000
 MAX_REFINEMENT_ATTEMPTS = 5
 MAX_QUERIES_PER_JOB = 4
+# Fail-safe: a single detect_new_sources pass auto-queues at most this many new
+# services, so an empty/partial baseline against a large cluster can never flood
+# the queue. Internal metrics are never auto-queued at all (they are infra the
+# assistant does not query per-metric). Override via env for a bulk backfill.
+MAX_AUTOQUEUE_PER_RUN = int(os.environ.get("BERSERK_MAX_AUTOQUEUE", "5"))
 
 
 # ---------- dict-store helpers (mirror berserk_mcp's list-store helpers) ----------
@@ -380,6 +385,14 @@ def _parse_source_rows(text):
     return names
 
 
+def _looks_like_service(name):
+    """A real service.name has at least one letter. Skip ephemeral/junk names
+    -- e.g. a bare PID or changing numeric id emitted as service.name by a
+    misconfigured source -- which would otherwise look "new" on every run and
+    queue a fresh junk pack forever."""
+    return any(c.isalpha() for c in name)
+
+
 def _hash_keys(keys):
     joined = ",".join(sorted(keys))
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
@@ -401,7 +414,7 @@ def detect_new_sources(since="24h ago", auto_queue=False, check_drift=False,
     svc_out, svc_err = _bzrk_search(services_kql, since)
     met_out, met_err = _bzrk_search(metrics_kql, since)
 
-    live_services = set(_parse_source_rows(svc_out)) if not svc_err else set()
+    live_services = {s for s in _parse_source_rows(svc_out) if _looks_like_service(s)} if not svc_err else set()
     live_metrics = set(_parse_source_rows(met_out)) if not met_err else set()
 
     baseline = load_json_dict(_known_sources_path())
@@ -433,12 +446,38 @@ def detect_new_sources(since="24h ago", auto_queue=False, check_drift=False,
 
     baseline.setdefault("services", {})
     baseline.setdefault("metrics", {})
-    for svc in live_services:
-        if svc not in baseline["services"]:
-            baseline["services"][svc] = {"first_seen": _now_iso()}
+
+    # Metrics are infra (bzrk.*/system.*/container.*/...) the assistant never
+    # queries per-metric: always record them so they never re-flag as "new",
+    # but NEVER auto-queue them. This removes the bulk of a real cluster's
+    # sources from the generation path.
     for met in live_metrics:
         if met not in baseline["metrics"]:
             baseline["metrics"][met] = {"first_seen": _now_iso()}
+
+    queued = []
+    if is_first_run or not auto_queue:
+        # Seed mode (first run, or an explicit detect-only call): record all
+        # services and queue nothing, so a partial baseline can never dump the
+        # whole cluster into the queue.
+        for svc in live_services:
+            if svc not in baseline["services"]:
+                baseline["services"][svc] = {"first_seen": _now_iso()}
+    else:
+        # Auto-queue mode: queue at most MAX_AUTOQUEUE_PER_RUN new/drifted
+        # services and fold ONLY those into the baseline, so any remainder is
+        # picked up on later runs (gradual drain). Hard cap = runaway fail-safe.
+        to_queue = (new_services + drifted_services)[:MAX_AUTOQUEUE_PER_RUN]
+        if to_queue:
+            queue = load_json_list(discovery_queue_path)
+            for svc in to_queue:
+                rb = "drift-detect" if svc in drifted_services else "auto-detect"
+                _enqueue_job(queue, svc, "service", rb, active_role)
+                queued.append(svc)
+                if svc not in baseline["services"]:
+                    baseline["services"][svc] = {"first_seen": _now_iso()}
+            queue = queue[-500:]
+            save_json_list(discovery_queue_path, queue)
 
     if len(baseline["services"]) > MAX_BASELINE_ENTRIES:
         baseline["services"] = dict(list(baseline["services"].items())[-MAX_BASELINE_ENTRIES:])
@@ -450,19 +489,8 @@ def detect_new_sources(since="24h ago", auto_queue=False, check_drift=False,
     if is_first_run:
         return (
             f"baseline initialized with {len(live_services)} services, "
-            f"{len(live_metrics)} metrics"
+            f"{len(live_metrics)} metrics (queued nothing)"
         )
-
-    if auto_queue and (new_services or new_metrics or drifted_services):
-        queue = load_json_list(discovery_queue_path)
-        for svc in new_services:
-            _enqueue_job(queue, svc, "service", "auto-detect", active_role)
-        for met in new_metrics:
-            _enqueue_job(queue, met, "metric", "auto-detect", active_role)
-        for svc in drifted_services:
-            _enqueue_job(queue, svc, "service", "drift-detect", active_role)
-        queue = queue[-500:]
-        save_json_list(discovery_queue_path, queue)
 
     if not new_services and not new_metrics and not drifted_services:
         return "No new sources."
@@ -470,10 +498,15 @@ def detect_new_sources(since="24h ago", auto_queue=False, check_drift=False,
     lines = []
     if new_services:
         lines.append(f"new_services ({len(new_services)}): " + ", ".join(new_services))
-    if new_metrics:
-        lines.append(f"new_metrics ({len(new_metrics)}): " + ", ".join(new_metrics))
     if drifted_services:
         lines.append(f"drifted_services ({len(drifted_services)}): " + ", ".join(drifted_services))
+    if new_metrics:
+        lines.append(f"new_metrics ({len(new_metrics)}) recorded, not queued (infra)")
+    if queued:
+        deferred = (len(new_services) + len(drifted_services)) - len(queued)
+        lines.append(f"queued {len(queued)} service(s) this run (cap {MAX_AUTOQUEUE_PER_RUN})"
+                     + (f", {deferred} deferred to next run" if deferred > 0 else "")
+                     + ": " + ", ".join(queued))
     return "\n".join(lines)
 
 
