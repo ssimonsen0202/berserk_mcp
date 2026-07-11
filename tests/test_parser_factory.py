@@ -448,3 +448,13 @@ class SecurityTest(ParserFactoryTestBase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class SourceNameGuardTest(ParserFactoryTestBase):
+    def test_build_source_profile_rejects_injection_source(self):
+        # a source with a single quote must be refused before any bzrk call
+        self.default_response = ("SHOULD-NOT-RUN", False)
+        profile, err = pf.build_source_profile("x'; drop", "service", "1h ago")
+        self.assertIsNone(profile)
+        self.assertIn("invalid source name", err)
+        self.assertEqual(self.calls, [])  # no query was executed

@@ -280,6 +280,11 @@ def _q_metric_sample(source):
 def build_source_profile(source, kind, since):
     """Profile a source via getschema + keys/sample queries. Returns
     (profile_dict, None) or (None, error_text)."""
+    # Defense-in-depth: `source` is interpolated into single-quoted KQL
+    # literals below. Every caller already allowlists it, but validate here
+    # too so this interpolation site is self-defending regardless of route.
+    if not re.match(r"^[A-Za-z0-9._-]+$", str(source)):
+        return None, "invalid source name (allowed: letters, digits, '.', '_', '-')"
     parts = {}
     errors = []
 
