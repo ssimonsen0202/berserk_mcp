@@ -13,10 +13,11 @@ instead of hand-authoring KQL.
 > the query is fixed. Determinism is the whole point. In practice this makes
 > even small/cheap models answer observability questions reliably.
 
-- **Zero dependencies.** Pure Python standard library — nothing to `pip` beyond the package itself.
-- **Single file.** `berserk_mcp.py` is the entire server. Easy to read, audit, and vendor.
+- **Zero dependencies.** Pure Python standard library — nothing to `pip` beyond the package itself (the optional LLM parser factory uses `urllib`, still no third-party deps).
+- **Tiny + auditable.** Two files: `berserk_mcp.py` (the MCP server) and `parser_factory.py` (the optional LLM parser generator). Easy to read, audit, and vendor.
 - **Cross-platform.** Runs anywhere the `bzrk` CLI is installed, Windows included.
 - **Safe by construction.** Fixed queries, input validation on free-text tools, no `shell=True`, and the Berserk token never touches this code.
+- **Self-extending (new in 1.7).** An optional [parser factory](#parser-factory-llm-generated-query-packs) detects *new* sources arriving in Berserk and uses an LLM to author, execute-verify, and save KQL "query packs" for them — modeled on Microsoft Sentinel's [ASIM parser AI agent](https://learn.microsoft.com/en-gb/azure/sentinel/normalization-create-parsers-ai-agent). Cheap-first provider ladder, hard runaway fail-safes, generated queries never overwrite human ones.
 
 > ## ⚠️ Disclaimer — please read
 >
@@ -84,6 +85,7 @@ replace any of it — it sits next to it and adds the agent-facing surface. Conc
 | **Telemetry-shape discovery** | partial (`.show tables`) | ✅ `list_metrics` · `discover_schema` · `container_hosts` |
 | **Custom-query persistence** as named, reusable tools | UI has a Query Library, but Berserk documents no API or CLI verb to create, list, or share a saved query programmatically | ✅ `save_query` (verify-before-persist) → `run_saved`, agent-readable |
 | **Automated source onboarding** | — | ✅ `request_discovery` → worker → saved query, no KQL authoring needed |
+| **LLM parser factory** — detect a new source, auto-author + verify a KQL query pack | — | ✅ `detect_new_sources` · `generate_parser` · `run_discovery_worker` · `review_generated` (ASIM-agent-style; see [below](#parser-factory-llm-generated-query-packs)) |
 | **Query changelog / amendments log** | — | ✅ every `save_query` write tracked; worker posts Discord diff |
 | **Two-lane cost model** (cheap default · on-demand `@deep`) | — | ✅ tool descriptions + annotations make this safe |
 | **KQL-injection guards** on free-text inputs | n/a (humans) | ✅ service-name allowlist · `claude_search` reject-list |
@@ -325,13 +327,31 @@ surface that keeps the cheap model reliable.
 
 ## Parser factory: LLM-generated query packs
 
+**The problem it solves:** a new service or log type starts shipping to
+Berserk and there's no tool for it yet. Normally a human notices, explores the
+shape with `discover_schema`, hand-writes KQL, and `save_query`s it. The parser
+factory automates that loop.
+
 Modeled on Microsoft's [ASIM parser AI agent for Sentinel](https://learn.microsoft.com/en-gb/azure/sentinel/normalization-create-parsers-ai-agent):
 sample the source → generate KQL → validate by executing it → refine on
 failure (capped at 5 cycles) → persist the survivors. Where Sentinel's agent
 produces stored ASIM parser functions, Berserk has no stored functions, so
 the output here is a **query pack**: 2–4 verified `save_query` entries per
 source (an overview, an errors/timeline view, and metric aggregates where
-appropriate).
+appropriate) — reusable forever afterward via `run_saved` on the cheap lane.
+
+How the pipeline maps to Sentinel's ASIM agent stages:
+
+| ASIM parser AI agent (Sentinel) | berserk-mcp parser factory |
+|---|---|
+| Requirements gathering | Discovery job — source name, kind, role hint |
+| Sample source data (`getschema` + up to 2,000 rows) | `build_source_profile`: resource keys + row sample + `getschema` |
+| Generate the KQL parser | LLM generates a JSON **query pack** from the profile |
+| Schema validation (`ASimSchemaTester`) | Declared output columns checked against real query output |
+| Data validation (`ASimDataTester`) | Query is **executed**; must return rows (window widened once before failing) |
+| Refinement loop (≤ 5 cycles) | Validator error fed back to the model, ≤ 5 attempts per provider |
+| Deploy / package | Persisted through the existing `save_query` store (which re-verifies) |
+| Summary report | Report stored on the discovery job; visible via `discovery_status` / `review_generated` |
 
 **Escalation ladder.** Generation tries providers in order — free/local
 first, expensive only on failure:
@@ -353,6 +373,25 @@ full 5.
 | `generate_parser` | Synchronously generates and verifies a query pack for one named source right now. |
 | `run_discovery_worker` | Drains up to N pending discovery jobs through the pipeline. |
 | `review_generated` | Lists or inspects LLM-generated saved queries — audit before trusting them. |
+
+**What it produces.** For a newly-detected `haproxy` service, one run turns
+this discovery job:
+
+```
+generate_parser(service="haproxy", role_hint="sre")
+```
+
+into a set of verified, source-prefixed saved queries (only those that
+actually returned rows are kept):
+
+```
+haproxy_overview            – event volume, log/metric split, last seen
+haproxy_error_rate          – ERROR lines per minute
+haproxy_top_backends        – requests grouped by backend
+```
+
+each stored with `generated_by: {provider, model, ts, job_source}` and
+immediately runnable on the cheap lane via `run_saved name=haproxy_overview`.
 
 **Safety.** Generated KQL passes through the exact same `_KQL_PREFIX_RE`
 guard as human input, and is only saved if it executes successfully against
@@ -417,6 +456,16 @@ skipped):
 
 No new pip dependencies — LLM calls use `urllib.request` from the standard
 library, matching the rest of the server's zero-dependency design.
+
+> **Note for Berserk maintainers.** This feature exists because Berserk has no
+> stored-function / saved-view primitive that an agent can create
+> programmatically — so "a parser for a source" is emulated as a bundle of
+> verified saved queries in this server's own store. If Berserk ever exposes a
+> gateway RPC for stored KQL functions or server-side saved views (the ASIM
+> parser equivalent), this pipeline could target that directly instead, and the
+> generated packs would become first-class Berserk objects. Feedback on whether
+> such a primitive exists or is planned is very welcome — see
+> [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
