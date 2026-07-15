@@ -139,6 +139,25 @@ class LlmClientTest(ParserFactoryTestBase):
         os.environ["BERSERK_LLM_LADDER"] = "anthropic"
         self.assertEqual(pf.ladder(), ["anthropic"])
 
+    def test_hermes_url_default_is_localhost_not_a_private_ip(self):
+        # No env, no local config file -> privacy-safe default; the repo must
+        # never hardcode a private endpoint.
+        self.assertEqual(pf._hermes_url(), "http://localhost:3000/api/chat/completions")
+
+    def test_hermes_url_precedence_env_over_config_over_default(self):
+        path = pf.save_hermes_url("http://config-host:3000/api/chat/completions")
+        # config used when no env var is set
+        self.assertEqual(pf._hermes_url(), "http://config-host:3000/api/chat/completions")
+        # env var wins over the config file
+        os.environ["BERSERK_LLM_HERMES_URL"] = "http://env-host:3000/api/chat/completions"
+        self.assertEqual(pf._hermes_url(), "http://env-host:3000/api/chat/completions")
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
+    def test_saved_hermes_config_is_private(self):
+        path = pf.save_hermes_url("http://config-host:3000/api/chat/completions")
+        self.assertEqual(oct(path.stat().st_mode & 0o777), oct(0o600))
+        self.assertEqual(oct(path.parent.stat().st_mode & 0o777), oct(0o700))
+
 
 # ---------- P2: source profiling and schema knowledge store ----------
 class SourceProfileTest(ParserFactoryTestBase):

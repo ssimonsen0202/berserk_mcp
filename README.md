@@ -509,7 +509,7 @@ skipped):
 |---|---|---|
 | `BERSERK_LLM_LADDER` | `hermes,openai,anthropic` | Provider order for generation. |
 | `HERMES_API_KEY` | — | Bearer token for the Hermes/Open WebUI endpoint. |
-| `BERSERK_LLM_HERMES_URL` | — | Hermes chat-completions endpoint. |
+| `BERSERK_LLM_HERMES_URL` | `http://localhost:3000/api/chat/completions` | Hermes chat-completions endpoint. Resolution order: this env var → local `llm_config.json` → default. Persist a private URL without an env var (and without hardcoding it in the repo) via `berserk-mcp --set-hermes-url <URL>`, which writes `~/.config/berserk-mcp/llm_config.json` (0600). |
 | `BERSERK_LLM_HERMES_MODEL` | auto-discovered via `/api/models` | Hermes model id. |
 | `OPENAI_API_KEY` | — | OpenAI API key. |
 | `BERSERK_LLM_OPENAI_MODEL` | `gpt-4o` | OpenAI model. |

@@ -25,7 +25,9 @@ outbound HTTP to LLM providers -- all optional, a provider with no key
 configured is skipped:
   BERSERK_LLM_LADDER          provider order for generation    (default: "hermes,openai,anthropic")
   HERMES_API_KEY               bearer token for the Hermes endpoint
-  BERSERK_LLM_HERMES_URL       Hermes chat-completions endpoint
+  BERSERK_LLM_HERMES_URL       Hermes chat-completions endpoint (else local
+                               llm_config.json, else http://localhost:3000/...;
+                               set via: berserk-mcp --set-hermes-url <URL>)
   BERSERK_LLM_HERMES_MODEL     Hermes model id            (default: auto-discovered via /api/models)
   OPENAI_API_KEY                OpenAI API key
   BERSERK_LLM_OPENAI_MODEL     OpenAI model                     (default: "gpt-4o")
@@ -1195,7 +1197,19 @@ if __name__ == "__main__":
     _cli.add_argument("--max-jobs", type=int, default=3)
     _cli.add_argument("--check-drift", action="store_true")
     _cli.add_argument("--since", default="6h ago")
+    _cli.add_argument("--set-hermes-url", metavar="URL",
+                      help="persist the Hermes LLM endpoint to a local 0600 "
+                           "config file (kept out of the repo) and exit")
     _ns, _ = _cli.parse_known_args()
+    if _ns.set_hermes_url:
+        try:
+            path = parser_factory.save_hermes_url(_ns.set_hermes_url)
+            print(f"Saved Hermes URL to {path} (0600). It overrides the "
+                  f"localhost default; BERSERK_LLM_HERMES_URL still takes priority.")
+            sys.exit(0)
+        except Exception as e:
+            print(f"failed to save Hermes URL: {type(e).__name__}: {e}", file=sys.stderr)
+            sys.exit(2)
     if _ns.worker:
         sys.exit(run_worker_pass(
             auto_queue=_ns.auto_queue,

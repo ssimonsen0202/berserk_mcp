@@ -137,14 +137,65 @@ def _http_get_json(url, headers, timeout=LLM_TIMEOUT):
         return None, f"{type(e).__name__}: {e}"
 
 
+# Privacy-safe default: never hardcode a private endpoint in the repo. The
+# real URL comes from (1) the BERSERK_LLM_HERMES_URL env var, or (2) a local,
+# never-committed config file (see _llm_config / save_hermes_url), or (3) this
+# localhost default. Run `berserk-mcp --set-hermes-url <URL>` once to persist it.
+HERMES_URL_DEFAULT = "http://localhost:3000/api/chat/completions"
+
+
+def _llm_config_path():
+    try:
+        return _get_store_dir() / "llm_config.json"
+    except (TypeError, AttributeError):
+        return None
+
+
+def _llm_config():
+    """Optional local endpoint config (0600, in the per-user config dir, never
+    committed). Lets an operator point Hermes at a private URL without an env
+    var and without hardcoding it in the repo."""
+    path = _llm_config_path()
+    if path is None:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _hermes_url():
+    return (
+        os.environ.get("BERSERK_LLM_HERMES_URL")
+        or _llm_config().get("hermes_url")
+        or HERMES_URL_DEFAULT
+    )
+
+
+def save_hermes_url(url):
+    """Persist the Hermes endpoint to the local 0600 config file so the URL
+    lives on the operator's machine, not in the repo. Returns the path."""
+    path = _llm_config_path()
+    if path is None:
+        raise RuntimeError("parser_factory is not configured (no store dir)")
+    _ensure_private_dir(path)
+    data = _llm_config()
+    data["hermes_url"] = url
+    tmp = str(path) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    return path
+
+
 def _hermes_model():
     configured = os.environ.get("BERSERK_LLM_HERMES_MODEL")
     if configured:
         return configured, None
-    url = os.environ.get(
-        "BERSERK_LLM_HERMES_URL",
-        "http://100.126.137.49:3000/api/chat/completions",
-    )
+    url = _hermes_url()
     models_url = url.rsplit("/", 3)[0] + "/api/models" if "/api/" in url else None
     if not models_url:
         return None, "hermes: cannot derive /api/models from configured URL"
@@ -214,10 +265,7 @@ def llm_complete(provider, system_prompt, user_prompt):
             return None, "openai: unexpected response shape"
 
     if provider == "hermes":
-        url = os.environ.get(
-            "BERSERK_LLM_HERMES_URL",
-            "http://100.126.137.49:3000/api/chat/completions",
-        )
+        url = _hermes_url()
         key = os.environ.get("HERMES_API_KEY", "")
         model, err = _hermes_model()
         if err:

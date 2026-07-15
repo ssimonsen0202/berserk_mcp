@@ -105,3 +105,8 @@ that. `urllib.request` follows redirects by default; provider/Hermes URLs
 are operator-supplied configuration, not attacker input, so this is
 documented as a known limitation rather than mitigated with a custom
 redirect-blocking opener.
+
+**No private endpoint is hardcoded.** The Hermes URL defaults to
+`http://localhost:3000/...`; a private endpoint is supplied at runtime via the
+`BERSERK_LLM_HERMES_URL` env var or a local `~/.config/berserk-mcp/llm_config.json`
+(0600, written by `--set-hermes-url`) — never committed to the repo.
