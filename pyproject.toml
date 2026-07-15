@@ -29,7 +29,10 @@ Issues = "https://github.com/ssi0202/berserk-mcp/issues"
 berserk-mcp = "berserk_mcp:main"
 
 [tool.setuptools]
-py-modules = ["berserk_mcp"]
+py-modules = ["berserk_mcp", "parser_factory", "agent_analytics", "secret_scan", "ingestion_advisor"]
+
+[tool.setuptools.data-files]
+"share/berserk-mcp" = ["ingestion_catalog.json"]
 
 [tool.setuptools.dynamic]
 version = { attr = "berserk_mcp.__version__" }

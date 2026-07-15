@@ -1,6 +1,6 @@
 # Claude Code telemetry tools
 
-`berserk-mcp` ships five tools that mine [Claude Code](https://claude.com/claude-code)
+`berserk-mcp` ships Claude-lane tools that mine [Claude Code](https://claude.com/claude-code)
 session activity, *if* you forward Claude Code's session logs into Berserk under
 the service name `claude-code`. If you don't, ignore these — the other tools work
 without them.
@@ -40,9 +40,27 @@ attributes:
 | `claude_tools` | Tool-use histogram — how often each tool was used. Default 6h. |
 | `claude_errors` | Failed tool results (`is_error`) with a body snippet. Default 6h. |
 | `claude_search` | Full-text substring search across message/tool bodies. Default 6h. |
+| `claude_loop_check` | Loop detector: repetition ratio, top repeated call, error-retry count, and verdict per session. Default 6h. |
+| `claude_model_fit` | Model-fit heuristic: flags frontier models on trivial sessions and cheap models on complex/repetitive sessions. Default 6h. |
+| `claude_token_burn` | Token-burn proxy: estimated tokens, burn per progress unit, and combined high-burn/loop verdict. Default 6h. |
 
 `claude_search` rejects quotes, pipe, backslash, and backtick in the term
 (KQL-injection guard).
+
+## Headless agent report
+
+For cron/systemd alerting, run all three analytics checks in one pass:
+
+```bash
+berserk-mcp --agent-report --since "6h ago"
+```
+
+The command prints a text summary and exits non-zero if it sees a likely loop,
+an underpowered session, or high burn. Token burn uses the forwarder's
+`claude.tokens_input` and `claude.tokens_output` attributes when present and a
+clearly labeled body-length estimate for sessions where they are absent. Alert
+transport is intentionally out of scope for this repo; pipe stdout/stderr to
+your homelab wrapper.
 
 ## Why the windows are bounded
 

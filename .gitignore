@@ -26,3 +26,7 @@ desktop.ini
 *~
 .vscode/
 .idea/
+
+# internal working notes — contain homelab specifics, keep local
+docs/implementation-report-2026-07.md
+docs/claude-precommit-checklist-2026-07.md

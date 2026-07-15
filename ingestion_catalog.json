@@ -1,0 +1,134 @@
+{
+  "sre/aws-cloud-native": [
+    {
+      "name": "AWS CloudWatch metrics and logs",
+      "why": "Adds EC2, ECS, EKS, ALB, RDS, and Lambda health, saturation, and application logs.",
+      "signals": {
+        "services": ["cloudwatch", "aws.ec2", "aws.ecs", "aws.eks", "aws.lambda", "aws.rds"],
+        "metrics": ["aws.ec2.", "aws.ecs.", "aws.eks.", "aws.applicationelb.", "aws.rds.", "aws.lambda."]
+      },
+      "how_to_ingest": "Deploy the AWS Distro for OpenTelemetry Collector, configure CloudWatch collection, and export OTLP to Berserk. See https://aws-otel.github.io/docs/getting-started/collector/",
+      "maturity": "collector-receiver"
+    },
+    {
+      "name": "AWS X-Ray traces",
+      "why": "Adds distributed request paths and service dependency latency for AWS workloads.",
+      "signals": {
+        "services": ["xray", "aws-xray", "aws.xray"],
+        "metrics": ["aws.xray."]
+      },
+      "how_to_ingest": "Use an ADOT Collector trace pipeline and export the collected trace telemetry over OTLP to Berserk. See https://aws-otel.github.io/docs/getting-started/collector/",
+      "maturity": "collector-receiver"
+    },
+    {
+      "name": "AWS CloudTrail",
+      "why": "Adds AWS control-plane changes and identity activity; useful to both SRE and SOC lanes.",
+      "signals": {
+        "services": ["cloudtrail", "aws-cloudtrail", "aws.cloudtrail"],
+        "metrics": []
+      },
+      "how_to_ingest": "Route CloudTrail to CloudWatch Logs or S3, collect it with an OTel Collector log pipeline, and export OTLP to Berserk.",
+      "maturity": "collector-receiver"
+    }
+  ],
+  "sre/azure": [
+    {
+      "name": "Azure Monitor and Log Analytics",
+      "why": "Adds AKS, App Service, VM Insights, platform metrics, and Azure application telemetry.",
+      "signals": {
+        "services": ["azure-monitor", "azuremonitor", "applicationinsights", "aks", "appservice"],
+        "metrics": ["azure.", "azuremonitor.", "microsoft.insights."]
+      },
+      "how_to_ingest": "Use Azure Monitor OpenTelemetry instrumentation or an OTel Collector/Azure Monitor pipeline, then export a second OTLP stream to Berserk. See https://learn.microsoft.com/azure/azure-monitor/app/opentelemetry-configuration",
+      "maturity": "collector-receiver"
+    }
+  ],
+  "sre/onprem-ad-health": [
+    {
+      "name": "Domain Controller Security events",
+      "why": "Adds Kerberos 4768/4769/4771, account lockout 4740, logon, and privilege activity.",
+      "signals": {
+        "services": ["windows-security", "windows_eventlog_security", "domain-controller"],
+        "metrics": ["windows.ad.", "active_directory."]
+      },
+      "how_to_ingest": "Run the OTel Collector on each domain controller with the windowseventlog receiver for the Security channel and export OTLP to Berserk. See https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/windowseventlogreceiver",
+      "maturity": "collector-receiver"
+    },
+    {
+      "name": "Domain Controller System and Directory Service events",
+      "why": "Adds NTDS replication, DFSR, netlogon, service, and directory health events.",
+      "signals": {
+        "services": ["windows-system", "windows-directory-service", "ntds", "dfsr", "netlogon"],
+        "metrics": ["windows.service.", "windows.ad.replication."]
+      },
+      "how_to_ingest": "Configure OTel Collector windowseventlog receivers for System and Directory Service channels on domain controllers, then export OTLP to Berserk.",
+      "maturity": "collector-receiver"
+    }
+  ],
+  "soc/endpoint-identity": [
+    {
+      "name": "Sysmon endpoint telemetry",
+      "why": "Provides process, network, image-load, registry, and file activity needed for endpoint detections.",
+      "signals": {
+        "services": ["sysmon", "windows-sysmon"],
+        "metrics": []
+      },
+      "how_to_ingest": "Deploy Sysmon with a maintained full configuration, collect Microsoft-Windows-Sysmon/Operational using the OTel Collector windowseventlog receiver, and export OTLP to Berserk.",
+      "maturity": "collector-receiver"
+    },
+    {
+      "name": "Windows Security and identity events",
+      "why": "Provides authentication, account, group, Kerberos, and privilege events for identity detections.",
+      "signals": {
+        "services": ["windows-security", "windows_eventlog_security", "domain-controller", "entra-id", "azure-ad"],
+        "metrics": ["windows.ad.", "identity."]
+      },
+      "how_to_ingest": "Collect Windows Security with the OTel Collector windowseventlog receiver; add Entra ID sign-in and audit logs through an Azure/Event Hub collector pipeline.",
+      "maturity": "collector-receiver"
+    },
+    {
+      "name": "DNS, firewall, proxy, and authentication logs",
+      "why": "Adds network and authentication context needed to correlate endpoint and identity behavior.",
+      "signals": {
+        "services": ["dns", "firewall", "proxy", "auth", "sshd", "nginx"],
+        "metrics": []
+      },
+      "how_to_ingest": "Use OTel Collector filelog, syslog, or vendor receivers close to each source and export normalized OTLP logs to Berserk.",
+      "maturity": "collector-receiver"
+    },
+    {
+      "name": "AWS CloudTrail",
+      "why": "Provides AWS API, IAM, and control-plane activity for cloud identity detections.",
+      "signals": {
+        "services": ["cloudtrail", "aws-cloudtrail", "aws.cloudtrail"],
+        "metrics": []
+      },
+      "how_to_ingest": "Route CloudTrail to CloudWatch Logs or S3, collect it with an OTel Collector log pipeline, and export OTLP to Berserk.",
+      "maturity": "collector-receiver"
+    }
+  ],
+  "change-management/ansible": [
+    {
+      "name": "Ansible playbook and task telemetry",
+      "why": "Adds change execution, task duration, failures, and remediation context without custom instrumentation.",
+      "signals": {
+        "services": ["ansible", "ansible-opentelemetry"],
+        "metrics": []
+      },
+      "how_to_ingest": "Enable community.general.opentelemetry in callbacks_enabled, install opentelemetry-api/sdk/exporter-otlp-proto-grpc on the control node, and set OTEL_EXPORTER_OTLP_ENDPOINT to Berserk ingest. See https://docs.ansible.com/projects/ansible/latest/collections/community/general/opentelemetry_callback.html",
+      "maturity": "turnkey"
+    }
+  ],
+  "scom": [
+    {
+      "name": "System Center Operations Manager",
+      "why": "Adds SCOM alerts, health state, monitored object, and data-warehouse history to the shared telemetry view.",
+      "signals": {
+        "services": ["scom", "operations-manager", "system-center-operations-manager"],
+        "metrics": ["scom."]
+      },
+      "how_to_ingest": "SCOM has no native OTel receiver. Build a small read-only bridge from the SCOM REST API or OperationsManagerDW SQL to OTLP, then send it to Berserk. REST reference: https://learn.microsoft.com/rest/operationsmanager/",
+      "maturity": "bridge-required"
+    }
+  ]
+}

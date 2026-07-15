@@ -44,6 +44,28 @@ saved query requires the caller to pass `overwrite=true` explicitly. Silent
 overwrite is refused, and every create/update is recorded in
 `amendments_log.json` as an audit trail.
 
+## Secret detection and redaction (read-only limits)
+
+This server is read-only against Berserk. It cannot remove a secret already
+stored in telemetry; source-side or forwarder-side redaction must prevent that
+data from being ingested, and any exposed credential must be rotated.
+
+Version 1.9.0 adds two controls at the read boundary:
+
+1. Every MCP `tools/call` result passes through `secret_scan.py` at one output
+   choke point. `BERSERK_MCP_REDACT=flag` (default) warns without altering the
+   result, `redact` replaces values with typed placeholders, and `off` disables
+   scanning. Entropy and PII checks are separately opt-in for MCP output.
+2. The SOC-role `scan_secrets` tool audits recent log bodies and returns only
+   aggregate service/type counts and first-seen timestamps. Findings contain
+   type, count, and first offset only; matched values are never retained in the
+   finding structure, logged, or returned by the audit tool.
+
+Detection is heuristic and cannot guarantee that every credential format is
+caught. High-entropy detection is disabled by default because hashes and IDs
+can look secret-like. `flag` mode deliberately preserves raw query output for
+debugging, so operators requiring a no-relay boundary must select `redact`.
+
 ### Parser factory (LLM-generated queries)
 
 `generate_parser` / `run_discovery_worker` feed sample log rows from Berserk

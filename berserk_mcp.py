@@ -44,9 +44,12 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+import agent_analytics
+import ingestion_advisor
 import parser_factory
+import secret_scan
 
-__version__ = "1.7.1"
+__version__ = "1.12.0"
 
 # ---------- configuration (env-overridable) ----------
 BZRK_BIN = os.environ.get("BZRK_BIN", "bzrk")
@@ -54,6 +57,17 @@ PROFILE = os.environ.get("BZRK_PROFILE", "local")
 TABLE = os.environ.get("BERSERK_TABLE", "default")
 DEFAULT_TIMEOUT = int(os.environ.get("BZRK_TIMEOUT", "120"))
 ACTIVE_ROLE = os.environ.get("BERSERK_MCP_ROLE", "all").strip().lower() or "all"
+REDACT_MODE = os.environ.get("BERSERK_MCP_REDACT", "flag").strip().lower()
+if REDACT_MODE not in {"off", "flag", "redact"}:
+    REDACT_MODE = "flag"
+REDACT_ENTROPY = os.environ.get("BERSERK_MCP_REDACT_ENTROPY", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+REDACT_PII_TYPES = frozenset(
+    item.strip().lower()
+    for item in os.environ.get("BERSERK_MCP_REDACT_PII", "").split(",")
+    if item.strip().lower() in secret_scan.ALL_PII_TYPES
+)
 
 
 def _default_learned_path() -> Path:
@@ -432,8 +446,9 @@ def valid_since(s):
 _KQL_PREFIX_RE = re.compile(r"^\s*" + re.escape(TABLE) + r"\b")
 
 
-def bzrk_search(kql, since):
-    """Run a KQL search on the configured profile and time window."""
+def bzrk_search(kql, since, extra=None):
+    """Run a KQL search on the configured profile and time window. `extra` adds
+    trailing CLI flags (e.g. ['--json']) without duplicating the guards."""
     if not _KQL_PREFIX_RE.match(str(kql)):
         return (
             f"invalid KQL: query must start with '{TABLE} | ...' "
@@ -444,7 +459,26 @@ def bzrk_search(kql, since):
             f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
             f"'2d ago', or 'now'."
         ), True
-    return run_bzrk(["-P", PROFILE, "search", kql, "--since", since])
+    return run_bzrk(["-P", PROFILE, "search", kql, "--since", since] + list(extra or []))
+
+
+# bzrk builds that don't support --json reject it with an argument-parse error;
+# detect that so we can transparently fall back to the default table output.
+_JSON_UNSUPPORTED_RE = re.compile(
+    r"(?i)(unrecognized|unexpected|unknown|invalid)\b.*\b(argument|option|flag|--?json)|--json"
+)
+
+
+def bzrk_search_json(kql, since):
+    """bzrk_search variant that requests --json for robust programmatic parsing
+    (the analytics/secret modules parse rows in Python; aligned table output can
+    truncate or ambiguously split wide `body` columns). Falls back to the
+    default table output only when this bzrk build rejects the --json flag, so
+    there is no regression on builds that lack it."""
+    out, is_err = bzrk_search(kql, since, extra=["--json"])
+    if is_err and _JSON_UNSUPPORTED_RE.search(out or ""):
+        return bzrk_search(kql, since)
+    return out, is_err
 
 
 def do_schema():
@@ -537,6 +571,23 @@ parser_factory.configure(
     persist_learned_query=persist_learned_query,
     sanitize_name=sanitize_name,
 )
+agent_analytics.configure(
+    # These modules parse rows programmatically, so prefer JSON output (falls
+    # back to table automatically on bzrk builds without --json).
+    bzrk_search=bzrk_search_json,
+    table=TABLE,
+    # Scrub secrets (no PII/entropy) from body snippets the analytics echo,
+    # independent of the global output filter's mode.
+    redact=lambda text: secret_scan.redact(text, include_entropy=False, pii_types=())[0],
+)
+secret_scan.configure(
+    bzrk_search=bzrk_search_json,
+    table=TABLE,
+)
+ingestion_advisor.configure(
+    list_services=lambda since: bzrk_search(Q_SERVICES, since),
+    list_metrics=lambda since: bzrk_search(Q_METRICS, since),
+)
 
 
 # ---------- tool definitions ----------
@@ -606,6 +657,11 @@ TOOLS = [
     {"name": "claude_tools", "roles": ["claude"], "description": "Claude Code tool-use histogram — how many times each tool (Bash, Edit, Read, ...) was used. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "claude_errors", "roles": ["claude"], "description": "Claude Code tool errors — failed tool results (is_error=true) with a body snippet. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "claude_search", "roles": ["claude"], "description": "Full-text search across Claude Code message and tool bodies for a substring. Default 6h.", "inputSchema": {"type": "object", "properties": dict({"term": {"type": "string", "description": "substring to find; may not contain quotes, pipe, backslash, or backtick"}}, **_since()), "required": ["term"]}},
+    {"name": "claude_loop_check", "roles": ["claude"], "description": "Claude Code loop detector. Heuristically flags sessions that repeat the same tool/target, retry errors, or oscillate between the same calls. Bodies are truncated; output is diagnostic, not raw transcript replay. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "claude_model_fit", "roles": ["claude"], "description": "Claude Code model-fit heuristic. Uses observed tool count, errors, duration, and loop signals to flag frontier models on trivial work or cheap models on complex/repetitive work. Not a billing statement. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "claude_token_burn", "roles": ["claude"], "description": "Claude Code token-burn analysis. Uses exact claude.tokens_input/output usage when present, falls back to a labeled body-length estimate per session, computes burn per distinct tool/file target, and joins high burn with loop signals. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "scan_secrets", "roles": ["soc"], "description": "Audit recent log bodies for potential credentials and optionally selected PII categories. Returns only aggregate service/type counts and first-seen timestamps; secret values are never returned. Default 1h.", "inputSchema": {"type": "object", "properties": {"since": _since()["since"], "include_entropy": {"type": "boolean", "description": "Enable false-positive-prone high-entropy token detection."}, "include_pii": {"type": "array", "items": {"type": "string", "enum": ["email", "ipv4", "ipv6", "credit_card"]}, "description": "Optional PII categories to include."}}}},
+    {"name": "suggest_ingestion", "description": "Recommend concrete telemetry sources for a role/use case. With check_gap=true, compares service and metric hints against live Berserk inventory and marks each source present or missing. Catalog-backed and read-only.", "inputSchema": {"type": "object", "properties": {"role_or_usecase": {"type": "string", "description": "Catalog key such as sre/onprem-ad-health, soc/endpoint-identity, change-management/ansible, or scom."}, "check_gap": {"type": "boolean", "description": "Compare recommendations with live service and metric inventory."}, "since": _since()["since"]}, "required": ["role_or_usecase"]}},
 ]
 
 MGMT_TOOLS = [
@@ -677,6 +733,11 @@ TITLES = {
     "claude_tools": "Claude Code: Tool Histogram",
     "claude_errors": "Claude Code: Tool Errors",
     "claude_search": "Claude Code: Full-Text Search",
+    "claude_loop_check": "Claude Code: Loop Check",
+    "claude_model_fit": "Claude Code: Model Fit",
+    "claude_token_burn": "Claude Code: Token Burn",
+    "scan_secrets": "SOC: Secret Scan",
+    "suggest_ingestion": "Suggest Telemetry Ingestion",
     "list_saved": "List Saved Queries",
     "run_saved": "Run Saved Query",
     "save_query": "Save Query",
@@ -948,6 +1009,67 @@ def handle_call(name, arguments):
             return "term may not contain quotes, pipe, backslash, or backtick", True
         since = arguments.get("since") or "6h ago"
         return bzrk_search(q_cc_search(str(term)), since)
+    if name == "claude_loop_check":
+        since = arguments.get("since") or "6h ago"
+        if not valid_since(since):
+            return (
+                f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
+                f"'2d ago', or 'now'."
+            ), True
+        return agent_analytics.claude_loop_check(since)
+    if name == "claude_model_fit":
+        since = arguments.get("since") or "6h ago"
+        if not valid_since(since):
+            return (
+                f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
+                f"'2d ago', or 'now'."
+            ), True
+        return agent_analytics.claude_model_fit(since)
+    if name == "claude_token_burn":
+        since = arguments.get("since") or "6h ago"
+        if not valid_since(since):
+            return (
+                f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
+                f"'2d ago', or 'now'."
+            ), True
+        return agent_analytics.claude_token_burn(since)
+    if name == "scan_secrets":
+        since = arguments.get("since") or "1h ago"
+        if not valid_since(since):
+            return (
+                f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
+                f"'2d ago', or 'now'."
+            ), True
+        include_entropy = arguments.get("include_entropy", False)
+        if not isinstance(include_entropy, bool):
+            return "'include_entropy' must be a boolean", True
+        include_pii = arguments.get("include_pii") or []
+        if not isinstance(include_pii, list) or any(
+            item not in secret_scan.ALL_PII_TYPES for item in include_pii
+        ):
+            return (
+                "'include_pii' must be a list containing only: "
+                "email, ipv4, ipv6, credit_card"
+            ), True
+        return secret_scan.scan_secrets(
+            since, include_entropy=include_entropy, pii_types=include_pii,
+        )
+    if name == "suggest_ingestion":
+        role_or_usecase = arguments.get("role_or_usecase")
+        if not isinstance(role_or_usecase, str) or not role_or_usecase.strip():
+            return "missing required 'role_or_usecase'", True
+        check_gap = arguments.get("check_gap", False)
+        if not isinstance(check_gap, bool):
+            return "'check_gap' must be a boolean", True
+        since = arguments.get("since") or "24h ago"
+        if not valid_since(since):
+            return (
+                f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
+                f"'2d ago', or 'now'."
+            ), True
+        return ingestion_advisor.suggest_ingestion(
+            role_or_usecase, check_gap=check_gap, since=since,
+        )
 
     return "unknown tool: " + str(name), True
 
@@ -990,6 +1112,12 @@ def dispatch(req):
             # into stderr. Same rationale as the bad-JSON log path below.
             log(f"handle_call crashed: {type(e).__name__}")
             text, is_err = f"internal error: {type(e).__name__}", True
+        text = secret_scan.apply_output_filter(
+            text,
+            mode=REDACT_MODE,
+            include_entropy=REDACT_ENTROPY,
+            pii_types=REDACT_PII_TYPES,
+        )
         return {"jsonrpc": "2.0", "id": id_, "result": {
             "content": [{"type": "text", "text": text}], "isError": is_err}}
     if "id" not in req:
@@ -1045,13 +1173,28 @@ def run_worker_pass(auto_queue=False, max_jobs=3, check_drift=False):
     return 1 if any_needs_human else 0
 
 
+def run_agent_report(since="6h ago"):
+    """One headless pass for cron/systemd: run Claude Code loop and
+    model-fit checks, print the report, and return non-zero when an alertable
+    condition is present.
+    """
+    if not valid_since(since):
+        print(f"invalid --since value: {since!r}", file=sys.stderr)
+        return 2
+    text, should_alert = agent_analytics.agent_report(since)
+    print(text)
+    return 1 if should_alert else 0
+
+
 if __name__ == "__main__":
     import argparse
     _cli = argparse.ArgumentParser(add_help=False)
     _cli.add_argument("--worker", action="store_true")
+    _cli.add_argument("--agent-report", action="store_true")
     _cli.add_argument("--auto-queue", action="store_true")
     _cli.add_argument("--max-jobs", type=int, default=3)
     _cli.add_argument("--check-drift", action="store_true")
+    _cli.add_argument("--since", default="6h ago")
     _ns, _ = _cli.parse_known_args()
     if _ns.worker:
         sys.exit(run_worker_pass(
@@ -1059,4 +1202,6 @@ if __name__ == "__main__":
             max_jobs=max(1, min(_ns.max_jobs, 5)),
             check_drift=_ns.check_drift,
         ))
+    if _ns.agent_report:
+        sys.exit(run_agent_report(since=_ns.since))
     main()

@@ -14,7 +14,7 @@ instead of hand-authoring KQL.
 > even small/cheap models answer observability questions reliably.
 
 - **Zero dependencies.** Pure Python standard library — nothing to `pip` beyond the package itself (the optional LLM parser factory uses `urllib`, still no third-party deps).
-- **Tiny + auditable.** Two files: `berserk_mcp.py` (the MCP server) and `parser_factory.py` (the optional LLM parser generator). Easy to read, audit, and vendor.
+- **Tiny + auditable.** Five small stdlib modules: `berserk_mcp.py` (the MCP server), `parser_factory.py` (the optional LLM parser generator), `agent_analytics.py` (Claude Code analytics), `secret_scan.py` (secret detection/redaction), and `ingestion_advisor.py` (catalog-backed telemetry gap analysis). Easy to read, audit, and vendor.
 - **Cross-platform.** Runs anywhere the `bzrk` CLI is installed, Windows included.
 - **Safe by construction.** Fixed queries, input validation on free-text tools, no `shell=True`, and the Berserk token never touches this code.
 - **Self-extending (new in 1.7).** An optional [parser factory](#parser-factory-llm-generated-query-packs) detects *new* sources arriving in Berserk and uses an LLM to author, execute-verify, and save KQL "query packs" for them — modeled on Microsoft Sentinel's [ASIM parser AI agent](https://learn.microsoft.com/en-gb/azure/sentinel/normalization-create-parsers-ai-agent). Cheap-first provider ladder, hard runaway fail-safes, generated queries never overwrite human ones.
@@ -176,7 +176,7 @@ accidentally or injected into context.
 |---|---|---|---|
 | SRE | `sre` | Core tools + SRE tools (error rate, host headroom, ingest health, service health, top errors) | On-call Slack bot, editor assistant |
 | SOC | `soc` | Core tools + SOC tools (high-severity logs, log spike, new services, repeated errors, incident timeline) | Security monitoring agent |
-| Claude Code | `claude` | Core tools + Claude Code telemetry tools (sessions, tool histogram, errors, full-text search) | Developer workflow assistant |
+| Claude Code | `claude` | Core tools + Claude Code telemetry tools (sessions, tool histogram, errors, full-text search, loop/model-fit checks) | Developer workflow assistant |
 | Ops | `ops` | All tools (full visibility) | Operator shell, admin scripts |
 | Default | `all` (or unset) | All tools | Development, evaluation |
 
@@ -245,6 +245,24 @@ Every query tool takes an optional `since` argument (`"15m ago"`, `"1h ago"`,
 | `soc_new_services` | Recently first-seen services and sources — "what is new?" |
 | `soc_repeated_errors` | Error messages that repeat persistently — probes, loops, stuck processes. |
 | `soc_timeline` | Full incident timeline for one named service: timestamps, severity, metric names, message snippets. |
+| `scan_secrets` | Aggregate potential-secret counts by service/type with first-seen timestamps. Values are never returned. |
+
+### Secret detection and output redaction
+
+Version 1.9.0 adds a stdlib-only secret scanner at the MCP output boundary.
+Every `tools/call` result is handled according to `BERSERK_MCP_REDACT`:
+
+- `flag` (default) leaves the result intact and prepends a warning when a secret is detected.
+- `redact` replaces detected values with typed placeholders such as `[REDACTED:aws_key]`.
+- `off` disables output scanning.
+
+The scanner recognizes common cloud/provider credentials, private keys, JWTs,
+bearer tokens, and generic password/token assignments. High-entropy matching is
+opt-in because it is false-positive-prone. Email, IP, and Luhn-validated credit
+card checks are individually selectable. `scan_secrets` audits recent log
+bodies but returns only aggregate counts and timestamps; it never returns the
+matched values. This protects MCP output only. Secrets already stored in
+Berserk must be removed at ingest and exposed credentials must be rotated.
 
 ### Claude Code tools (`claude` lane only)
 
@@ -258,6 +276,22 @@ tools mine that data. See [docs/claude-code.md](docs/claude-code.md) for the pip
 | `claude_tools` | Tool-use histogram — how many times each tool (Bash, Edit, Read, …) was called. |
 | `claude_errors` | Failed tool results with message snippets. |
 | `claude_search` | Full-text search across Claude Code message and tool bodies. |
+| `claude_loop_check` | Flags sessions that repeat the same tool/target, retry the same error, or oscillate between calls. |
+| `claude_model_fit` | Heuristic model-tier fit: frontier model on trivial work, or cheap model on complex/repetitive work. Not a billing statement. |
+| `claude_token_burn` | Token burn per session and progress unit, using exact usage attributes when present and a labeled estimate otherwise. |
+
+### Agent-log intelligence
+
+Version 1.8.1 provides a read-only analytics layer for the `claude` lane:
+
+- `claude_loop_check` groups tool calls by session and reports repetition ratio, top repeated call, error-retry count, and a `healthy` / `some-repetition` / `likely-looping` verdict.
+- `claude_model_fit` maps model names to a coarse tier (`frontier`, `mid`, `cheap`) and compares that to a complexity proxy from tool count, errors, duration, and loop signals.
+- `claude_token_burn` uses `claude.tokens_input` + `claude.tokens_output` when present, falls back per session to `body characters / 4`, computes burn per distinct tool plus inferred file target, and highlights top-decile burn. Every result labels its source as exact or estimated.
+- `--agent-report` runs all three checks headlessly and exits non-zero when a session is likely looping, underpowered, or high-burn, so cron/systemd can pipe the stdout summary to an alert transport:
+
+```bash
+berserk-mcp --agent-report --since "6h ago"
+```
 
 ### Learning loop tools (all lanes)
 
@@ -266,6 +300,36 @@ tools mine that data. See [docs/claude-code.md](docs/claude-code.md) for the pip
 | `list_saved` | List saved queries visible to the current role. Check here before authoring new KQL. |
 | `run_saved` | Run a saved query by name — deterministic, no KQL authoring. |
 | `save_query` | Verify a KQL query runs, then persist it under a name (with optional role tag). Logs every write to the amendments log. |
+
+### Ingestion advisor
+
+Version 1.12.0 adds `suggest_ingestion`, an all-lane read-only tool backed by
+the editable `ingestion_catalog.json` knowledge base. It recommends concrete
+sources, explains why each matters, names an ingestion mechanism, and labels
+its maturity (`turnkey`, `collector-receiver`, `bridge-required`, or `manual`).
+
+Seeded use cases:
+
+- `sre/aws-cloud-native`
+- `sre/azure`
+- `sre/onprem-ad-health`
+- `soc/endpoint-identity`
+- `change-management/ansible`
+- `scom`
+
+Set `check_gap=true` to compare service and metric hints with the live Berserk
+inventory. Each recommendation is marked `present` or `missing`, with the
+matching signal or exact ingestion action. For example:
+
+```text
+suggest_ingestion role_or_usecase=sre/onprem-ad-health check_gap=true
+```
+
+The AD path recommends Security, System, and Directory Service channels through
+the OTel Collector `windowseventlog` receiver. The Ansible path uses the
+`community.general.opentelemetry` callback. SCOM is explicitly
+`bridge-required`: it needs a read-only REST/API or warehouse-SQL to OTLP bridge;
+the advisor does not claim a native SCOM OTel receiver exists.
 
 ### Discovery tools (all lanes)
 
@@ -588,6 +652,12 @@ All configuration is via environment variables — all optional:
 | `BERSERK_MCP_LEARNED_PATH` | platform config dir | Where saved queries persist (`~/.config/berserk-mcp/learned.json` on Linux). |
 | `BERSERK_MCP_ROLE` | `all` | Active role lane: `sre`, `soc`, `claude`, `ops`, or `all`. Controls tool visibility and primer injection. |
 | `BERSERK_MCP_PRIMERS_DIR` | adjacent `primers/` dir | Directory containing `<role>.md` primer files. |
+| `BERSERK_MCP_REDACT` | `flag` | Output handling: `off`, `flag`, or `redact`. |
+| `BERSERK_MCP_REDACT_ENTROPY` | unset | Set to `true` to enable high-entropy token detection. |
+| `BERSERK_MCP_REDACT_PII` | unset | Comma-separated PII checks: `email,ipv4,ipv6,credit_card`. |
+| `BERSERK_MCP_INGESTION_CATALOG` | adjacent catalog | Optional path to an alternate `ingestion_catalog.json`. |
+| `BERSERK_MCP_TOKENS_IN_ATTR` | `claude.tokens_input` | Claude-Code attribute holding input tokens (override if your forwarder emits a different name, e.g. `claude.usage.input_tokens`; a mismatch just falls back to the body-length estimate). |
+| `BERSERK_MCP_TOKENS_OUT_ATTR` | `claude.tokens_output` | Claude-Code attribute holding output tokens (see above). |
 
 Parser-factory (LLM parser generation) has its own env vars — see
 [Parser factory](#parser-factory-llm-generated-query-packs) above.
@@ -682,7 +752,8 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ```bash
 python -m pytest tests/ -q
-# 111 tests total, including the new parser-factory pipeline (tests/test_parser_factory.py)
+# stdlib unittest is also supported:
+python3 -m unittest discover -s tests
 ```
 
 The tests stub the `bzrk` CLI, so they verify: KQL content and lock strings, default
@@ -690,7 +761,9 @@ time windows, role isolation (which tools appear in which lane), injection guard
 `since` validation, tool annotations, JSON-RPC protocol, learning loop, discovery queue
 deduplication, and amendments log behaviour. The parser-factory suite additionally
 fakes the LLM HTTP layer to verify the escalation ladder, source profiling, new-source/
-drift detection, generation + validation + refinement, and headless worker mode.
+drift detection, generation + validation + refinement, and headless worker mode. The
+agent-analytics suite verifies loop detection, model-fit classification, MCP dispatch,
+and the headless `--agent-report` path.
 
 ### Live-verified, not just unit-tested
 
