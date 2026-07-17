@@ -89,6 +89,7 @@ replace any of it — it sits next to it and adds the agent-facing surface. Conc
 | **Query changelog / amendments log** | — | ✅ every `save_query` write tracked; worker posts Discord diff |
 | **Two-lane cost model** (cheap default · on-demand `@deep`) | — | ✅ tool descriptions + annotations make this safe |
 | **KQL-injection guards** on free-text inputs | n/a (humans) | ✅ service-name allowlist · `claude_search` reject-list |
+| **Trace/span analysis** — find slow/failed traces, reconstruct a span tree with correlated logs | — | ⚠️ v1.14.0, unverified — see [Trace tools](#trace-tools-all-lanes) |
 
 ---
 
@@ -225,6 +226,38 @@ Every query tool takes an optional `since` argument (`"15m ago"`, `"1h ago"`,
 `"2d ago"`, …) with a sensible per-tool default.
 
 **Per-host vs per-container:** `host_cpu`/`host_memory` report per **host**; `top_cpu`/`top_memory` report per **container**. The descriptions cross-reference each other so the model picks the right one. For ambiguous whole-machine questions ("what's hammering the server?") always prefer the host tools.
+
+### Trace tools (all lanes)
+
+**⚠️ Unverified — read this before using these tools.**
+
+| Tool | What it answers |
+|---|---|
+| `trace_find_slow` | Highest-duration root spans in the time window — "what's slow?" Entry point before `trace_analyze`. |
+| `trace_find_errors` | Spans whose status indicates an error — "which requests failed?" Entry point before `trace_analyze`. |
+| `trace_analyze` | Full breakdown of one trace by `trace_id`: every span in time order, plus correlated log lines sharing the same `trace_id`. |
+
+Version 1.14.0 adds distributed-trace analysis, ported from a separate
+TypeScript MCP prototype (`ssn-bzrk`) that explored the same problem space.
+Unlike every other query in this file, **these three have not been confirmed
+against a live trace.** The field names (`trace_id`, `span_id`,
+`parent_span_id`, `span_name`, `duration`, `status_code`) are a best-effort
+guess by analogy with this table's existing `<signal>_name` convention
+(`metric_name` for metrics, `body`/`severity_text` for logs) — not a
+live capture. This breaks from the project's normal "don't ship a query you
+haven't seen succeed against real data" rule (see
+[Extending](#extending--add-a-new-tool-in-five-minutes)) because the Berserk
+query gateway was unreachable from every vantage point available when this
+was written, including VM-A on the same LAN as the cluster — a real
+infrastructure issue independent of this change, worth checking separately.
+
+It's also **not confirmed that this cluster ingests trace/span telemetry at
+all** — every source in this repo's docs is logs or metrics; nothing here
+currently emits OTel spans. Before relying on these tools:
+
+1. Confirm the gateway is reachable: `bzrk -P local search "default | take 1" --since "1h ago"`
+2. Check for trace-shaped data: `bzrk -P local search "default | where isnotnull(trace_id) | take 3" --json --since "24h ago"` (or use `discover_schema`)
+3. Fix any field names that don't match what's actually there, update the locked-query tests in `tests/test_berserk_mcp.py`, and delete the `UNVERIFIED` prefix from each tool's description in `TOOLS` once confirmed
 
 ### SRE tools (`sre` lane only)
 
@@ -781,6 +814,10 @@ deployment — and that process caught two real bugs unit tests alone couldn't s
   the CPU load-average rows.
 
 Both fixes are in the current release.
+
+**Exception: the three `trace_*` tools (v1.14.0) have not gone through this
+process.** See [Trace tools](#trace-tools-all-lanes) above for
+why, and for the verification steps to run before trusting them.
 
 ## Extending — add a new tool in five minutes
 

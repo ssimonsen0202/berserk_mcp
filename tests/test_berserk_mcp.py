@@ -98,6 +98,20 @@ class BerserkMcpTest(unittest.TestCase):
             "container=tostring(resource['container.name']), host=tostring(resource['host.name']) "
             "| sort by host asc, container asc",
         )
+        self.assertEqual(
+            bm.Q_TRACE_FIND_SLOW,
+            "default | where isnotnull(trace_id) | where isempty(parent_span_id) "
+            "| project trace_id, span_name, duration, timestamp, "
+            "service=tostring(resource['service.name']) "
+            "| sort by duration desc | take 10",
+        )
+        self.assertEqual(
+            bm.Q_TRACE_FIND_ERRORS,
+            "default | where isnotnull(trace_id) | where status_code == 'ERROR' "
+            "| project trace_id, span_name, timestamp, "
+            "service=tostring(resource['service.name']) "
+            "| sort by timestamp desc | take 20",
+        )
 
     def test_container_hosts_callable(self):
         text, err = bm.handle_call("container_hosts", {})
@@ -527,6 +541,37 @@ class DiscoveryToolTest(unittest.TestCase):
     def test_soc_timeline_rejects_bad_service(self):
         _, err = bm.handle_call("soc_timeline", {"service": "bad name!"})
         self.assertTrue(err)
+
+    def test_trace_find_slow_callable(self):
+        text, err = bm.handle_call("trace_find_slow", {})
+        self.assertFalse(err)
+        self.assertEqual(self.calls[-1][3], bm.Q_TRACE_FIND_SLOW)
+        self.assertEqual(self.calls[-1][-1], "1h ago")
+
+    def test_trace_find_errors_callable(self):
+        text, err = bm.handle_call("trace_find_errors", {})
+        self.assertFalse(err)
+        self.assertEqual(self.calls[-1][3], bm.Q_TRACE_FIND_ERRORS)
+
+    def test_trace_analyze_dispatches_both_halves(self):
+        text, err = bm.handle_call("trace_analyze", {"trace_id": "abc123"})
+        self.assertFalse(err)
+        # makes TWO calls: span tree, then correlated logs
+        self.assertEqual(len(self.calls), 2)
+        self.assertIn("trace_id == 'abc123'", self.calls[0][3])
+        self.assertIn("isnotnull(body)", self.calls[1][3])
+        self.assertIn("== spans ==", text)
+        self.assertIn("== correlated logs ==", text)
+
+    def test_trace_analyze_requires_trace_id(self):
+        _, err = bm.handle_call("trace_analyze", {})
+        self.assertTrue(err)
+        self.assertEqual(self.calls, [])  # must not have shelled out
+
+    def test_trace_analyze_rejects_bad_trace_id(self):
+        _, err = bm.handle_call("trace_analyze", {"trace_id": "abc'; drop"})
+        self.assertTrue(err)
+        self.assertEqual(self.calls, [])  # must not shell out
 
 
 class ParserFactoryToolsTest(unittest.TestCase):

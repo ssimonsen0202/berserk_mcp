@@ -51,7 +51,7 @@ import ingestion_advisor
 import parser_factory
 import secret_scan
 
-__version__ = "1.12.0"
+__version__ = "1.14.0"
 
 # ---------- configuration (env-overridable) ----------
 BZRK_BIN = os.environ.get("BZRK_BIN", "bzrk")
@@ -104,6 +104,10 @@ _ROLE_PREFIX = {
     "soc": "You are in the SOC lane; focus on anomalies, spikes, first-seen behavior, repeated failures, and incident timelines. ",
     "claude": "You are in the Claude Code lane; focus on Claude session activity, tool errors, and developer workflow traces. ",
     "ops": "You are in the operations lane; focus on service health, hosts, containers, and actionable operator checks. ",
+    "windows-forensics": (
+        "You are in the Windows forensics lane; first verify that Windows event telemetry exists "
+        "and inspect its real schema before authoring or saving any query. "
+    ),
 }
 
 
@@ -111,7 +115,7 @@ def _load_primer(role: str) -> str:
     """Load primers/<role>.md adjacent to this script, or from BERSERK_MCP_PRIMERS_DIR."""
     env_dir = os.environ.get("BERSERK_MCP_PRIMERS_DIR", "")
     primer_dir = Path(env_dir) if env_dir else Path(__file__).parent / "primers"
-    if role in {"sre", "soc", "claude", "ops"}:
+    if role in _ROLE_PREFIX:
         f = primer_dir / f"{role}.md"
         try:
             return f.read_text(encoding="utf-8").strip() + "\n\n"
@@ -120,7 +124,12 @@ def _load_primer(role: str) -> str:
     return ""
 
 
-INSTRUCTIONS = _load_primer(ACTIVE_ROLE) + _ROLE_PREFIX.get(ACTIVE_ROLE, "") + _BASE_INSTRUCTIONS
+def build_instructions(role: str) -> str:
+    """Build initialize guidance for any role registered in ``_ROLE_PREFIX``."""
+    return _load_primer(role) + _ROLE_PREFIX.get(role, "") + _BASE_INSTRUCTIONS
+
+
+INSTRUCTIONS = build_instructions(ACTIVE_ROLE)
 
 
 def log(msg):
@@ -146,7 +155,7 @@ def normalize_roles(value):
         parts = [str(p).strip().lower() for p in value if str(p).strip()]
     else:
         parts = [str(value).strip().lower()]
-    valid = [r for r in parts if r in {"sre", "soc", "claude", "ops"}]
+    valid = [r for r in parts if r in _ROLE_PREFIX]
     return valid or None
 
 
@@ -303,6 +312,53 @@ Q_SOC_REPEATED_ERRORS = (
     f"| summarize hits=count(), last_seen=max(timestamp) by msg=substring(tostring(body), 0, 160) "
     f"| where hits > 5 | sort by hits desc | take 40"
 )
+
+# --- Trace tools (span-level latency and error triage) ---
+# UNVERIFIED as of 2026-07-17 -- unlike every query above this comment, these
+# field names have NOT been confirmed against a live schema. They're written
+# by analogy with this table's established pattern (logs get first-class
+# `body`/`severity_text` columns, metrics get `metric_name`/`value`; the same
+# `<signal>_name` convention here assumes traces get `trace_id`/`span_id`/
+# `parent_span_id`/`span_name`/`duration`/`status_code`). The Berserk query
+# gateway (192.168.10.174:9500) was unreachable from every vantage point tried
+# when this was written (this Mac directly, and VM-A on the same LAN as the
+# cluster) -- so it's also unconfirmed whether this cluster ingests trace/span
+# telemetry at all yet. Before trusting these: run `discover_schema` or
+# `bzrk -P local search "default | where isnotnull(trace_id) | take 3" --json`
+# against a live instance, fix any field names that don't match, and delete
+# this warning once confirmed -- see the "Extending" section in README.md for
+# why unverified queries don't normally ship in this file.
+Q_TRACE_FIND_SLOW = (
+    f"{T} | where isnotnull(trace_id) | where isempty(parent_span_id) "
+    f"| project trace_id, span_name, duration, timestamp, "
+    f"service=tostring(resource['service.name']) "
+    f"| sort by duration desc | take 10"
+)
+Q_TRACE_FIND_ERRORS = (
+    f"{T} | where isnotnull(trace_id) | where status_code == 'ERROR' "
+    f"| project trace_id, span_name, timestamp, "
+    f"service=tostring(resource['service.name']) "
+    f"| sort by timestamp desc | take 20"
+)
+
+
+def q_trace_analyze(trace_id: str) -> str:
+    return (
+        f"{T} | where trace_id == '{trace_id}' "
+        f"| project span_name, timestamp, duration, span_id, parent_span_id, "
+        f"service=tostring(resource['service.name']), status_code "
+        f"| sort by timestamp asc"
+    )
+
+
+def q_trace_logs(trace_id: str) -> str:
+    return (
+        f"{T} | where trace_id == '{trace_id}' | where isnotnull(body) "
+        f"| project timestamp, severity_text, "
+        f"service=tostring(resource['service.name']), "
+        f"body=substring(tostring(body), 0, 200) "
+        f"| sort by timestamp asc"
+    )
 
 
 def q_sre_service_health(svc: str) -> str:
@@ -623,6 +679,8 @@ SIMPLE = {
     "claude_sessions": (Q_CC_SESSIONS, "6h ago"),
     "claude_tools": (Q_CC_TOOLS, "6h ago"),
     "claude_errors": (Q_CC_ERRORS, "6h ago"),
+    "trace_find_slow": (Q_TRACE_FIND_SLOW, "1h ago"),
+    "trace_find_errors": (Q_TRACE_FIND_ERRORS, "1h ago"),
 }
 
 TOOLS = [
@@ -641,6 +699,11 @@ TOOLS = [
     {"name": "bzrk_query_perf", "description": "Berserk query engine latency percentiles: p50, p95, p99 in µs. Use for 'how fast is Berserk?', 'query latency', or 'p50/p95/p99 execution time'. Uses otel_histogram_percentile($raw, N) — the native Berserk histogram aggregate.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "discover_schema", "description": "Discover the shape of a data source: returns (1) every key present under `resource` with row counts, AND (2) a small sample of real rows so you can read the actual values. Use to learn an unknown or newly-ingested source before querying it. Optional `service` filter. Pair with list_services / list_metrics. Once you work out a query with `search`, persist it with save_query so it becomes reusable.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "optional: limit to one service.name"}}, **_since())}},
     {"name": "search", "description": "Run an arbitrary Kusto/KQL query against the Berserk table. Use when the other tools do not fit; once it works, persist it with save_query.", "inputSchema": {"type": "object", "properties": dict({"kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'"}}, **_since()), "required": ["kql"]}},
+    # --- Trace tools (span-level latency/error triage; UNVERIFIED field names — see the
+    # comment above Q_TRACE_FIND_SLOW. Descriptions below flag this to the model too.) ---
+    {"name": "trace_find_slow", "description": "UNVERIFIED (v1.14.0, not yet confirmed against a live trace — see discover_schema first): find the highest-duration root spans in the time window. Use for 'what's slow', 'find the slowest requests', or as the entry point before trace_analyze. If this errors or returns nothing, this cluster may not have trace/span data yet.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "trace_find_errors", "description": "UNVERIFIED (v1.14.0, not yet confirmed against a live trace — see discover_schema first): find spans whose status indicates an error. Use for 'which requests failed' or as the entry point before trace_analyze. If this errors or returns nothing, this cluster may not have trace/span data yet.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "trace_analyze", "description": "UNVERIFIED (v1.14.0, not yet confirmed against a live trace — see discover_schema first): full breakdown of one trace by trace_id — every span in time order plus correlated log lines from the same trace_id. Use after trace_find_slow/trace_find_errors surface a trace_id worth investigating.", "inputSchema": {"type": "object", "properties": {"trace_id": {"type": "string", "description": "trace_id from trace_find_slow/trace_find_errors/search"}}, "required": ["trace_id"]}},
     # --- SRE role tools (reliability, headroom, saturation, error rates, rollback signals) ---
     {"name": "sre_error_rate", "roles": ["sre"], "description": "SRE view of ERROR log events grouped by service and minute. Use for 'is the error rate climbing', 'which service is burning error budget', or 'what should we rollback first'.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "sre_host_headroom", "roles": ["sre"], "description": "SRE view of host CPU load and memory used side-by-side. Use for 'which host is hottest', 'where is headroom lowest', or 'which VM is nearest saturation'.", "inputSchema": {"type": "object", "properties": _since()}},
@@ -730,6 +793,9 @@ TITLES = {
     "soc_timeline": "SOC: Incident Timeline",
     "discover_schema": "Discover Schema",
     "search": "Run KQL",
+    "trace_find_slow": "Trace: Find Slowest",
+    "trace_find_errors": "Trace: Find Errors",
+    "trace_analyze": "Trace: Analyze",
     "claude_recent": "Claude Code: Recent Activity",
     "claude_sessions": "Claude Code: Sessions",
     "claude_tools": "Claude Code: Tool Histogram",
@@ -997,6 +1063,20 @@ def handle_call(name, arguments):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "6h ago"
         return bzrk_search(q_soc_timeline(str(svc)), since)
+    if name == "trace_analyze":
+        trace_id = arguments.get("trace_id")
+        if not trace_id:
+            return "missing required 'trace_id'", True
+        if not re.match(r"^[A-Za-z0-9]+$", str(trace_id)):
+            return "invalid trace_id (allowed: letters and digits only)", True
+        # No time window on either half: a trace_id already scopes the query
+        # tightly, and the trace could be older than any reasonable default
+        # `since`. Two perspectives, like discover_schema: the span tree, then
+        # any logs sharing the same trace_id — treated as a failure only if
+        # BOTH halves fail, since a trace can legitimately have no logs.
+        out1, e1 = bzrk_search(q_trace_analyze(str(trace_id)), "30d ago")
+        out2, e2 = bzrk_search(q_trace_logs(str(trace_id)), "30d ago")
+        return f"== spans ==\n{out1}\n\n== correlated logs ==\n{out2}", (e1 and e2)
     if name == "search":
         kql = arguments.get("kql")
         if not kql:
