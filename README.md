@@ -337,6 +337,24 @@ Version 1.8.1 provides a read-only analytics layer for the `claude` lane:
 berserk-mcp --agent-report --since "6h ago"
 ```
 
+**v1.14.1 fix — these three tools were silently returning zero results against
+real data.** Live-verifying `claude_token_burn` against actual Berserk output
+(2026-07-17) surfaced a parsing bug affecting all three: `_json_records()` only
+recognized a bare JSON array or a `{"rows"/"data"/"results"/"records": [...]}`
+wrapper, but real `bzrk --json` output is shaped
+`{"Tables": [{"schema": {"columns": [...]}, "rows": [[...]]}], ...}` — rows are
+positional arrays matching column order, not dicts. Since that shape went
+unrecognized, `_parse_rows` silently fell through to a jsonl/table parser that
+found nothing, and every call returned "No Claude Code events found" even with
+real data present — no error, just silently empty. Fixed by teaching
+`_json_records` to unwrap `Tables[0].rows` against `Tables[0].schema.columns`.
+Confirmed live: `claude.tokens_input`/`claude.tokens_output` are the real
+attribute names (no longer a guess), and a real 7-day query correctly surfaced
+5 sessions, exact token counts, and a genuine top token-burning session (a
+1,592-event, Opus-heavy session that alone accounted for 73% of the week's
+token spend — not from looping, `claude_loop_check` confirmed `healthy`, just
+large individual turns).
+
 ### Learning loop tools (all lanes)
 
 | Tool | What it answers / does |
@@ -830,7 +848,13 @@ giving child-before-parent span ordering. See [Trace tools](#trace-tools-all-lan
 above for the full writeup, including the stack outage that was blocking
 verification when these tools were first written.
 
-Both fixes are in the current release.
+The `claude_token_burn`/`claude_loop_check`/`claude_model_fit` trio (v1.14.1)
+turned up an even bigger one: a JSON-shape mismatch meant all three had been
+silently returning zero results against real Berserk output, with no error —
+see [Agent-log intelligence](#agent-log-intelligence) above for the full
+writeup.
+
+All fixes are in the current release.
 
 ## Extending — add a new tool in five minutes
 

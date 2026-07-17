@@ -51,7 +51,7 @@ import ingestion_advisor
 import parser_factory
 import secret_scan
 
-__version__ = "1.14.0"
+__version__ = "1.14.1"
 
 # ---------- configuration (env-overridable) ----------
 BZRK_BIN = os.environ.get("BZRK_BIN", "bzrk")

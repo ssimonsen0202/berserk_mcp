@@ -153,6 +153,56 @@ class AgentAnalyticsPureTest(unittest.TestCase):
         self.assertEqual(len(aa._parse_rows(jsonl(recs))), 1)              # jsonl still works
         self.assertEqual(aa._parse_rows("(no rows)"), [])
 
+    def test_parse_rows_accepts_real_bzrk_tables_shape(self):
+        """bzrk's actual `--json` output (confirmed live 2026-07-17) is
+        {"Tables": [{"schema": {"columns": [...]}, "rows": [[...]]}], ...} --
+        positional arrays keyed by column order, not row-dicts. This shape
+        went unrecognized by _json_records until this test's fix: every
+        caller (claude_token_burn, claude_loop_check, claude_model_fit)
+        silently returned zero rows against real data, which unit tests
+        alone never caught because they only exercised jsonl and the
+        {"rows": [...]}-of-dicts shape above."""
+        doc = {
+            "Tables": [{
+                "schema": {
+                    "name": "PrimaryResult",
+                    "columns": [
+                        {"name": "session", "type": 5, "nullable": True},
+                        {"name": "ts", "type": 6, "nullable": True},
+                        {"name": "typ", "type": 9, "nullable": True},
+                        {"name": "tools", "type": 9, "nullable": True},
+                        {"name": "tokens_in", "type": 9, "nullable": True},
+                        {"name": "tokens_out", "type": 9, "nullable": True},
+                    ],
+                },
+                "rows": [
+                    ["s1", 1784314514467508988, "assistant", "Bash", "10", "20"],
+                ],
+            }],
+            "stats": {"rows_processed": 1},
+            "trace_id": "abc123",
+            "warnings": [],
+        }
+        parsed = aa._parse_rows(json.dumps(doc))
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["session"], "s1")
+        self.assertEqual(parsed[0]["tools"], "Bash")
+        self.assertEqual(parsed[0]["tokens_in"], 10)
+        self.assertEqual(parsed[0]["tokens_out"], 20)
+        self.assertTrue(parsed[0]["has_token_usage"])
+
+    def test_parse_rows_tables_shape_with_zero_rows(self):
+        # Realistic "no matching data" response: real bzrk always populates
+        # schema.columns even when the row set is empty.
+        doc = {
+            "Tables": [{
+                "schema": {"columns": [{"name": "session", "type": 5, "nullable": True}]},
+                "rows": [],
+            }],
+            "stats": {"rows_processed": 0},
+        }
+        self.assertEqual(aa._parse_rows(json.dumps(doc)), [])
+
 
 class BzrkSearchJsonTest(unittest.TestCase):
     def setUp(self):

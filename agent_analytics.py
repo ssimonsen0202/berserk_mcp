@@ -14,12 +14,11 @@ import re
 _bzrk_search = None
 _table = None
 
-# The Claude Code OTel forwarder's token-usage attribute names are not
-# guaranteed — roadmap Phase B calls for verifying them against live Berserk.
-# These defaults are a best guess; override via env when the real ingest names
-# differ (e.g. 'claude.usage.input_tokens') without a code change. When the
-# names don't match, every session simply falls back to the labeled body-length
-# estimate rather than reporting exact tokens.
+# Confirmed live 2026-07-17 -- these ARE the real ingest attribute names.
+# Kept env-overridable in case a different forwarder config ever uses
+# something else (e.g. 'claude.usage.input_tokens'); when the names don't
+# match, every session falls back to the labeled body-length estimate
+# rather than reporting exact tokens.
 _TOKENS_IN_ATTR = os.environ.get("BERSERK_MCP_TOKENS_IN_ATTR", "claude.tokens_input")
 _TOKENS_OUT_ATTR = os.environ.get("BERSERK_MCP_TOKENS_OUT_ATTR", "claude.tokens_output")
 
@@ -79,12 +78,28 @@ def _burn_events_query():
 
 def _json_records(parsed):
     """Extract a list of row-dicts from a whole-document JSON value: a bare
-    array, or a wrapper object keying the rows under a common name. Returns
-    None when the value isn't a recognizable record container (so the caller
-    falls through to jsonl / table parsing)."""
+    array, a wrapper object keying the rows under a common name, or bzrk's
+    real `--json` shape (verified live 2026-07-17):
+    {"Tables": [{"schema": {"columns": [{"name": ...}, ...]}, "rows": [[...]]}], ...}
+    -- rows there are positional arrays matching column order, not dicts, so
+    they're zipped against the column names first. Returns None when the
+    value isn't a recognizable record container (so the caller falls through
+    to jsonl / table parsing)."""
     if isinstance(parsed, list):
         return parsed
     if isinstance(parsed, dict):
+        tables = parsed.get("Tables")
+        if isinstance(tables, list) and tables and isinstance(tables[0], dict):
+            table = tables[0]
+            columns = [
+                c.get("name") for c in (table.get("schema") or {}).get("columns", [])
+                if isinstance(c, dict)
+            ]
+            rows = table.get("rows")
+            if columns and isinstance(rows, list):
+                return [
+                    dict(zip(columns, row)) for row in rows if isinstance(row, list)
+                ]
         for key in ("rows", "data", "results", "records"):
             if isinstance(parsed.get(key), list):
                 return parsed[key]
