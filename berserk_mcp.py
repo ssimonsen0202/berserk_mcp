@@ -314,25 +314,26 @@ Q_SOC_REPEATED_ERRORS = (
 )
 
 # --- Trace tools (span-level latency and error triage) ---
-# UNVERIFIED as of 2026-07-17 -- unlike every query above this comment, these
-# field names have NOT been confirmed against a live schema. They're written
-# by analogy with this table's established pattern (logs get first-class
-# `body`/`severity_text` columns, metrics get `metric_name`/`value`; the same
-# `<signal>_name` convention here assumes traces get `trace_id`/`span_id`/
-# `parent_span_id`/`span_name`/`duration`/`status_code`). The Berserk query
-# gateway (192.168.10.174:9500) was unreachable from every vantage point tried
-# when this was written (this Mac directly, and VM-A on the same LAN as the
-# cluster) -- so it's also unconfirmed whether this cluster ingests trace/span
-# telemetry at all yet. Before trusting these: run `discover_schema` or
-# `bzrk -P local search "default | where isnotnull(trace_id) | take 3" --json`
-# against a live instance, fix any field names that don't match, and delete
-# this warning once confirmed -- see the "Extending" section in README.md for
-# why unverified queries don't normally ship in this file.
+# Live-verified 2026-07-17 against VM-C after fixing the Berserk stack outage
+# (see the "Trace tools" section in README.md for the incident writeup). The
+# field names guessed when this was first written -- trace_id/span_id/
+# parent_span_id/span_name/duration/status_code -- were all confirmed correct
+# by analogy with this table's `<signal>_name` convention. Two real bugs were
+# caught by that live run and are fixed below:
+#   1. `duration` is a *dynamic*-typed column -- Berserk's KQL rejects sorting
+#      a dynamic value directly ("Cannot sort by a dynamic value"). Needs an
+#      explicit toint(duration) cast first.
+#   2. A trace_id's rows aren't all spans -- other correlated telemetry (seen
+#      live: a log row) shares the same trace_id/span_id but has a null
+#      span_name. Sorting by `timestamp` (an ingest-adjacent field) also gave
+#      child-before-parent ordering on a real 2-span trace; `start_time` sorts
+#      correctly. q_trace_analyze now filters to isnotnull(span_name) and
+#      sorts by start_time.
 Q_TRACE_FIND_SLOW = (
     f"{T} | where isnotnull(trace_id) | where isempty(parent_span_id) "
-    f"| project trace_id, span_name, duration, timestamp, "
+    f"| project trace_id, span_name, dur=toint(duration), timestamp, "
     f"service=tostring(resource['service.name']) "
-    f"| sort by duration desc | take 10"
+    f"| sort by dur desc | take 10"
 )
 Q_TRACE_FIND_ERRORS = (
     f"{T} | where isnotnull(trace_id) | where status_code == 'ERROR' "
@@ -344,10 +345,10 @@ Q_TRACE_FIND_ERRORS = (
 
 def q_trace_analyze(trace_id: str) -> str:
     return (
-        f"{T} | where trace_id == '{trace_id}' "
-        f"| project span_name, timestamp, duration, span_id, parent_span_id, "
+        f"{T} | where trace_id == '{trace_id}' | where isnotnull(span_name) "
+        f"| project span_name, start_time, dur=toint(duration), span_id, parent_span_id, "
         f"service=tostring(resource['service.name']), status_code "
-        f"| sort by timestamp asc"
+        f"| sort by start_time asc"
     )
 
 
@@ -701,9 +702,9 @@ TOOLS = [
     {"name": "search", "description": "Run an arbitrary Kusto/KQL query against the Berserk table. Use when the other tools do not fit; once it works, persist it with save_query.", "inputSchema": {"type": "object", "properties": dict({"kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'"}}, **_since()), "required": ["kql"]}},
     # --- Trace tools (span-level latency/error triage; UNVERIFIED field names — see the
     # comment above Q_TRACE_FIND_SLOW. Descriptions below flag this to the model too.) ---
-    {"name": "trace_find_slow", "description": "UNVERIFIED (v1.14.0, not yet confirmed against a live trace — see discover_schema first): find the highest-duration root spans in the time window. Use for 'what's slow', 'find the slowest requests', or as the entry point before trace_analyze. If this errors or returns nothing, this cluster may not have trace/span data yet.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "trace_find_errors", "description": "UNVERIFIED (v1.14.0, not yet confirmed against a live trace — see discover_schema first): find spans whose status indicates an error. Use for 'which requests failed' or as the entry point before trace_analyze. If this errors or returns nothing, this cluster may not have trace/span data yet.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "trace_analyze", "description": "UNVERIFIED (v1.14.0, not yet confirmed against a live trace — see discover_schema first): full breakdown of one trace by trace_id — every span in time order plus correlated log lines from the same trace_id. Use after trace_find_slow/trace_find_errors surface a trace_id worth investigating.", "inputSchema": {"type": "object", "properties": {"trace_id": {"type": "string", "description": "trace_id from trace_find_slow/trace_find_errors/search"}}, "required": ["trace_id"]}},
+    {"name": "trace_find_slow", "description": "Find the highest-duration root spans in the time window. Use for 'what's slow', 'find the slowest requests', or as the entry point before trace_analyze.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "trace_find_errors", "description": "Find spans whose status indicates an error. Use for 'which requests failed' or as the entry point before trace_analyze.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "trace_analyze", "description": "Full breakdown of one trace by trace_id — every span in time order plus correlated log lines from the same trace_id. Use after trace_find_slow/trace_find_errors surface a trace_id worth investigating.", "inputSchema": {"type": "object", "properties": {"trace_id": {"type": "string", "description": "trace_id from trace_find_slow/trace_find_errors/search"}}, "required": ["trace_id"]}},
     # --- SRE role tools (reliability, headroom, saturation, error rates, rollback signals) ---
     {"name": "sre_error_rate", "roles": ["sre"], "description": "SRE view of ERROR log events grouped by service and minute. Use for 'is the error rate climbing', 'which service is burning error budget', or 'what should we rollback first'.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "sre_host_headroom", "roles": ["sre"], "description": "SRE view of host CPU load and memory used side-by-side. Use for 'which host is hottest', 'where is headroom lowest', or 'which VM is nearest saturation'.", "inputSchema": {"type": "object", "properties": _since()}},

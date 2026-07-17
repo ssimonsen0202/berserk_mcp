@@ -89,7 +89,7 @@ replace any of it — it sits next to it and adds the agent-facing surface. Conc
 | **Query changelog / amendments log** | — | ✅ every `save_query` write tracked; worker posts Discord diff |
 | **Two-lane cost model** (cheap default · on-demand `@deep`) | — | ✅ tool descriptions + annotations make this safe |
 | **KQL-injection guards** on free-text inputs | n/a (humans) | ✅ service-name allowlist · `claude_search` reject-list |
-| **Trace/span analysis** — find slow/failed traces, reconstruct a span tree with correlated logs | — | ⚠️ v1.14.0, unverified — see [Trace tools](#trace-tools-all-lanes) |
+| **Trace/span analysis** — find slow/failed traces, reconstruct a span tree with correlated logs | — | ✅ `trace_find_slow` · `trace_find_errors` · `trace_analyze` (v1.14.0; see [Trace tools](#trace-tools-all-lanes)) |
 
 ---
 
@@ -229,8 +229,6 @@ Every query tool takes an optional `since` argument (`"15m ago"`, `"1h ago"`,
 
 ### Trace tools (all lanes)
 
-**⚠️ Unverified — read this before using these tools.**
-
 | Tool | What it answers |
 |---|---|
 | `trace_find_slow` | Highest-duration root spans in the time window — "what's slow?" Entry point before `trace_analyze`. |
@@ -239,25 +237,38 @@ Every query tool takes an optional `since` argument (`"15m ago"`, `"1h ago"`,
 
 Version 1.14.0 adds distributed-trace analysis, ported from a separate
 TypeScript MCP prototype (`ssn-bzrk`) that explored the same problem space.
-Unlike every other query in this file, **these three have not been confirmed
-against a live trace.** The field names (`trace_id`, `span_id`,
-`parent_span_id`, `span_name`, `duration`, `status_code`) are a best-effort
-guess by analogy with this table's existing `<signal>_name` convention
-(`metric_name` for metrics, `body`/`severity_text` for logs) — not a
-live capture. This breaks from the project's normal "don't ship a query you
-haven't seen succeed against real data" rule (see
-[Extending](#extending--add-a-new-tool-in-five-minutes)) because the Berserk
-query gateway was unreachable from every vantage point available when this
-was written, including VM-A on the same LAN as the cluster — a real
-infrastructure issue independent of this change, worth checking separately.
+The field names were originally a guess by analogy with this table's
+`<signal>_name` convention (`metric_name` for metrics, `body`/`severity_text`
+for logs), written while the Berserk query gateway happened to be unreachable
+from every vantage point available.
 
-It's also **not confirmed that this cluster ingests trace/span telemetry at
-all** — every source in this repo's docs is logs or metrics; nothing here
-currently emits OTel spans. Before relying on these tools:
+**That outage turned out to be real, not a network fluke**: the whole Berserk
+stack on VM-C had been down for ~25 hours. `nursery`'s Docker memory limit
+(256m, in `docker-compose.override.yaml` on VM-C) was too tight for its real
+working set, four separate OOM-kills crash-looped it on 2026-07-16, and ~17
+minutes after the last one the entire stack was stopped and never restarted.
+Root-caused via `docker inspect`/kernel OOM log entries, fixed by raising the
+limit to 512m (2x observed usage, matching this file's existing `query`/
+`postgres`/`minio` tier), and the stack was brought back up clean.
 
-1. Confirm the gateway is reachable: `bzrk -P local search "default | take 1" --since "1h ago"`
-2. Check for trace-shaped data: `bzrk -P local search "default | where isnotnull(trace_id) | take 3" --json --since "24h ago"` (or use `discover_schema`)
-3. Fix any field names that don't match what's actually there, update the locked-query tests in `tests/test_berserk_mcp.py`, and delete the `UNVERIFIED` prefix from each tool's description in `TOOLS` once confirmed
+**With the cluster back, these three tools were live-verified the same way
+every SRE/SOC tool below was** (see
+[Live-verified, not just unit-tested](#live-verified-not-just-unit-tested)).
+All six guessed field names were confirmed correct on the first try — this
+cluster does ingest real trace/span data (Berserk's own internal services are
+self-instrumented; `service=query`, `service=gateway`, `service=ingest` spans
+are what's actually flowing). Two real bugs surfaced by the live run, both
+fixed in the current release:
+
+1. **`duration` is a *dynamic*-typed column** — Berserk's KQL engine rejects
+   `sort by duration` directly ("Cannot sort by a dynamic value"). Fixed with
+   an explicit `toint(duration)` cast in `trace_find_slow`.
+2. **Not every row sharing a `trace_id` is a span** — other correlated
+   telemetry (a log row, observed live) carries the same `trace_id`/`span_id`
+   but a null `span_name`. `trace_analyze` now filters to
+   `isnotnull(span_name)`. Sorting by `timestamp` also produced
+   child-before-parent ordering on a real 2-span trace; switched to
+   `start_time`, which sorted correctly.
 
 ### SRE tools (`sre` lane only)
 
@@ -813,11 +824,13 @@ deployment — and that process caught two real bugs unit tests alone couldn't s
   Fixed: memory now reports in GB with an explicit `unit` column distinguishing it from
   the CPU load-average rows.
 
-Both fixes are in the current release.
+The `trace_*` tools (v1.14.0) went through the same process and caught two
+more real bugs — a `sort by` on a dynamic-typed column, and a wrong sort key
+giving child-before-parent span ordering. See [Trace tools](#trace-tools-all-lanes)
+above for the full writeup, including the stack outage that was blocking
+verification when these tools were first written.
 
-**Exception: the three `trace_*` tools (v1.14.0) have not gone through this
-process.** See [Trace tools](#trace-tools-all-lanes) above for
-why, and for the verification steps to run before trusting them.
+Both fixes are in the current release.
 
 ## Extending — add a new tool in five minutes
 

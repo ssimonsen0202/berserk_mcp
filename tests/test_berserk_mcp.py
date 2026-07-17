@@ -101,9 +101,9 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertEqual(
             bm.Q_TRACE_FIND_SLOW,
             "default | where isnotnull(trace_id) | where isempty(parent_span_id) "
-            "| project trace_id, span_name, duration, timestamp, "
+            "| project trace_id, span_name, dur=toint(duration), timestamp, "
             "service=tostring(resource['service.name']) "
-            "| sort by duration desc | take 10",
+            "| sort by dur desc | take 10",
         )
         self.assertEqual(
             bm.Q_TRACE_FIND_ERRORS,
