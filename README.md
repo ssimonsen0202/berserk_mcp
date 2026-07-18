@@ -242,14 +242,16 @@ The field names were originally a guess by analogy with this table's
 for logs), written while the Berserk query gateway happened to be unreachable
 from every vantage point available.
 
-**That outage turned out to be real, not a network fluke**: the whole Berserk
-stack on VM-C had been down for ~25 hours. `nursery`'s Docker memory limit
-(256m, in `docker-compose.override.yaml` on VM-C) was too tight for its real
-working set, four separate OOM-kills crash-looped it on 2026-07-16, and ~17
-minutes after the last one the entire stack was stopped and never restarted.
-Root-caused via `docker inspect`/kernel OOM log entries, fixed by raising the
-limit to 512m (2x observed usage, matching this file's existing `query`/
-`postgres`/`minio` tier), and the stack was brought back up clean.
+**That outage turned out to be real, not a network fluke**: the Docker-Compose
+Berserk deployment being tested against had been fully down for ~25 hours.
+`nursery`'s container memory limit was too tight for its real working set,
+several OOM-kills crash-looped it, and the whole stack was stopped shortly
+after and never restarted. Root-caused via `docker inspect`/kernel OOM log
+entries, fixed by roughly doubling the memory limit to match observed usage,
+and the stack was brought back up clean. If your own self-hosted Berserk goes
+quiet, `docker inspect <container> --format '{{.State.OOMKilled}}'` plus
+`journalctl -k | grep -i oom` is the fast way to tell an OOM crash-loop apart
+from a network/auth issue.
 
 **With the cluster back, these three tools were live-verified the same way
 every SRE/SOC tool below was** (see

@@ -314,9 +314,9 @@ Q_SOC_REPEATED_ERRORS = (
 )
 
 # --- Trace tools (span-level latency and error triage) ---
-# Live-verified 2026-07-17 against VM-C after fixing the Berserk stack outage
-# (see the "Trace tools" section in README.md for the incident writeup). The
-# field names guessed when this was first written -- trace_id/span_id/
+# Live-verified 2026-07-17 against a real Berserk deployment (see the "Trace
+# tools" section in README.md). The field names guessed when this was first
+# written -- trace_id/span_id/
 # parent_span_id/span_name/duration/status_code -- were all confirmed correct
 # by analogy with this table's `<signal>_name` convention. Two real bugs were
 # caught by that live run and are fixed below:
