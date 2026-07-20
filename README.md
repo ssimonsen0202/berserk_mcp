@@ -13,6 +13,7 @@ instead of hand-authoring KQL.
 > the query is fixed. Determinism is the whole point. In practice this makes
 > even small/cheap models answer observability questions reliably.
 
+- **Works with Claude Desktop, Claude Code, and any MCP client.** Speaks MCP protocol version `2025-06-18` over stdio (newline-delimited JSON-RPC 2.0). All required methods — `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call` — are implemented with strict envelope validation and adversarial regression tests. See [Connect it to a client](#connect-it-to-a-client) for `claude_desktop_config.json` and `claude mcp add` recipes.
 - **Zero dependencies.** Pure Python standard library — nothing to `pip` beyond the package itself (the optional LLM parser factory uses `urllib`, still no third-party deps).
 - **Tiny + auditable.** Five small stdlib modules: `berserk_mcp.py` (the MCP server), `parser_factory.py` (the optional LLM parser generator), `agent_analytics.py` (Claude Code analytics), `secret_scan.py` (secret detection/redaction), and `ingestion_advisor.py` (catalog-backed telemetry gap analysis). Easy to read, audit, and vendor.
 - **Cross-platform.** Runs anywhere the `bzrk` CLI is installed, Windows included.
@@ -730,6 +731,20 @@ Parser-factory (LLM parser generation) has its own env vars — see
 [Parser factory](#parser-factory-llm-generated-query-packs) above.
 
 ## Connect it to a client
+
+**Compatibility.** berserk-mcp implements MCP protocol version `2025-06-18`
+as a stdio server (newline-delimited JSON-RPC 2.0). All 47 registered
+tools appear in the `tools/list` handshake and can be invoked via
+`tools/call`. The stdio handshake path — including all required
+lifecycle methods (`initialize`, `notifications/initialized`, `ping`,
+`tools/list`, `tools/call`) — has been externally exercised by two
+independent scanners (Cisco AI Defense `mcp-scanner` and MCP-Shield)
+which both enumerated the full tool surface without protocol errors.
+Every method has adversarial regression coverage in the test suite; see
+`docs/cisco-mcp-scanner-result-report-2026-07-19.md` for the scanner
+verification. Any client that speaks the same protocol version — Claude
+Desktop, Claude Code, and third-party MCP clients — can drive it with
+no server-side changes.
 
 ### Claude Desktop
 
