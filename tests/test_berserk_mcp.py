@@ -492,6 +492,61 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0]["description"], "gen2")
 
+    # ---- F-006: 500-item cap eviction preserves human entries ----
+    def test_generated_write_does_not_evict_human_entry_at_cap(self):
+        """A store saturated with 500 human entries must not lose one of
+        them when a NEW (non-colliding) generated entry is persisted."""
+        bm.save_learned([
+            {"name": f"human_{i}", "description": "x", "kql": "default | count"}
+            for i in range(500)
+        ])
+        with self.assertRaises(ValueError):
+            bm.persist_learned_query(
+                {"name": "brand_new_generated", "description": "d",
+                 "kql": "default | take 1"},
+                action_source="generated")
+        items = bm.load_learned()
+        self.assertEqual(len(items), 500)
+        self.assertTrue(all(it["name"].startswith("human_") for it in items))
+
+    def test_generated_write_evicts_oldest_generated_entry_at_cap(self):
+        """When the store is at cap but contains generated entries, a new
+        generated write must evict the OLDEST generated entry (never a
+        human one) rather than raising."""
+        bm.save_learned(
+            [{"name": "human_0", "description": "x", "kql": "default | count"}]
+            + [
+                {"name": f"gen_{i}", "description": "x", "kql": "default | count",
+                 "origin": "generated"}
+                for i in range(499)
+            ]
+        )
+        log = bm.persist_learned_query(
+            {"name": "brand_new_generated", "description": "d",
+             "kql": "default | take 1"},
+            action_source="generated")
+        self.assertEqual(log["name"], "brand_new_generated")
+        items = bm.load_learned()
+        self.assertEqual(len(items), 500)
+        self.assertIn("human_0", [it["name"] for it in items])
+        self.assertNotIn("gen_0", [it["name"] for it in items])  # oldest generated evicted
+        self.assertIn("brand_new_generated", [it["name"] for it in items])
+
+    def test_manual_write_at_cap_still_uses_oldest_first_eviction(self):
+        """Unchanged prior behavior for human/manual writes: simple
+        oldest-first eviction, no origin protection needed since a human
+        write is always allowed to make room for itself."""
+        bm.save_learned([
+            {"name": f"q{i}", "description": "x", "kql": "default | count"}
+            for i in range(500)
+        ])
+        bm.handle_call("save_query", {
+            "name": "one_more", "description": "x", "kql": "default | count"})
+        items = bm.load_learned()
+        self.assertEqual(len(items), 500)
+        self.assertNotIn("q0", [it["name"] for it in items])
+        self.assertIn("one_more", [it["name"] for it in items])
+
     # ---- JSON-RPC protocol ----
     def test_initialize_requires_protocol_version(self):
         """FVR-004: initialize without a protocolVersion must return -32602,

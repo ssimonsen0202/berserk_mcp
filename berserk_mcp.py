@@ -684,6 +684,47 @@ def sanitize_name(n):
     return n or "query"
 
 
+def _make_room(existing_items, room_needed, protect_human):
+    """Evict `room_needed` entries from `existing_items` (oldest first) to
+    make room for a new entry that will be appended separately by the
+    caller -- this list never includes that new entry, so it can never be
+    the one evicted (F-006).
+
+    protect_human=True (a generated write): only origin=='generated'
+    entries are eligible for eviction -- a generated write must never
+    knock a human entry out of the store just because the store happens
+    to be at capacity. Raises ValueError if room_needed still can't be
+    met, i.e. the store is saturated with human entries and there is
+    nothing a generated write is allowed to remove; the caller must not
+    have persisted anything at that point.
+
+    protect_human=False (a manual/human write): unchanged prior behavior
+    -- simple oldest-first eviction regardless of origin. A human write is
+    always allowed to make room for itself.
+    """
+    if room_needed <= 0:
+        return existing_items
+    kept = list(existing_items)
+    i = 0
+    evicted = 0
+    while evicted < room_needed and i < len(kept):
+        if not protect_human or kept[i].get("origin") == "generated":
+            del kept[i]
+            evicted += 1
+        else:
+            i += 1
+    if evicted < room_needed:
+        raise ValueError(
+            "cannot persist generated query: learned-query store is at "
+            "capacity with human entries; a generated write must not "
+            "evict a human entry to make room"
+        )
+    return kept
+
+
+LEARNED_STORE_CAP = 500
+
+
 def persist_learned_query(entry, action_source):
     """Storage core shared by the save_query tool and the parser-factory
     pipeline: dedupe by name, append, cap at 500, and log the amendment.
@@ -732,8 +773,10 @@ def persist_learned_query(entry, action_source):
         is_amendment = nm in by_name
 
     items = [it for it in all_items if it["name"] != nm]
+    room_needed = (len(items) + 1) - LEARNED_STORE_CAP
+    if room_needed > 0:
+        items = _make_room(items, room_needed, protect_human=(action_source == "generated"))
     items.append(entry)
-    items = items[-500:]  # cap learned store to prevent unbounded growth
     save_learned(items)
 
     log_entry = {
