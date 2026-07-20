@@ -182,6 +182,19 @@ def build_instructions(role: str) -> str:
     return _load_primer(role) + _ROLE_PREFIX.get(role, "") + _BASE_INSTRUCTIONS
 
 
+# F-008: fail fast on an unrecognized role rather than silently hiding
+# every role-scoped tool. Without this, a typo in BERSERK_MCP_ROLE (e.g.
+# "sre1") would make ACTIVE_ROLE match no entry in _ROLE_PREFIX, so
+# tool_visible() would return True only for tools with no role tag at
+# all -- an operator would see an almost-empty tool list with no
+# indication why, rather than a clear startup error.
+if ACTIVE_ROLE != "all" and ACTIVE_ROLE not in _ROLE_PREFIX:
+    _valid_roles = ", ".join(sorted(list(_ROLE_PREFIX.keys()) + ["all"]))
+    sys.exit(
+        f"berserk-mcp: unknown BERSERK_MCP_ROLE={ACTIVE_ROLE!r}. "
+        f"Valid roles: {_valid_roles}."
+    )
+
 INSTRUCTIONS = build_instructions(ACTIVE_ROLE)
 
 
@@ -1638,7 +1651,17 @@ def _dispatch_validated(method, params, id_, is_notification):
         if arguments is not None and not isinstance(arguments, dict):
             return _jsonrpc_error(-32602, "Invalid params", id_)
         arguments = arguments or {}
-        text, is_err = handle_call(name, arguments)
+        # F-008: tools/list already filters by role; tools/call must enforce
+        # the SAME predicate, or a client can invoke a tool that was never
+        # supposed to be visible in this role's lane just by naming it
+        # directly. A role-hidden tool is treated exactly like an unknown
+        # one (same message, same isError=true) -- it doesn't leak that a
+        # tool with that name exists but is merely hidden.
+        matched_tool = next((t for t in TOOLS + MGMT_TOOLS if t["name"] == name), None)
+        if matched_tool is not None and not tool_visible(matched_tool):
+            text, is_err = "unknown tool: " + name, True
+        else:
+            text, is_err = handle_call(name, arguments)
         text = secret_scan.apply_output_filter(
             text,
             mode=REDACT_MODE,

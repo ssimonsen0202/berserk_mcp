@@ -732,6 +732,32 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertEqual(starts, 1, f"expected exactly one start, got {starts}:\n{result.stderr}")
         self.assertEqual(closes, 1, f"expected exactly one close, got {closes}:\n{result.stderr}")
 
+    def test_unknown_role_refuses_to_start(self):
+        """F-008: an unrecognized BERSERK_MCP_ROLE must fail loudly at
+        startup rather than silently hiding every role-scoped tool (the
+        old behavior: ACTIVE_ROLE matching nothing in _ROLE_PREFIX just
+        made tool_visible() return True only for untagged tools, with no
+        indication anything was wrong)."""
+        env = dict(os.environ)
+        env["BERSERK_MCP_ROLE"] = "not-a-real-role"
+        result = subprocess.run(
+            [sys.executable, "-c", "import berserk_mcp"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(Path(bm.__file__).resolve().parent), env=env,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not-a-real-role", result.stderr)
+
+    def test_known_role_starts_cleanly(self):
+        env = dict(os.environ)
+        env["BERSERK_MCP_ROLE"] = "sre"
+        result = subprocess.run(
+            [sys.executable, "-c", "import berserk_mcp"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(Path(bm.__file__).resolve().parent), env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_serve_mcp_loop_handles_malformed_then_valid(self):
         """FVR-004: real stdio loop must emit responses for malformed JSON,
         an invalid request, and a valid ping on separate lines, and continue
@@ -1068,6 +1094,73 @@ class RoleFilterTest(unittest.TestCase):
             names = self._list_names(role)
             for always in ("list_hosts", "errors_by_service", "search", "save_query"):
                 self.assertIn(always, names, f"role={role} missing {always}")
+
+    # ---- F-008: tools/call enforces the same role visibility as tools/list ----
+    def test_tools_call_refuses_role_hidden_tool(self):
+        """With ACTIVE_ROLE=sre, a direct tools/call to soc_high_severity_logs
+        (soc-only) must not execute -- previously it dispatched straight to
+        handle_call with no visibility check at all."""
+        bm.ACTIVE_ROLE = "sre"
+        resp = bm.dispatch({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "soc_high_severity_logs", "arguments": {}},
+        })
+        self.assertTrue(resp["result"]["isError"])
+        self.assertIn("unknown tool", resp["result"]["content"][0]["text"])
+        self.assertEqual(self.calls, [])  # never reached bzrk
+
+    def test_tools_call_refuses_role_hidden_tool_symmetric_soc_to_sre(self):
+        bm.ACTIVE_ROLE = "soc"
+        resp = bm.dispatch({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "sre_error_rate", "arguments": {}},
+        })
+        self.assertTrue(resp["result"]["isError"])
+        self.assertIn("unknown tool", resp["result"]["content"][0]["text"])
+        self.assertEqual(self.calls, [])
+
+    def test_tools_call_allows_visible_role_tool(self):
+        bm.ACTIVE_ROLE = "sre"
+        resp = bm.dispatch({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "sre_error_rate", "arguments": {}},
+        })
+        self.assertFalse(resp["result"]["isError"])
+        self.assertEqual(len(self.calls), 1)
+
+    def test_tools_call_allows_untagged_tool_in_any_role(self):
+        bm.ACTIVE_ROLE = "sre"
+        resp = bm.dispatch({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "list_hosts", "arguments": {}},
+        })
+        self.assertFalse(resp["result"]["isError"])
+
+    def test_tools_call_role_all_permits_every_tool(self):
+        bm.ACTIVE_ROLE = "all"
+        for tool_name in ("sre_error_rate", "soc_high_severity_logs", "claude_errors"):
+            resp = bm.dispatch({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": tool_name, "arguments": {}},
+            })
+            self.assertFalse(resp["result"]["isError"], tool_name)
+
+    def test_genuinely_unknown_tool_gets_identical_response_shape(self):
+        """A role-hidden tool and a nonexistent tool must be indistinguishable
+        to the caller -- neither should leak whether the name exists."""
+        bm.ACTIVE_ROLE = "sre"
+        hidden = bm.dispatch({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "soc_high_severity_logs", "arguments": {}},
+        })
+        nonexistent = bm.dispatch({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "totally_made_up_tool_xyz", "arguments": {}},
+        })
+        self.assertEqual(
+            hidden["result"]["content"][0]["text"].replace("soc_high_severity_logs", "X"),
+            nonexistent["result"]["content"][0]["text"].replace("totally_made_up_tool_xyz", "X"),
+        )
 
     def test_list_saved_filters_by_role(self):
         bm.ACTIVE_ROLE = "sre"
