@@ -204,6 +204,29 @@ class AgentAnalyticsPureTest(unittest.TestCase):
         self.assertEqual(aa._parse_rows(json.dumps(doc)), [])
 
 
+class ProjectInferenceTest(unittest.TestCase):
+    def test_marker_segment_yields_parent_dir(self):
+        self.assertEqual(aa._infer_project("/home/u/proj-a/src/app.py"), "proj-a")
+        self.assertEqual(aa._infer_project("/home/u/berserk-mcp/tests/test_x.py"), "berserk-mcp")
+
+    def test_windows_separators_normalized(self):
+        self.assertEqual(aa._infer_project(r"C:\Users\u\proj-b\src\main.py"), "proj-b")
+
+    def test_no_marker_is_unattributed(self):
+        self.assertEqual(aa._infer_project("/etc/hosts"), "(unattributed)")
+        self.assertEqual(aa._infer_project(""), "(unattributed)")
+        self.assertEqual(aa._infer_project("notes.md"), "(unattributed)")
+
+    def test_marker_at_root_has_no_parent(self):
+        self.assertEqual(aa._infer_project("src/app.py"), "(unattributed)")
+
+    def test_first_marker_wins_for_nested(self):
+        self.assertEqual(aa._infer_project("/h/proj-c/src/vendor/tests/x.py"), "proj-c")
+
+    def test_path_with_spaces(self):
+        self.assertEqual(aa._infer_project("/Users/u/My Project/src/a.py"), "My Project")
+
+
 class BzrkSearchJsonTest(unittest.TestCase):
     def setUp(self):
         self._orig = bm.run_bzrk

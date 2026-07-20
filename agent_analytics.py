@@ -22,6 +22,14 @@ _table = None
 _TOKENS_IN_ATTR = os.environ.get("BERSERK_MCP_TOKENS_IN_ATTR", "claude.tokens_input")
 _TOKENS_OUT_ATTR = os.environ.get("BERSERK_MCP_TOKENS_OUT_ATTR", "claude.tokens_output")
 
+# Path segments that mark "inside a project" for cost attribution; the
+# directory immediately before the first marker is taken as the project name.
+_PROJECT_MARKERS = frozenset(
+    p.strip() for p in os.environ.get(
+        "BERSERK_MCP_PROJECT_MARKERS", "src,tests,lib,pkg"
+    ).split(",") if p.strip()
+)
+
 MODEL_TIERS = {
     "opus": "frontier",
     "fable": "frontier",
@@ -397,6 +405,18 @@ def _file_targets(events):
             if tool.lower() in _FILE_TOOLS and body != "-":
                 targets.add(body)
     return targets
+
+
+def _infer_project(path_text):
+    """Deterministic project name from a file path: the directory segment
+    immediately before the first marker segment (src/tests/lib/pkg by
+    default; BERSERK_MCP_PROJECT_MARKERS overrides). '(unattributed)'
+    when no marker with a parent exists. Windows separators normalized."""
+    parts = [p for p in str(path_text or "").replace("\\", "/").split("/") if p]
+    for i, part in enumerate(parts):
+        if part in _PROJECT_MARKERS and i > 0:
+            return parts[i - 1]
+    return "(unattributed)"
 
 
 def analyze_token_burn_events(events):
