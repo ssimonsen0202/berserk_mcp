@@ -69,3 +69,27 @@ records share the table with the rest of your telemetry. Bounded-window queries
 (≤ ~6h) stay fast; multi-day dynamic aggregations can time out. That's why every
 `claude_*` tool defaults to a short window — widen it explicitly with `since`
 when you need to, knowing it costs a wider scan.
+
+## Phase J live-verification checklist (pending `bzrk login`)
+
+`claude_cost_report`, `claude_session_deep_dive`, and
+`claude_workflow_insights` (added 2026-07-20) are unit-tested against
+stubbed telemetry but not yet live-verified. After authenticating, run
+the J0 probe and record findings here:
+
+1. Presence rates over 7d for: `claude.session_id`,
+   `claude.tokens_input` / `claude.tokens_output` (or the configured
+   attr names), `claude.tool_names`, `claude.message_model`,
+   `claude.type`, and any file-target attribute (candidates:
+   `claude.tool_input.file_path`, `claude.file_target`, tool-input
+   payloads inside `body`).
+2. Run each tool against real telemetry; confirm the output shape and
+   record the date + one example row here (per the v1.14 trace-tools
+   precedent).
+3. `claude_cost_report` gating: per-project attribution stays labeled
+   `(unattributed)`-only unless the probe finds a usable file-path
+   signal; note the outcome either way.
+4. The daily aggregation in `claude_cost_report` uses
+   `bin(timestamp, 1d)` with `summarize` over a 7d default window —
+   verify it completes within the CLI timeout given the bounded-window
+   caveat above; if it times out, narrow the default and note it.

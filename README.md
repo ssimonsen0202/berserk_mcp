@@ -326,6 +326,9 @@ tools mine that data. See [docs/claude-code.md](docs/claude-code.md) for the pip
 | `claude_loop_check` | Flags sessions that repeat the same tool/target, retry the same error, or oscillate between calls. |
 | `claude_model_fit` | Heuristic model-tier fit: frontier model on trivial work, or cheap model on complex/repetitive work. Not a billing statement. |
 | `claude_token_burn` | Token burn per session and progress unit, using exact usage attributes when present and a labeled estimate otherwise. |
+| `claude_cost_report` | Multi-day cost report: per-day burn with exact/estimated labels, per-model split, optional per-project attribution from file paths, and a burn-growing/flat/declining trend verdict. |
+| `claude_session_deep_dive` | One session's timeline: contiguous tool phases with error counts, activity gaps over 5 minutes, cumulative burn, and a loop verdict. |
+| `claude_workflow_insights` | Cross-session patterns: most common tool sequences, error hotspots by tool+target, top-decile burn-per-target sessions. |
 
 ### Agent-log intelligence
 
@@ -339,6 +342,16 @@ Version 1.8.1 provides a read-only analytics layer for the `claude` lane:
 ```bash
 berserk-mcp --agent-report --since "6h ago"
 ```
+
+**Phase J deep analytics (new):** `claude_cost_report`,
+`claude_session_deep_dive`, and `claude_workflow_insights` extend this
+layer with multi-day cost trends, per-session timeline drilldowns, and
+cross-session workflow patterns. They are unit-tested against stubbed
+telemetry but **not yet live-verified** — pending `bzrk` auth (see the
+live-verification checklist in `docs/claude-code.md`). Per-project cost
+attribution infers a project name from file-target paths via the
+directory before the first marker segment (`src`, `tests`, `lib`, `pkg`;
+override with `BERSERK_MCP_PROJECT_MARKERS`).
 
 **v1.14.1 fix — these three tools were silently returning zero results against
 real data.** Live-verifying `claude_token_burn` against actual Berserk output
@@ -777,6 +790,7 @@ All configuration is via environment variables — all optional:
 | `BERSERK_MCP_INGESTION_CATALOG` | adjacent catalog | Optional path to an alternate `ingestion_catalog.json`. |
 | `BERSERK_MCP_TOKENS_IN_ATTR` | `claude.tokens_input` | Claude-Code attribute holding input tokens (override if your forwarder emits a different name, e.g. `claude.usage.input_tokens`; a mismatch just falls back to the body-length estimate). |
 | `BERSERK_MCP_TOKENS_OUT_ATTR` | `claude.tokens_output` | Claude-Code attribute holding output tokens (see above). |
+| `BERSERK_MCP_PROJECT_MARKERS` | `src,tests,lib,pkg` | Path segments that mark "inside a project" for `claude_cost_report` per-project attribution; the directory before the first marker is the project name. |
 
 Parser-factory (LLM parser generation) has its own env vars — see
 [Parser factory](#parser-factory-llm-generated-query-packs) above.
