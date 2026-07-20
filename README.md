@@ -707,6 +707,57 @@ dependencies. Installation must include the accompanying local modules
 `ingestion_advisor.py`) and packaged data (`primers/`, `ingestion_catalog.json`).
 Use `pip install .` or a built wheel — do not copy `berserk_mcp.py` alone.
 
+## Authenticate to `bzrk`
+
+berserk-mcp does not talk to Berserk directly — it wraps the `bzrk` CLI.
+Authentication is `bzrk`'s job, not this server's. **The Berserk bearer
+token lives only in `bzrk`'s own config; this server never reads it,
+stores it, forwards it, or logs it.**
+
+Recommended one-time setup:
+
+```bash
+# 1. Log in to Berserk with the profile name you'll use from the MCP.
+bzrk login          # follow the prompt for endpoint + token
+# or
+bzrk -P prod login  # log in to a specific named profile
+
+# 2. Verify auth works with the same profile the MCP will use.
+bzrk -P local search "default | take 1" --since "1h ago"
+
+# 3. Point the MCP at that profile (or leave BZRK_PROFILE unset for `local`).
+export BZRK_PROFILE=local
+```
+
+**Profiles.** Berserk uses named profiles (`local`, `prod`, `staging`,
+etc.) so you can point the MCP at a different tenant by changing one
+env var. `berserk-mcp` reads `BZRK_PROFILE` and passes it to every
+`bzrk` invocation as `-P <profile>`. In `claude_desktop_config.json`
+this looks like `"env": {"BZRK_PROFILE": "prod"}` — see [Connect it to
+a client](#connect-it-to-a-client) below.
+
+**Non-default `bzrk` binary.** If `bzrk` is not on `$PATH` (for example,
+Homebrew-installed or in a per-repo `.venv`), set `BZRK_BIN` to the full
+path. `berserk-mcp` invokes `bzrk` with an argument list — never through
+a shell — so quoting is not a concern.
+
+**Auth failures at runtime.** If `bzrk` returns an authentication error
+(bad token, expired session, wrong profile), berserk-mcp returns the
+constant string:
+
+```text
+bzrk authentication failed; run `bzrk login` and retry
+```
+
+Raw `bzrk` stderr, tokens, and tenant identifiers are never propagated
+to the caller — see [Security](#security) for the full rationale.
+
+**Full `bzrk` auth options** (SSO, service accounts, per-profile config)
+are out of scope for this README — see the official Berserk CLI docs at
+<https://docs.bzrk.dev>. The MCP server only requires that `bzrk -P
+<profile> search "..."` succeeds from the same shell environment the
+MCP will run in.
+
 ## Configure
 
 All configuration is via environment variables — all optional:
