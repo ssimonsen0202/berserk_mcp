@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "berserk-mcp"
 description = "An MCP server that answers Berserk observability questions through verified, deterministic KQL tools."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = { file = "LICENSE" }
 authors = [{ name = "Simon Simonsen" }]
 keywords = ["mcp", "model-context-protocol", "berserk", "observability", "kql", "telemetry", "otlp"]

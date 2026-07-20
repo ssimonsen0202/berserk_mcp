@@ -739,7 +739,7 @@ Write a 10-line digest, flag anything anomalous, and stop.
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.9+ (3.8 reached upstream EOL 2024-10-07 and is no longer a supported floor)
 - The [`bzrk`](https://docs.bzrk.dev) CLI, installed and authenticated (`bzrk -P <profile> search "..."` works). The bearer token lives in `bzrk`'s own config — this server never reads or stores it.
 
 ## Install
