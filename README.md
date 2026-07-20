@@ -340,9 +340,13 @@ fixed in the current release:
 Version 1.9.0 adds a stdlib-only secret scanner at the MCP output boundary.
 Every `tools/call` result is handled according to `BERSERK_MCP_REDACT`:
 
-- `flag` (default) leaves the result intact and prepends a warning when a secret is detected.
-- `redact` replaces detected values with typed placeholders such as `[REDACTED:aws_key]`.
-- `off` disables output scanning.
+- `redact` (default since F-009, 2026-07-20) replaces detected values with typed placeholders such as `[REDACTED:aws_key]`.
+- `flag` leaves the result intact and prepends a warning when a secret is detected — an explicit opt-in away from the safer default; the server logs a startup warning to stderr when this is set.
+- `off` disables output scanning entirely — also an explicit opt-in with a startup warning.
+
+An unrecognized `BERSERK_MCP_REDACT` value fails **closed** to `redact` (the
+strictest mode), not to a weaker one — previously an invalid value silently
+fell back to `flag`, which could leave secrets in the output.
 
 The scanner recognizes common cloud/provider credentials, private keys, JWTs,
 bearer tokens, and generic password/token assignments. High-entropy matching is
@@ -823,7 +827,7 @@ All configuration is via environment variables — all optional:
 | `BERSERK_MCP_LEARNED_PATH` | platform config dir | Where saved queries persist (`~/.config/berserk-mcp/learned.json` on Linux). |
 | `BERSERK_MCP_ROLE` | `all` | Active role lane: `sre`, `soc`, `claude`, `ops`, or `all`. Controls tool visibility and primer injection. |
 | `BERSERK_MCP_PRIMERS_DIR` | adjacent `primers/` dir | Directory containing `<role>.md` primer files. |
-| `BERSERK_MCP_REDACT` | `flag` | Output handling: `off`, `flag`, or `redact`. |
+| `BERSERK_MCP_REDACT` | `redact` | Output handling: `redact` (safest, default), `flag`, or `off`. An unrecognized value fails closed to `redact`; `flag`/`off` log a startup warning since they weaken the default. |
 | `BERSERK_MCP_REDACT_ENTROPY` | unset | Set to `true` to enable high-entropy token detection. |
 | `BERSERK_MCP_REDACT_PII` | unset | Comma-separated PII checks: `email,ipv4,ipv6,credit_card`. |
 | `BERSERK_MCP_INGESTION_CATALOG` | adjacent catalog | Optional path to an alternate `ingestion_catalog.json`. |
@@ -939,6 +943,7 @@ that way if you add tools.
 - **Cap eviction preserves human entries.** The learned-query store's 500-item cap evicts the oldest *generated* entry to make room for a new generated write — never a human one. If the store is saturated with human entries and there's nothing generated left to evict, the generated write is refused with a `ValueError` rather than silently dropping a human save or silently dropping the new write itself. A human save (via `save_query`) can always make room for itself, including evicting old generated entries first.
 - **Concurrency-safe store writes.** Every JSON store's load-modify-save cycle (the learned-query store, its amendments log, the discovery queue, the schema-knowledge cache, and the known-sources baseline) is guarded by a portable advisory file lock (atomic lockfile creation — no `fcntl`/`msvcrt`, so it behaves identically on POSIX and Windows) and writes to a per-process/thread-unique temp file before an atomic rename. Two concurrent writers can no longer collide on a shared `.tmp` path or have the second writer's atomic replace silently discard the first writer's update. A lock older than 30 seconds is treated as abandoned by a crashed holder and broken automatically. `_drain_pending_jobs` (which can run for minutes across LLM calls) snapshots the jobs to process under a brief lock, does the slow work unlocked, then reloads the current on-disk queue and merges in only the status updates for the jobs it processed — so a concurrent enqueue is never clobbered by a stale in-memory copy.
 - **Role visibility enforced at call time, not just list time.** `tools/list` and `tools/call` now use the same predicate: a tool hidden from the active role cannot be invoked directly by naming it, even though it never appeared in `tools/list`. A role-hidden tool and a genuinely nonexistent tool get an identical response — the server never confirms that a hidden tool's name exists. `BERSERK_MCP_ROLE` is validated at startup: an unrecognized role now refuses to start with a clear error instead of silently degrading to "almost no tools visible" (a typo like `sre1` previously matched no role prefix, so every role-scoped tool silently vanished with no indication why).
+- **Output redaction defaults to fail-closed.** `BERSERK_MCP_REDACT` defaults to `redact` (was `flag`, which showed the complete secret-bearing result with only a warning banner prepended). An unrecognized value now fails closed to `redact` rather than silently falling back to a weaker mode. Choosing `flag` or `off` is still fully supported — it's an explicit, visible opt-in with a startup warning on stderr, not a silent default.
 - **Bounded redaction.** `redact()` uses explicit `MAX_REDACT_CHARS = 1_000_000` and `MAX_REDACT_CANDIDATES = 50_000` limits, and a sort-merge-join pipeline that fail-closes to `[REDACTED:redaction_limit]` on bound violations — no partial original text is ever returned.
 - **Constant auth-failure messaging.** `bzrk` auth failures always return the constant string `"bzrk authentication failed; run \`bzrk login\` and retry"` — never raw stderr, tokens, or tenant identifiers.
 - **JSON-RPC 2.0 strict envelope validation.** `initialize` requires a nonempty string `protocolVersion` and object-typed `capabilities`/`clientInfo`; `ping` and `tools/list` reject nonempty params; notifications sent as requests are rejected with `-32600`; unexpected handler exceptions surface as `-32603` rather than silently converting to `isError=true` results.

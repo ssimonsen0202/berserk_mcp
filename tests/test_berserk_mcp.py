@@ -758,6 +758,52 @@ class BerserkMcpTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    # ---- F-009: default REDACT mode is fail-closed ----
+    def _redact_mode_of_fresh_process(self, env_value=None):
+        env = dict(os.environ)
+        if env_value is None:
+            env.pop("BERSERK_MCP_REDACT", None)
+        else:
+            env["BERSERK_MCP_REDACT"] = env_value
+        result = subprocess.run(
+            [sys.executable, "-c", "import berserk_mcp as bm; print(bm.REDACT_MODE)"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(Path(bm.__file__).resolve().parent), env=env,
+        )
+        return result
+
+    def test_default_redact_mode_is_redact_not_flag(self):
+        result = self._redact_mode_of_fresh_process(env_value=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "redact")
+
+    def test_invalid_redact_mode_fails_closed_to_redact(self):
+        """An unrecognized value must fall back to the STRICTEST mode
+        (redact), not silently degrade to a weaker one."""
+        result = self._redact_mode_of_fresh_process(env_value="bogus-mode")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "redact")
+        self.assertIn("bogus-mode", result.stderr)
+        self.assertIn("not a recognized mode", result.stderr)
+
+    def test_explicit_flag_mode_is_respected_with_warning(self):
+        result = self._redact_mode_of_fresh_process(env_value="flag")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "flag")
+        self.assertIn("will NOT be fully redacted", result.stderr)
+
+    def test_explicit_off_mode_is_respected_with_warning(self):
+        result = self._redact_mode_of_fresh_process(env_value="off")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "off")
+        self.assertIn("will NOT be fully redacted", result.stderr)
+
+    def test_explicit_redact_mode_has_no_warning(self):
+        result = self._redact_mode_of_fresh_process(env_value="redact")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "redact")
+        self.assertNotIn("will NOT be fully redacted", result.stderr)
+
     def test_serve_mcp_loop_handles_malformed_then_valid(self):
         """FVR-004: real stdio loop must emit responses for malformed JSON,
         an invalid request, and a valid ping on separate lines, and continue

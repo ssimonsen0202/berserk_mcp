@@ -55,15 +55,40 @@ import secret_scan
 
 __version__ = "1.15.0"
 
+
+def log(msg):
+    print("[berserk-mcp] " + str(msg), file=sys.stderr, flush=True)
+
+
 # ---------- configuration (env-overridable) ----------
 BZRK_BIN = os.environ.get("BZRK_BIN", "bzrk")
 PROFILE = os.environ.get("BZRK_PROFILE", "local")
 TABLE = os.environ.get("BERSERK_TABLE", "default")
 DEFAULT_TIMEOUT = int(os.environ.get("BZRK_TIMEOUT", "120"))
 ACTIVE_ROLE = os.environ.get("BERSERK_MCP_ROLE", "all").strip().lower() or "all"
-REDACT_MODE = os.environ.get("BERSERK_MCP_REDACT", "flag").strip().lower()
-if REDACT_MODE not in {"off", "flag", "redact"}:
-    REDACT_MODE = "flag"
+
+# F-009: default to the safest output mode. An invalid mode string fails
+# CLOSED to 'redact' (the strictest setting), not to the weaker 'flag'
+# default this used to silently fall back to. Choosing 'off' or 'flag' is
+# still fully supported -- it's just now an explicit, visible opt-in
+# rather than the default, with a startup warning so an operator who
+# didn't mean to weaken it notices immediately.
+_redact_mode_env = os.environ.get("BERSERK_MCP_REDACT", "redact").strip().lower()
+if _redact_mode_env not in {"off", "flag", "redact"}:
+    log(
+        f"BERSERK_MCP_REDACT={_redact_mode_env!r} is not a recognized mode "
+        f"(off/flag/redact) -- defaulting to the safest mode, 'redact'."
+    )
+    REDACT_MODE = "redact"
+else:
+    REDACT_MODE = _redact_mode_env
+    if REDACT_MODE in {"off", "flag"}:
+        log(
+            f"BERSERK_MCP_REDACT={REDACT_MODE!r}: secret/PII values in tool "
+            f"output will NOT be fully redacted. This is an explicit "
+            f"opt-in away from the safer default ('redact')."
+        )
+
 REDACT_ENTROPY = os.environ.get("BERSERK_MCP_REDACT_ENTROPY", "").strip().lower() in {
     "1", "true", "yes", "on",
 }
@@ -196,10 +221,6 @@ if ACTIVE_ROLE != "all" and ACTIVE_ROLE not in _ROLE_PREFIX:
     )
 
 INSTRUCTIONS = build_instructions(ACTIVE_ROLE)
-
-
-def log(msg):
-    print("[berserk-mcp] " + str(msg), file=sys.stderr, flush=True)
 
 
 def tool_visible(tool):
