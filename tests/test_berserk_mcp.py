@@ -338,6 +338,26 @@ class BerserkMcpTest(unittest.TestCase):
             else:
                 os.environ["BERSERK_MCP_LEARNED_PATH"] = orig
 
+    # ---- SNYK-003: I/O helpers refuse tainted paths at the sink ----
+    def test_load_json_list_refuses_relative_path(self):
+        # Returns [] without opening() the untrusted path
+        self.assertEqual(bm.load_json_list("relative/x.json"), [])
+
+    def test_load_json_list_refuses_traversal_path(self):
+        self.assertEqual(bm.load_json_list("/tmp/../etc/shadow"), [])
+
+    def test_save_json_list_refuses_tainted_path(self):
+        with self.assertRaises(bm.StorePathError):
+            bm.save_json_list("relative/x.json", [])
+        with self.assertRaises(bm.StorePathError):
+            bm.save_json_list("/tmp/../etc/x.json", [])
+
+    def test_ensure_private_dir_refuses_tainted_path(self):
+        with self.assertRaises(bm.StorePathError):
+            bm._ensure_private_dir("relative/x.json")
+        with self.assertRaises(bm.StorePathError):
+            bm._ensure_private_dir("/tmp/../root/x.json")
+
     # ---- FVR-005: primer routing/signal fields must reference real tools ----
     def test_primer_referenced_tools_all_exist(self):
         """FVR-005: every tool name that appears in a primer routing table

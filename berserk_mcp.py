@@ -220,30 +220,42 @@ def _ensure_private_dir(path):
     mkdir(mode=...) alone is masked by the process umask and doesn't fix a
     directory that already exists with looser permissions, so chmod
     explicitly every time rather than relying on the mkdir call.
+
+    The path is passed through ``_validate_store_path`` at every entry so
+    even a stale ``LEARNED_PATH`` predating the module-load validator, or a
+    future caller that constructs a path from untrusted input, cannot mkdir
+    or chmod outside a clean absolute location.
     """
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(Path(path).parent, 0o700)
+    safe = _validate_store_path(path, "store")
+    safe.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(safe.parent, 0o700)
 
 
 def load_json_list(path):
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        safe = _validate_store_path(path, "store")
+    except StorePathError as e:
+        log(f"load_json_list refused: {e}")
+        return []
+    try:
+        with open(safe, "r", encoding="utf-8") as f:
             data = json.load(f)
             return data if isinstance(data, list) else []
     except FileNotFoundError:
         return []
     except (OSError, json.JSONDecodeError) as e:
-        log(f"load_json_list({path}): {type(e).__name__}: {e}")
+        log(f"load_json_list({safe}): {type(e).__name__}: {e}")
         return []
 
 
 def save_json_list(path, items):
-    _ensure_private_dir(path)
-    tmp = str(path) + ".tmp"
+    safe = _validate_store_path(path, "store")
+    _ensure_private_dir(safe)
+    tmp = str(safe) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(items, f, indent=2)
     os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    os.replace(tmp, safe)
 
 
 # ---------- verified queries (do not edit field names; they are confirmed
@@ -627,23 +639,29 @@ def do_schema():
 # ---------- learned-query store ----------
 def load_learned():
     try:
-        with open(LEARNED_PATH, "r", encoding="utf-8") as f:
+        safe = _validate_store_path(LEARNED_PATH, "LEARNED_PATH")
+    except StorePathError as e:
+        log(f"load_learned refused: {e}")
+        return []
+    try:
+        with open(safe, "r", encoding="utf-8") as f:
             data = json.load(f)
             return data if isinstance(data, list) else []
     except FileNotFoundError:
         return []
     except (OSError, json.JSONDecodeError) as e:
-        log(f"load_learned({LEARNED_PATH}): {type(e).__name__}: {e}")
+        log(f"load_learned({safe}): {type(e).__name__}: {e}")
         return []
 
 
 def save_learned(items):
-    _ensure_private_dir(LEARNED_PATH)
-    tmp = str(LEARNED_PATH) + ".tmp"
+    safe = _validate_store_path(LEARNED_PATH, "LEARNED_PATH")
+    _ensure_private_dir(safe)
+    tmp = str(safe) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(items, f, indent=2)
     os.chmod(tmp, 0o600)
-    os.replace(tmp, LEARNED_PATH)
+    os.replace(tmp, safe)
 
 
 def sanitize_name(n):

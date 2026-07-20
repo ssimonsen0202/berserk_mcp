@@ -104,26 +104,59 @@ MAX_AUTOQUEUE_PER_RUN = int(os.environ.get("BERSERK_MAX_AUTOQUEUE", "5"))
 
 
 # ---------- dict-store helpers (mirror berserk_mcp's list-store helpers) ----------
+class StorePathError(ValueError):
+    """Raised when a path fails safety validation. Mirrors berserk_mcp.StorePathError
+    (duplicated here to avoid a circular import; keep the semantics aligned)."""
+
+
+def _safe_path(path, purpose):
+    """Validate that ``path`` is an absolute path with no ``..`` segments or
+    control characters. Returns the resolved absolute Path on success."""
+    if not path:
+        raise StorePathError(f"{purpose} path is empty")
+    if not isinstance(path, (str, Path)):
+        raise StorePathError(f"{purpose} path must be a string or Path")
+    text = str(path)
+    if any(ord(c) < 32 for c in text):
+        raise StorePathError(f"{purpose} path contains control characters")
+    p = Path(text)
+    if not p.is_absolute():
+        raise StorePathError(f"{purpose} path must be absolute (got {text!r})")
+    if ".." in p.parts:
+        raise StorePathError(f"{purpose} path must not contain '..' segments")
+    resolved = p.resolve(strict=False)
+    if ".." in resolved.parts:
+        raise StorePathError(f"{purpose} path resolves through '..'")
+    return resolved
+
+
 def load_json_dict(path):
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        safe = _safe_path(path, "store")
+    except StorePathError as e:
+        if _log:
+            _log(f"load_json_dict refused: {e}")
+        return {}
+    try:
+        with open(safe, "r", encoding="utf-8") as f:
             data = json.load(f)
             return data if isinstance(data, dict) else {}
     except FileNotFoundError:
         return {}
     except (OSError, json.JSONDecodeError) as e:
         if _log:
-            _log(f"load_json_dict({path}): {type(e).__name__}: {e}")
+            _log(f"load_json_dict({safe}): {type(e).__name__}: {e}")
         return {}
 
 
 def save_json_dict(path, data):
-    _ensure_private_dir(path)
-    tmp = str(path) + ".tmp"
+    safe = _safe_path(path, "store")
+    _ensure_private_dir(safe)
+    tmp = str(safe) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    os.replace(tmp, safe)
 
 
 # ---------- P1: LLM client with escalation ladder ----------

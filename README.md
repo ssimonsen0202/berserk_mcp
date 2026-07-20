@@ -819,7 +819,7 @@ that way if you add tools.
 - **Generated-query policy.** LLM-generated queries must start with `{table} | ...`, must terminate with `| take N` where `1 ≤ N ≤ 50`, and must fit within 2,000 characters. The policy check is applied to a stripped copy of the KQL with string literals and `//` comments removed, so operator text inside quoted strings or comments cannot satisfy the check.
 - **Provider error scrubbing.** HTTP errors from LLM providers return only `"HTTP <code>"` — response bodies and exception messages are never propagated to the caller.
 - **LLM endpoint scheme allowlist.** The operator-configured LLM endpoint URL (via `--set-hermes-url` or `BERSERK_LLM_HERMES_URL`) is validated at both write time and call time: only `http://` and `https://` schemes are accepted; control characters and newline-injection variants are rejected before any `urllib.request.urlopen` call. Defense-in-depth against `file://`, `gopher://`, `ftp://`, and request-smuggling attempts even though the operator is inside the trust boundary.
-- **Store-path validation.** Filesystem paths read from operator env vars (`BERSERK_MCP_LEARNED_PATH`, `XDG_CONFIG_HOME`, `APPDATA`) are validated before use: must be absolute, must not contain `..` segments, must not resolve through `..`, must not contain control characters. Defense-in-depth so a typo or a poisoned env var cannot redirect `save_learned()` / `_ensure_private_dir()` writes outside the intended location.
+- **Store-path validation.** Filesystem paths read from operator env vars (`BERSERK_MCP_LEARNED_PATH`, `XDG_CONFIG_HOME`, `APPDATA`) are validated before use: must be absolute, must not contain `..` segments, must not resolve through `..`, must not contain control characters. The same validator runs at every I/O sink (`load_json_list`, `save_json_list`, `load_learned`, `save_learned`, `_ensure_private_dir`, `load_json_dict`, `save_json_dict`) so any future caller — not just the operator env-var path — is guarded too. Defense-in-depth so a typo or a poisoned env var cannot redirect any read or write outside the intended location.
 
 **Note on output.** Tool results are whatever your telemetry contains. If logs in Berserk hold sensitive values, `logs_for_service`/`search` can surface them — redact at ingest, not here.
 
@@ -845,7 +845,7 @@ external scanner pass:
   threat model (operator is inside the trust boundary), addressed
   with defense-in-depth scheme/path allowlists anyway. Full analysis:
   [`docs/cisco-mcp-scanner-result-report-2026-07-19.md`](docs/cisco-mcp-scanner-result-report-2026-07-19.md).
-- **Ongoing verification:** the test suite (`tests/`, 269 tests + 2
+- **Ongoing verification:** the test suite (`tests/`, 276 tests + 2
   role tests) includes an adversarial regression for every finding
   above and is run before every release. See `## Testing` below.
 

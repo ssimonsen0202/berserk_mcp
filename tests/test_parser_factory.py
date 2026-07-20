@@ -189,6 +189,19 @@ class LlmClientTest(ParserFactoryTestBase):
         pf.save_hermes_url("http://host-a:3000/v1")
         pf.save_hermes_url("https://host-b/v1")
 
+    # ---- SNYK-003: dict-store helpers refuse tainted paths at the sink ----
+    def test_load_json_dict_refuses_relative_path(self):
+        self.assertEqual(pf.load_json_dict("relative/x.json"), {})
+
+    def test_load_json_dict_refuses_traversal_path(self):
+        self.assertEqual(pf.load_json_dict("/tmp/../etc/shadow"), {})
+
+    def test_save_json_dict_refuses_tainted_path(self):
+        with self.assertRaises(pf.StorePathError):
+            pf.save_json_dict("relative/x.json", {})
+        with self.assertRaises(pf.StorePathError):
+            pf.save_json_dict("/tmp/../etc/x.json", {})
+
     def test_http_helpers_refuse_non_http_scheme_at_call_time(self):
         """Even if a bad URL somehow reached _http_post_json/_http_get_json
         (e.g. a stale config file predating this validation), the request
