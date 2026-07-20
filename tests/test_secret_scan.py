@@ -83,10 +83,27 @@ class SecretRedactionTest(unittest.TestCase):
         self.assertEqual(clean, "[REDACTED:high_entropy]")
         self.assertEqual(findings[0]["type"], "high_entropy")
 
-    def test_findings_are_aggregated_and_capped(self):
+    def test_findings_are_aggregated_by_type_not_capped(self):
+        """SEC-004: the summary is aggregated by finding_type, and there is
+        no correctness reason for it to stop counting at MAX_MATCHES -- the
+        type vocabulary is small and fixed regardless of match count."""
         text = " ".join([AWS_KEY] * (ss.MAX_MATCHES + 20))
         _clean, findings = ss.redact(text, pii_types=())
-        self.assertEqual(findings, [{"type": "aws_key", "count": ss.MAX_MATCHES, "first_offset": 0}])
+        self.assertEqual(
+            findings, [{"type": "aws_key", "count": ss.MAX_MATCHES + 20, "first_offset": 0}]
+        )
+
+    def test_redact_mode_leaves_nothing_past_the_old_cap(self):
+        """SEC-004 minimal-evidence reproduction: 101 distinct dummy
+        AWS-style credentials must ALL be redacted, not just the first 100.
+        Before the fix, the 101st+ leaked verbatim in redact-mode output."""
+        keys = [f"AKIA{str(i).zfill(16)}" for i in range(ss.MAX_MATCHES + 1)]
+        text = " ".join(keys)
+        clean, findings = ss.redact(text, pii_types=())
+        self.assertEqual(sum(f["count"] for f in findings), ss.MAX_MATCHES + 1)
+        for key in keys:
+            self.assertNotIn(key, clean)
+        self.assertEqual(clean.count("[REDACTED:aws_key]"), ss.MAX_MATCHES + 1)
 
     def test_redactor_does_not_write_secret_to_stderr(self):
         buf = io.StringIO()
@@ -96,15 +113,227 @@ class SecretRedactionTest(unittest.TestCase):
         self.assertNotIn("hunter2", repr(findings))
         self.assertNotIn(AWS_KEY, repr(findings))
 
+    def test_overlapping_candidates_leave_no_suffix(self):
+        text = "password=hunter2hunter2 secret=hunter2hunter2"
+        clean, findings = ss.redact(text, pii_types=())
+        self.assertNotIn("hunter2", clean)
+
+    def test_adjacent_nonoverlapping_both_redacted(self):
+        key1 = "AKIA" + "A" * 16
+        key2 = "AKIA" + "B" * 16
+        text = key1 + " " + key2
+        clean, _ = ss.redact(text, pii_types=())
+        self.assertNotIn(key1, clean)
+        self.assertNotIn(key2, clean)
+        self.assertEqual(clean.count("[REDACTED:aws_key]"), 2)
+
+    def test_input_above_size_limit_returns_marker(self):
+        text = "A" * (ss.MAX_REDACT_CHARS + 1)
+        clean, findings = ss.redact(text, pii_types=())
+        self.assertEqual(clean, "[REDACTED:redaction_limit]")
+        self.assertEqual(findings[0]["type"], "input_too_large")
+
+    def test_candidate_count_above_limit_returns_marker(self):
+        saved = ss.MAX_REDACT_CANDIDATES
+        try:
+            ss.MAX_REDACT_CANDIDATES = 10
+            keys = [f"AKIA{str(i).zfill(16)}" for i in range(11)]
+            text = " ".join(keys)
+            clean, findings = ss.redact(text, pii_types=())
+            self.assertEqual(clean, "[REDACTED:redaction_limit]")
+            self.assertEqual(findings[0]["type"], "too_many_matches")
+            for key in keys[:5]:
+                self.assertNotIn(key, clean)
+        finally:
+            ss.MAX_REDACT_CANDIDATES = saved
+
+    def test_findings_contain_no_values(self):
+        text = f"password=hunter2 {AWS_KEY} user@example.com"
+        _clean, findings = ss.redact(text, include_entropy=False, pii_types={"email"})
+        serialized = repr(findings)
+        self.assertNotIn("hunter2", serialized)
+        self.assertNotIn(AWS_KEY, serialized)
+        self.assertNotIn("user@example.com", serialized)
+
+    def test_ordinary_text_unchanged(self):
+        text = "Hello world, this is a normal log message with no secrets."
+        clean, findings = ss.redact(text, pii_types=())
+        self.assertEqual(clean, text)
+        self.assertEqual(findings, [])
+
+    def test_redaction_idempotent(self):
+        text = f"password=hunter2 {AWS_KEY}"
+        clean1, _ = ss.redact(text, pii_types=())
+        clean2, findings2 = ss.redact(clean1, pii_types=())
+        self.assertEqual(clean1, clean2)
+        self.assertEqual(findings2, [])
+
+    def test_apply_output_filter_redact_respects_limit(self):
+        text = "A" * (ss.MAX_REDACT_CHARS + 1)
+        result = ss.apply_output_filter(text, mode="redact")
+        self.assertEqual(result, "[REDACTED:redaction_limit]")
+
 
 class AuditRowParsingTest(unittest.TestCase):
-    def test_parse_audit_rows_accepts_json_array_and_wrapper(self):
+    def test_parse_valid_bare_array(self):
         recs = [{"service": "api", "ts": "t1", "body": "x"},
                 {"service": "web", "ts": "t2", "body": "y"}]
-        self.assertEqual(len(ss._parse_audit_rows(json.dumps(recs))), 2)          # bare array
-        self.assertEqual(len(ss._parse_audit_rows(json.dumps({"data": recs}))), 2)  # wrapped
-        self.assertEqual(len(ss._parse_audit_rows("\n".join(json.dumps(r) for r in recs))), 2)  # jsonl
+        result = ss._parse_audit_rows(json.dumps(recs))
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["service"], "api")
+
+    def test_parse_valid_wrapper_list(self):
+        recs = [{"service": "api", "ts": "t1", "body": "x"}]
+        for key in ("rows", "data", "results", "records"):
+            result = ss._parse_audit_rows(json.dumps({key: recs}))
+            self.assertEqual(len(result), 1, f"wrapper key={key}")
+
+    def test_parse_valid_jsonl(self):
+        recs = [{"service": "api", "ts": "t1", "body": "x"},
+                {"service": "web", "ts": "t2", "body": "y"}]
+        result = ss._parse_audit_rows("\n".join(json.dumps(r) for r in recs))
+        self.assertEqual(len(result), 2)
+
+    def test_parse_valid_single_jsonl_line(self):
+        result = ss._parse_audit_rows(json.dumps({"service": "a", "ts": "t", "body": "b"}))
+        self.assertEqual(len(result), 1)
+
+    def test_parse_valid_empty_inputs(self):
         self.assertEqual(ss._parse_audit_rows("(no rows)"), [])
+        self.assertEqual(ss._parse_audit_rows(""), [])
+        self.assertEqual(ss._parse_audit_rows(json.dumps([])), [])
+
+    def test_parse_valid_tables_shape(self):
+        doc = {
+            "Tables": [{
+                "schema": {"columns": [
+                    {"name": "service", "type": 5, "nullable": True},
+                    {"name": "ts", "type": 6, "nullable": True},
+                    {"name": "body", "type": 5, "nullable": True},
+                ]},
+                "rows": [["api", "2026-07-18T00:00:00Z", f"key {AWS_KEY}"]],
+            }],
+            "stats": {"rows_processed": 1},
+        }
+        rows = ss._parse_audit_rows(json.dumps(doc))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["service"], "api")
+        self.assertIn(AWS_KEY, rows[0]["body"])
+
+    def test_parse_valid_tables_zero_rows(self):
+        doc = {"Tables": [{"schema": {"columns": [
+            {"name": "service"}, {"name": "ts"}, {"name": "body"},
+        ]}, "rows": []}]}
+        self.assertEqual(ss._parse_audit_rows(json.dumps(doc)), [])
+
+    def test_truncated_whole_json_raises(self):
+        with self.assertRaises(ss.AuditParseError):
+            ss._parse_audit_rows('{"Tables":')
+
+    def test_clean_jsonl_plus_truncated_secret_raises(self):
+        good = json.dumps({"service": "a", "ts": "t", "body": "clean"})
+        bad = '{"service": "b", "ts": "t2", "body": "password=sec'
+        with self.assertRaises(ss.AuditParseError):
+            ss._parse_audit_rows(good + "\n" + bad)
+
+    def test_jsonl_object_plus_nonjson_line_raises(self):
+        good = json.dumps({"service": "a", "ts": "t", "body": "x"})
+        with self.assertRaises(ss.AuditParseError):
+            ss._parse_audit_rows(good + "\nnot json at all")
+
+    def test_tables_row_shorter_than_columns_raises(self):
+        doc = {"Tables": [{"schema": {"columns": [
+            {"name": "service"}, {"name": "ts"}, {"name": "body"},
+        ]}, "rows": [["api", "t1"]]}]}
+        with self.assertRaises(ss.AuditParseError):
+            ss._parse_audit_rows(json.dumps(doc))
+
+    def test_tables_row_longer_than_columns_raises(self):
+        doc = {"Tables": [{"schema": {"columns": [
+            {"name": "service"}, {"name": "ts"}, {"name": "body"},
+        ]}, "rows": [["api", "t1", "x", "extra"]]}]}
+        with self.assertRaises(ss.AuditParseError):
+            ss._parse_audit_rows(json.dumps(doc))
+
+    def test_tables_row_is_scalar_raises(self):
+        doc = {"Tables": [{"schema": {"columns": [
+            {"name": "service"}, {"name": "ts"}, {"name": "body"},
+        ]}, "rows": ["scalar_row"]}]}
+        with self.assertRaises(ss.AuditParseError):
+            ss._parse_audit_rows(json.dumps(doc))
+
+    def test_wrapper_list_contains_scalar_raises(self):
+        with self.assertRaises(ss.AuditParseError):
+            ss._parse_audit_rows(json.dumps({"data": [42, "not_a_dict"]}))
+
+    def test_unsupported_object_shape_raises(self):
+        with self.assertRaises(ss.AuditParseError):
+            ss._parse_audit_rows('{"unexpected": "shape"}')
+
+    def test_unknown_table_header_raises(self):
+        text = "col_a\tcol_b\tcol_c\nval1\tval2\tval3"
+        with self.assertRaises(ss.AuditParseError):
+            ss._parse_audit_rows(text)
+
+    def test_tables_malformed_schema_raises(self):
+        with self.assertRaises(ss.AuditParseError):
+            ss._parse_audit_rows(json.dumps(
+                {"Tables": [{"schema": {}, "rows": "not-a-list"}]}
+            ))
+
+    def test_jsonl_row_missing_required_field_raises(self):
+        with self.assertRaises(ss.AuditParseError):
+            ss._parse_audit_rows(json.dumps({"service": "a", "body": "b"}))
+
+    def test_bare_array_with_nondict_element_raises(self):
+        with self.assertRaises(ss.AuditParseError):
+            ss._parse_audit_rows(json.dumps([{"service": "a", "ts": "t", "body": "x"}, 42]))
+
+    def test_multiple_tables_raises_and_does_not_hide_second_table(self):
+        """FVR-001: a valid-empty first Tables entry must not hide a
+        secret-bearing second entry. The parser must reject or aggregate;
+        it must never process only tables[0]."""
+        response = json.dumps({
+            "Tables": [
+                {
+                    "schema": {"columns": [{"name": "service"}, {"name": "ts"}, {"name": "body"}]},
+                    "rows": [],
+                },
+                {
+                    "schema": {"columns": [{"name": "service"}, {"name": "ts"}, {"name": "body"}]},
+                    "rows": [["svcX", "2026-07-19T00:00:00Z", "password=hunter2"]],
+                },
+            ]
+        })
+        with self.assertRaises(ss.AuditParseError):
+            ss._parse_audit_rows(response)
+
+    def test_scan_secrets_multi_table_returns_error_not_clean(self):
+        """FVR-001 (end-to-end): scan_secrets must never report clean when the
+        response has multiple tables and the second one contains a secret."""
+        response = json.dumps({
+            "Tables": [
+                {
+                    "schema": {"columns": [{"name": "service"}, {"name": "ts"}, {"name": "body"}]},
+                    "rows": [],
+                },
+                {
+                    "schema": {"columns": [{"name": "service"}, {"name": "ts"}, {"name": "body"}]},
+                    "rows": [["svcX", "2026-07-19T00:00:00Z", "password=hunter2 AKIAIOSFODNN7EXAMPLE"]],
+                },
+            ]
+        })
+        orig = ss._bzrk_search
+        try:
+            ss._bzrk_search = lambda q, since: (response, False)
+            text, err = ss.scan_secrets()
+            self.assertTrue(err)
+            self.assertIn("Secret scan failed", text)
+            self.assertNotIn("hunter2", text)
+            self.assertNotIn("AKIA", text)
+            self.assertNotIn("no potential secrets", text.lower())
+        finally:
+            ss._bzrk_search = orig
 
 
 class OutputFilterTest(unittest.TestCase):
@@ -184,6 +413,41 @@ class SecretAuditMcpTest(unittest.TestCase):
         self.assertNotIn("hunter2", text)
         self.assertNotIn(SK_KEY, text)
         self.assertIn("body=tostring(body)", self.calls[-1][3])
+
+    def test_scan_secrets_fails_closed_on_unparseable_response(self):
+        """DR-001/DR-006: unparseable response must be is_error=True with NO
+        response content echoed — not the raw text, not a redacted snippet,
+        not any fragment of the original input."""
+        sensitive = (
+            f"session_id=shortsecret user@example.com 192.168.1.10 "
+            f"4111111111111111 {AWS_KEY} private incident description"
+        )
+        bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: (
+            json.dumps({"unexpected_shape": sensitive}), False,
+        )
+        text, err = bm.handle_call("scan_secrets", {})
+        self.assertTrue(err)
+        self.assertIn("malformed or unsupported", text)
+        self.assertNotIn("no potential secrets detected", text)
+        self.assertNotIn(AWS_KEY, text)
+        self.assertNotIn("shortsecret", text)
+        self.assertNotIn("user@example.com", text)
+        self.assertNotIn("192.168.1.10", text)
+        self.assertNotIn("4111111111111111", text)
+        self.assertNotIn("private incident description", text)
+
+    def test_scan_secrets_fails_closed_on_truncated_jsonl(self):
+        """DR-001: A valid clean first line followed by a truncated secret-
+        bearing line must fail closed, never report clean."""
+        good = json.dumps({"service": "a", "ts": "t", "body": "clean"})
+        bad = '{"service": "b", "ts": "t2", "body": "password=topsecret'
+        bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: (
+            good + "\n" + bad, False,
+        )
+        text, err = bm.handle_call("scan_secrets", {})
+        self.assertTrue(err)
+        self.assertNotIn("no potential secrets detected", text)
+        self.assertNotIn("topsecret", text)
 
     def test_scan_report_survives_default_output_filter(self):
         # Regression: scan_secrets output must not trip the global redaction

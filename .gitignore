@@ -10,6 +10,7 @@ build/
 dist/
 .eggs/
 .venv/
+.venv-scanner/
 venv/
 env/
 
@@ -30,3 +31,7 @@ desktop.ini
 # internal working notes — contain homelab specifics, keep local
 docs/implementation-report-2026-07.md
 docs/claude-precommit-checklist-2026-07.md
+
+# Scanner scratch output and in-flight review notes
+scratchpad_out/
+fix-review-primer.md

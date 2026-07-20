@@ -61,15 +61,27 @@ def validate_catalog(catalog):
     return catalog
 
 
+def _extract_names(text):
+    """Extract the first column (name) from each row of tabular output."""
+    names = set()
+    for line in text.strip().splitlines():
+        parts = line.split()
+        if parts:
+            names.add(parts[0].lower())
+    return names
+
+
 def _match_source(source, services_text, metrics_text):
-    services = services_text.lower()
-    metrics = metrics_text.lower()
+    service_names = _extract_names(services_text)
+    metric_names = _extract_names(metrics_text)
     matches = []
     for hint in source["signals"]["services"]:
-        if str(hint).lower() in services:
+        h = str(hint).lower()
+        if h in service_names:
             matches.append(f"service:{hint}")
     for hint in source["signals"]["metrics"]:
-        if str(hint).lower() in metrics:
+        h = str(hint).lower()
+        if any(m == h or m.startswith(h) for m in metric_names):
             matches.append(f"metric:{hint}")
     return matches
 

@@ -8,6 +8,7 @@ learning loop — without a real backend.
 import os
 import sys
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -100,8 +101,11 @@ class BerserkMcpTest(unittest.TestCase):
         )
         self.assertEqual(
             bm.Q_TRACE_FIND_SLOW,
-            "default | where isnotnull(trace_id) | where isempty(parent_span_id) "
-            "| project trace_id, span_name, dur=toint(duration), timestamp, "
+            "default | where isnotnull(trace_id) | where isnotnull(span_name) "
+            "| where isempty(parent_span_id) "
+            "| extend dur=toint(duration) "
+            "| where isnotnull(dur) and dur >= 0 "
+            "| project trace_id, span_name, dur, timestamp, "
             "service=tostring(resource['service.name']) "
             "| sort by dur desc | take 10",
         )
@@ -287,18 +291,241 @@ class BerserkMcpTest(unittest.TestCase):
         bm.handle_call("save_query", {"name": "one_more", "description": "x", "kql": "default | count"})
         self.assertEqual(len(bm.load_json_list(amendments_path)), 1000)
 
+    # ---- FVR-005: primer routing/signal fields must reference real tools ----
+    def test_primer_referenced_tools_all_exist(self):
+        """FVR-005: every tool name that appears in a primer routing table
+        or a 'Signals worth surfacing' bullet must be a registered tool.
+        Backticked prose elsewhere may reference historical names, so this
+        test only checks known-structured fields."""
+        import re as _re
+        registered = {t["name"] for t in bm.TOOLS + bm.MGMT_TOOLS}
+        primers_dir = Path(bm.__file__).resolve().parent / "primers"
+        code_re = _re.compile(r"`([a-z][a-z0-9_]*)`")
+        skip_prefixes = ("$", "-", "\"")
+        # Well-known non-tool identifiers that appear in backticks
+        allow = {
+            "search", "since", "service", "metric", "key", "term",
+            "request_discovery", "system", "default",
+        }
+        for primer_path in primers_dir.glob("*.md"):
+            in_relevant_section = False
+            for line in primer_path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("## "):
+                    heading = stripped[3:].strip().lower()
+                    in_relevant_section = (
+                        "tool routing" in heading
+                        or "signals worth surfacing" in heading
+                        or "investigation flow" in heading
+                    )
+                    continue
+                if not in_relevant_section:
+                    continue
+                for match in code_re.findall(line):
+                    if match in allow or "_" not in match:
+                        continue
+                    if any(match.startswith(p) for p in skip_prefixes):
+                        continue
+                    self.assertIn(
+                        match, registered,
+                        f"{primer_path.name}: `{match}` is referenced but not a registered tool",
+                    )
+
+    # ---- BUG-002: generated-query collision ----
+    def test_generated_query_renames_to_gen_on_human_collision(self):
+        bm.persist_learned_query(
+            {"name": "foo", "description": "human", "kql": "default | count"},
+            action_source="manual")
+        log = bm.persist_learned_query(
+            {"name": "foo", "description": "machine", "kql": "default | take 1"},
+            action_source="generated")
+        self.assertEqual(log["name"], "foo_gen")
+        items = bm.load_learned()
+        self.assertTrue(any(it["name"] == "foo" and it["description"] == "human" for it in items))
+        self.assertTrue(any(it["name"] == "foo_gen" for it in items))
+
+    def test_generated_query_does_not_overwrite_human_gen_suffix(self):
+        bm.persist_learned_query(
+            {"name": "bar_gen", "description": "human named it _gen", "kql": "default | count"},
+            action_source="manual")
+        bm.persist_learned_query(
+            {"name": "bar", "description": "also human", "kql": "default | take 1"},
+            action_source="manual")
+        log = bm.persist_learned_query(
+            {"name": "bar", "description": "generated", "kql": "default | take 5"},
+            action_source="generated")
+        self.assertNotEqual(log["name"], "bar")
+        self.assertNotEqual(log["name"], "bar_gen")
+        items = bm.load_learned()
+        self.assertTrue(any(it["name"] == "bar" and it["description"] == "also human" for it in items))
+        self.assertTrue(any(it["name"] == "bar_gen" and it["description"] == "human named it _gen" for it in items))
+
+    def test_generated_query_exhausted_suffixes_refuses_rather_than_overwrite(self):
+        """FVR-003: if base, _gen, and _gen2.._gen99 are all human, generated
+        must not overwrite any human entry. Search bounds at the store cap
+        (500); if truly no name is available, raise."""
+        # Pre-seed base and _gen with human entries
+        bm.persist_learned_query(
+            {"name": "collision", "description": "human base", "kql": "default | take 1"},
+            action_source="manual")
+        bm.persist_learned_query(
+            {"name": "collision_gen", "description": "human gen", "kql": "default | take 1"},
+            action_source="manual")
+        # Fill _gen2 through _gen100 with human entries
+        for i in range(2, 101):
+            bm.persist_learned_query(
+                {"name": f"collision_gen{i}", "description": "human",
+                 "kql": "default | take 1"},
+                action_source="manual")
+
+        # Generated attempt must succeed with a NEW free name (>=101) and
+        # crucially must NOT touch any of the human entries
+        log = bm.persist_learned_query(
+            {"name": "collision", "description": "generated", "kql": "default | take 5"},
+            action_source="generated")
+
+        items = bm.load_learned()
+        # Human base survives
+        base = next(it for it in items if it["name"] == "collision")
+        self.assertEqual(base["description"], "human base")
+        # Human _gen survives
+        gen = next(it for it in items if it["name"] == "collision_gen")
+        self.assertEqual(gen["description"], "human gen")
+        # Every _gen2.._gen100 human survives
+        for i in range(2, 101):
+            entry = next(it for it in items if it["name"] == f"collision_gen{i}")
+            self.assertEqual(entry["description"], "human")
+        # Generated landed on _gen101 or higher
+        self.assertRegex(log["name"], r"^collision_gen\d+$")
+        self.assertNotEqual(log["name"], "collision_gen")
+
+    def test_generated_query_can_overwrite_previous_generated(self):
+        bm.persist_learned_query(
+            {"name": "baz", "description": "gen1", "kql": "default | count"},
+            action_source="generated")
+        log = bm.persist_learned_query(
+            {"name": "baz", "description": "gen2", "kql": "default | take 1"},
+            action_source="generated")
+        self.assertEqual(log["name"], "baz")
+        items = bm.load_learned()
+        matches = [it for it in items if it["name"] == "baz"]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["description"], "gen2")
+
     # ---- JSON-RPC protocol ----
-    def test_initialize_defaults_to_current_protocol(self):
+    def test_initialize_requires_protocol_version(self):
+        """FVR-004: initialize without a protocolVersion must return -32602,
+        not silently succeed with a default. Prior behavior returned a
+        result envelope for `params: {}`."""
         resp = bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        self.assertEqual(resp["error"]["code"], -32602)
+
+    def test_initialize_valid_returns_negotiated_version(self):
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                            "params": {"protocolVersion": "2025-06-18"}})
         self.assertEqual(resp["result"]["protocolVersion"], "2025-06-18")
         self.assertEqual(resp["result"]["serverInfo"]["name"], "berserk-q")
         self.assertIn("tools", resp["result"]["capabilities"])
         self.assertTrue(resp["result"]["instructions"])
 
-    def test_initialize_echoes_client_protocol(self):
+    def test_initialize_rejects_non_object_capabilities(self):
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                            "params": {"protocolVersion": "2025-06-18",
+                                       "capabilities": []}})
+        self.assertEqual(resp["error"]["code"], -32602)
+
+    def test_initialize_rejects_non_object_client_info(self):
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                            "params": {"protocolVersion": "2025-06-18",
+                                       "clientInfo": "berserk-cli"}})
+        self.assertEqual(resp["error"]["code"], -32602)
+
+    def test_notifications_initialized_as_request_form_rejected(self):
+        """FVR-004: request-form of a notification must be rejected."""
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": 2,
+                            "method": "notifications/initialized"})
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp["error"]["code"], -32600)
+
+    def test_ping_rejects_nonempty_params(self):
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": 3, "method": "ping",
+                            "params": {"extra": "junk"}})
+        self.assertEqual(resp["error"]["code"], -32602)
+
+    def test_tools_list_rejects_nonempty_params(self):
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": 4, "method": "tools/list",
+                            "params": {"filter": "sre"}})
+        self.assertEqual(resp["error"]["code"], -32602)
+
+    def test_unexpected_handler_exception_becomes_internal_error(self):
+        """FVR-004: an unexpected exception from handle_call must surface as
+        JSON-RPC -32603, not be silently converted to isError=True."""
+        orig = bm.handle_call
+        try:
+            def raise_it(name, arguments):
+                raise RuntimeError("boom")
+            bm.handle_call = raise_it
+            resp = bm.dispatch({
+                "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                "params": {"name": "list_hosts", "arguments": {}},
+            })
+        finally:
+            bm.handle_call = orig
+        self.assertIn("error", resp)
+        self.assertEqual(resp["error"]["code"], -32603)
+
+    def test_module_execution_runs_main_exactly_once(self):
+        """FVR-006: `python -m berserk_mcp` with closed stdin must run
+        exactly one MCP-serve lifecycle, not two."""
+        import subprocess
+        project_root = str(Path(bm.__file__).resolve().parent)
+        result = subprocess.run(
+            [sys.executable, "-m", "berserk_mcp"],
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=project_root,
+        )
+        # log() writes to stderr with "starting" and "stdin closed" markers
+        starts = result.stderr.count("starting v")
+        closes = result.stderr.count("stdin closed")
+        self.assertEqual(starts, 1, f"expected exactly one start, got {starts}:\n{result.stderr}")
+        self.assertEqual(closes, 1, f"expected exactly one close, got {closes}:\n{result.stderr}")
+
+    def test_serve_mcp_loop_handles_malformed_then_valid(self):
+        """FVR-004: real stdio loop must emit responses for malformed JSON,
+        an invalid request, and a valid ping on separate lines, and continue
+        serving throughout."""
+        import io
+        payload = (
+            "not json\n"
+            + json.dumps({"jsonrpc": "1.0", "id": 1, "method": "ping"}) + "\n"
+            + json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}) + "\n"
+        )
+        orig_stdin, orig_stdout = sys.stdin, sys.stdout
+        try:
+            sys.stdin = io.StringIO(payload)
+            sys.stdout = io.StringIO()
+            bm._serve_mcp()
+            out = sys.stdout.getvalue()
+        finally:
+            sys.stdin, sys.stdout = orig_stdin, orig_stdout
+        lines = [json.loads(line) for line in out.strip().splitlines() if line.strip()]
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[0]["error"]["code"], -32700)
+        self.assertEqual(lines[1]["error"]["code"], -32600)
+        self.assertEqual(lines[2].get("result"), {})
+
+    def test_initialize_negotiates_own_version_not_client_claim(self):
+        """BUG-005: this server implements exactly one MCP version, so it
+        must report that version regardless of what the client claims to
+        speak -- previously it blindly echoed back an arbitrary client-
+        supplied protocolVersion, including versions this server never
+        actually implements."""
         resp = bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "initialize",
                             "params": {"protocolVersion": "2024-11-05"}})
-        self.assertEqual(resp["result"]["protocolVersion"], "2024-11-05")
+        self.assertEqual(resp["result"]["protocolVersion"], bm.PROTOCOL_VERSION)
 
     def test_tools_list_count_and_metadata(self):
         resp = bm.dispatch({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
@@ -342,11 +569,179 @@ class BerserkMcpTest(unittest.TestCase):
         resp = bm.dispatch({"jsonrpc": "2.0", "id": 5, "method": "no/such"})
         self.assertEqual(resp["error"]["code"], -32601)
 
+    def test_non_object_returns_invalid_request(self):
+        """DR-004: non-object must return -32600, not None."""
+        for val in ([], "not an object", None, 42, True):
+            resp = bm.dispatch(val)
+            self.assertIsNotNone(resp, f"None for {val!r}")
+            self.assertEqual(resp["error"]["code"], -32600)
+            self.assertIsNone(resp["id"])
+
+    def test_missing_jsonrpc_or_method_returns_invalid_request(self):
+        """DR-004: missing jsonrpc/method fields produce -32600."""
+        resp = bm.dispatch({"id": 1, "method": "ping"})
+        self.assertEqual(resp["error"]["code"], -32600)
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": 1})
+        self.assertEqual(resp["error"]["code"], -32600)
+        resp = bm.dispatch({"jsonrpc": "1.0", "id": 1, "method": "ping"})
+        self.assertEqual(resp["error"]["code"], -32600)
+
+    def test_invalid_id_type_returns_invalid_request(self):
+        """DR-004: ID must be string or int, not bool/null/float/object/array."""
+        for bad_id in (None, True, False, 3.14, [], {}):
+            resp = bm.dispatch({"jsonrpc": "2.0", "id": bad_id, "method": "ping"})
+            self.assertEqual(resp["error"]["code"], -32600, f"bad_id={bad_id!r}")
+            self.assertIsNone(resp["id"])
+
+    def test_valid_string_and_int_id_echoed(self):
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": "abc", "method": "ping"})
+        self.assertEqual(resp["id"], "abc")
+        self.assertIn("result", resp)
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": 99, "method": "ping"})
+        self.assertEqual(resp["id"], 99)
+
+    def test_notifications_get_no_response(self):
+        """DR-004: valid notifications (no id) produce None for every method."""
+        for method, params in (
+            ("initialize", {"protocolVersion": "2024-11-05"}),
+            ("ping", None),
+            ("tools/list", None),
+            ("tools/call", {"name": "search", "arguments": {"kql": "default | take 1"}}),
+            ("no/such", None),
+        ):
+            req = {"jsonrpc": "2.0", "method": method}
+            if params is not None:
+                req["params"] = params
+            self.assertIsNone(bm.dispatch(req), method)
+
+    def test_non_object_params_returns_invalid_params(self):
+        """DR-004: scalar/list params return -32602 for requests."""
+        for bad in ([], "bad", 42, True):
+            resp = bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": bad})
+            self.assertEqual(resp["error"]["code"], -32602, f"params={bad!r}")
+            self.assertEqual(resp["id"], 1)
+
+    def test_non_object_params_notification_no_response(self):
+        """DR-004: scalar params on notification produces no response."""
+        resp = bm.dispatch({"jsonrpc": "2.0", "method": "ping", "params": "bad"})
+        self.assertIsNone(resp)
+
+    def test_tools_call_missing_name_returns_invalid_params(self):
+        """DR-004: tools/call with no name is -32602."""
+        resp = bm.dispatch({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"arguments": {}},
+        })
+        self.assertEqual(resp["error"]["code"], -32602)
+
+    def test_tools_call_non_object_arguments_returns_invalid_params(self):
+        """DR-004: tools/call with non-object arguments is -32602."""
+        resp = bm.dispatch({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "search", "arguments": "not an object"},
+        })
+        self.assertEqual(resp["error"]["code"], -32602)
+
+    def test_unknown_method_request_returns_method_not_found(self):
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": 5, "method": "no/such"})
+        self.assertEqual(resp["error"]["code"], -32601)
+        self.assertEqual(resp["id"], 5)
+
+    def test_unknown_method_notification_no_response(self):
+        resp = bm.dispatch({"jsonrpc": "2.0", "method": "no/such"})
+        self.assertIsNone(resp)
+
+    def test_invalid_then_valid_message_both_handled(self):
+        """DR-004: server must survive invalid input and process the next."""
+        resp1 = bm.dispatch([])
+        self.assertEqual(resp1["error"]["code"], -32600)
+        resp2 = bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        self.assertIn("result", resp2)
+
     def test_no_secret_in_descriptions(self):
         """Sanity: no homelab IPs/usernames leaked into tool metadata."""
         blob = json.dumps(bm.TOOLS) + json.dumps(bm.MGMT_TOOLS)
         for leak in ("192.168.", "/opt/assistant", "/home/assistant", "HermesRuntime", "OpenClaw"):
             self.assertNotIn(leak, blob, leak)
+
+
+class RunBzrkAuthTest(unittest.TestCase):
+    """SEC-003: an exit-0 bzrk process with an auth failure on stderr must be
+    treated as an error, not a successful empty result. Tests the real
+    run_bzrk() against a mocked subprocess.run, unlike BerserkMcpTest which
+    monkeypatches run_bzrk itself and so never exercises this logic."""
+
+    def setUp(self):
+        self._orig = subprocess.run
+        self.calls = []
+
+    def tearDown(self):
+        subprocess.run = self._orig
+
+    def _mock_run(self, returncode, stdout, stderr):
+        def fake(args, **kwargs):
+            self.calls.append(args)
+            return subprocess.CompletedProcess(args, returncode, stdout, stderr)
+        subprocess.run = fake
+
+    def test_exit_zero_with_auth_error_on_stderr_returns_controlled_message(self):
+        """DR-005: auth failure returns constant message, no raw stderr."""
+        self._mock_run(0, "", "Refresh token rejected. Run `bzrk login` again.")
+        text, is_err = bm.run_bzrk(["search", "default | take 1"])
+        self.assertTrue(is_err)
+        self.assertEqual(text, bm.AUTH_FAILURE_MESSAGE)
+        self.assertNotIn("Refresh token rejected", text)
+
+    def test_exit_zero_nonempty_stdout_with_auth_stderr_returns_controlled(self):
+        """DR-005: even when stdout has data, auth stderr means error with no content."""
+        self._mock_run(0, "some query data", "Unauthorized: bearer token invalid")
+        text, is_err = bm.run_bzrk(["search", "default | take 1"])
+        self.assertTrue(is_err)
+        self.assertEqual(text, bm.AUTH_FAILURE_MESSAGE)
+        self.assertNotIn("some query data", text)
+        self.assertNotIn("bearer token invalid", text)
+
+    def test_nonzero_exit_with_auth_stderr_returns_controlled(self):
+        """DR-005: nonzero exit + auth stderr still gets constant message."""
+        self._mock_run(1, "", "unauthenticated: refresh token rejected")
+        text, is_err = bm.run_bzrk(["search", "default | take 1"])
+        self.assertTrue(is_err)
+        self.assertEqual(text, bm.AUTH_FAILURE_MESSAGE)
+
+    def test_exit_zero_with_real_empty_result_is_not_an_error(self):
+        self._mock_run(0, "", "")
+        text, is_err = bm.run_bzrk(["search", "default | take 1"])
+        self.assertFalse(is_err)
+        self.assertEqual(text, "(no rows)")
+
+    def test_exit_zero_harmless_warning_stderr_success(self):
+        """DR-005: non-auth stderr warnings don't trigger auth failure."""
+        self._mock_run(0, "result data", "deprecation warning: flag --old is obsolete")
+        text, is_err = bm.run_bzrk(["search", "default | take 1"])
+        self.assertFalse(is_err)
+        self.assertEqual(text, "result data")
+
+    def test_stdout_containing_auth_words_not_misclassified(self):
+        """DR-005: auth check only scans stderr, never stdout."""
+        self._mock_run(0, '[{"status_code": "401", "note": "token expired"}]', "")
+        text, is_err = bm.run_bzrk(["search", "default | take 1"])
+        self.assertFalse(is_err)
+        self.assertIn("401", text)
+
+    def test_auth_stderr_with_bearer_token_not_leaked(self):
+        """DR-005: sensitive content in auth stderr never appears in output."""
+        self._mock_run(0, "", "401 Unauthorized bearer opaque-dummy-token tenant=acme-corp")
+        text, is_err = bm.run_bzrk(["search", "default | take 1"])
+        self.assertTrue(is_err)
+        self.assertNotIn("opaque-dummy-token", text)
+        self.assertNotIn("acme-corp", text)
+        self.assertNotIn("401", text)
+
+    def test_nonzero_exit_without_auth_wording_still_an_error(self):
+        self._mock_run(2, "", "syntax error near 'foo'")
+        text, is_err = bm.run_bzrk(["search", "default | take 1"])
+        self.assertTrue(is_err)
+        self.assertIn("syntax error", text)
 
 
 class RoleFilterTest(unittest.TestCase):
@@ -547,6 +942,19 @@ class DiscoveryToolTest(unittest.TestCase):
         self.assertFalse(err)
         self.assertEqual(self.calls[-1][3], bm.Q_TRACE_FIND_SLOW)
         self.assertEqual(self.calls[-1][-1], "1h ago")
+
+    def test_trace_find_slow_query_validates_duration(self):
+        """DR-007: query must convert duration and filter nulls/negatives."""
+        q = bm.Q_TRACE_FIND_SLOW
+        self.assertIn("extend dur=toint(duration)", q)
+        self.assertIn("where isnotnull(dur)", q)
+        self.assertIn("dur >= 0", q)
+        self.assertIn("where isnotnull(span_name)", q)
+        sort_idx = q.index("sort by dur")
+        extend_idx = q.index("extend dur=toint(duration)")
+        filter_idx = q.index("where isnotnull(dur)")
+        self.assertLess(extend_idx, filter_idx)
+        self.assertLess(filter_idx, sort_idx)
 
     def test_trace_find_errors_callable(self):
         text, err = bm.handle_call("trace_find_errors", {})

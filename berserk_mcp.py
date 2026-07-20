@@ -51,7 +51,7 @@ import ingestion_advisor
 import parser_factory
 import secret_scan
 
-__version__ = "1.14.1"
+__version__ = "1.15.0"
 
 # ---------- configuration (env-overridable) ----------
 BZRK_BIN = os.environ.get("BZRK_BIN", "bzrk")
@@ -112,15 +112,21 @@ _ROLE_PREFIX = {
 
 
 def _load_primer(role: str) -> str:
-    """Load primers/<role>.md adjacent to this script, or from BERSERK_MCP_PRIMERS_DIR."""
+    """Load primers/<role>.md from BERSERK_MCP_PRIMERS_DIR, adjacent to this script,
+    or the installed data-files location (share/berserk-mcp/primers/)."""
     env_dir = os.environ.get("BERSERK_MCP_PRIMERS_DIR", "")
-    primer_dir = Path(env_dir) if env_dir else Path(__file__).parent / "primers"
+    search_dirs = []
+    if env_dir:
+        search_dirs.append(Path(env_dir))
+    search_dirs.append(Path(__file__).parent / "primers")
+    search_dirs.append(Path(sys.prefix) / "share" / "berserk-mcp" / "primers")
     if role in _ROLE_PREFIX:
-        f = primer_dir / f"{role}.md"
-        try:
-            return f.read_text(encoding="utf-8").strip() + "\n\n"
-        except OSError:
-            pass
+        for primer_dir in search_dirs:
+            f = primer_dir / f"{role}.md"
+            try:
+                return f.read_text(encoding="utf-8").strip() + "\n\n"
+            except OSError:
+                continue
     return ""
 
 
@@ -329,9 +335,17 @@ Q_SOC_REPEATED_ERRORS = (
 #      child-before-parent ordering on a real 2-span trace; `start_time` sorts
 #      correctly. q_trace_analyze now filters to isnotnull(span_name) and
 #      sorts by start_time.
+#   3. (BUG-006, 2026-07-18 security review) Q_TRACE_FIND_SLOW had the same
+#      correlated-non-span-row exposure as (2) above but never got the same
+#      isnotnull(span_name) guard -- a log row sharing a trace_id can have an
+#      empty parent_span_id too (isempty() matches null), so it could surface
+#      as a fake "root span" candidate. Added the same guard here.
 Q_TRACE_FIND_SLOW = (
-    f"{T} | where isnotnull(trace_id) | where isempty(parent_span_id) "
-    f"| project trace_id, span_name, dur=toint(duration), timestamp, "
+    f"{T} | where isnotnull(trace_id) | where isnotnull(span_name) "
+    f"| where isempty(parent_span_id) "
+    f"| extend dur=toint(duration) "
+    f"| where isnotnull(dur) and dur >= 0 "
+    f"| project trace_id, span_name, dur, timestamp, "
     f"service=tostring(resource['service.name']) "
     f"| sort by dur desc | take 10"
 )
@@ -443,6 +457,22 @@ def q_cc_search(term: str) -> str:
 
 
 # ---------- bzrk invocation ----------
+# bzrk has been observed to print an authentication failure (e.g. "Refresh
+# token rejected...") to stderr while still exiting 0 -- a real 2026-07-10
+# incident on the bzrk-q bash wrapper, which already carries this same guard
+# (_bzrk_check_auth). This Python adapter never got the equivalent fix, so an
+# exit-0 auth failure was silently returned as a successful empty result
+# (confirmed by the 2026-07-18 security review, SEC-003). Match bzrk-q's
+# pattern exactly for consistency between the two wrappers.
+_AUTH_FAILURE_RE = re.compile(
+    r"refresh token rejected|run .*bzrk login|unauthorized|unauthenticated|"
+    r"login required",
+    re.IGNORECASE,
+)
+
+AUTH_FAILURE_MESSAGE = "bzrk authentication failed; run `bzrk login` and retry"
+
+
 def run_bzrk(args, timeout=DEFAULT_TIMEOUT):
     """Run the bzrk CLI with the given argument list. Returns (text, is_error)."""
     try:
@@ -450,8 +480,10 @@ def run_bzrk(args, timeout=DEFAULT_TIMEOUT):
             [BZRK_BIN] + args, capture_output=True, text=True, timeout=timeout
         )
         out = (p.stdout or "").strip()
+        err = (p.stderr or "").strip()
+        if err and _AUTH_FAILURE_RE.search(err):
+            return AUTH_FAILURE_MESSAGE, True
         if p.returncode != 0:
-            err = (p.stderr or "").strip()
             return ((out + "\n" + err).strip() or f"bzrk exited {p.returncode}"), True
         return (out or "(no rows)"), False
     except FileNotFoundError:
@@ -589,11 +621,37 @@ def persist_learned_query(entry, action_source):
     """
     all_items = load_learned()
     nm = entry["name"]
-    is_amendment = any(it["name"] == nm for it in all_items)
-    if action_source == "generated" and is_amendment:
-        nm = nm + "_gen"
-        entry = {**entry, "name": nm}
-        is_amendment = any(it["name"] == nm for it in all_items)
+    existing = next((it for it in all_items if it["name"] == nm), None)
+    is_amendment = existing is not None
+    if action_source == "generated":
+        entry = {**entry, "origin": "generated"}
+        by_name = {it["name"]: it for it in all_items}
+
+        def _is_free_or_generated(candidate):
+            found = by_name.get(candidate)
+            return found is None or found.get("origin") == "generated"
+
+        if not _is_free_or_generated(nm):
+            base = nm
+            gen_name = f"{base}_gen"
+            chosen = None
+            if _is_free_or_generated(gen_name):
+                chosen = gen_name
+            else:
+                # Bound by store cap (500) rather than an arbitrary suffix cap
+                for i in range(2, 502):
+                    candidate = f"{base}_gen{i}"
+                    if _is_free_or_generated(candidate):
+                        chosen = candidate
+                        break
+            if chosen is None:
+                raise ValueError(
+                    "cannot persist generated query: no free name available "
+                    "(base and all _gen/_genN suffixes are occupied by human entries)"
+                )
+            nm = chosen
+            entry = {**entry, "name": nm}
+        is_amendment = nm in by_name
 
     items = [it for it in all_items if it["name"] != nm]
     items.append(entry)
@@ -629,15 +687,16 @@ parser_factory.configure(
     log=log,
     persist_learned_query=persist_learned_query,
     sanitize_name=sanitize_name,
+    redact=lambda text: secret_scan.redact(
+        text, include_entropy=True, pii_types=secret_scan.ALL_PII_TYPES,
+    )[0],
 )
 agent_analytics.configure(
-    # These modules parse rows programmatically, so prefer JSON output (falls
-    # back to table automatically on bzrk builds without --json).
     bzrk_search=bzrk_search_json,
     table=TABLE,
-    # Scrub secrets (no PII/entropy) from body snippets the analytics echo,
-    # independent of the global output filter's mode.
-    redact=lambda text: secret_scan.redact(text, include_entropy=False, pii_types=())[0],
+    redact=lambda text: secret_scan.redact(
+        text, include_entropy=True, pii_types=secret_scan.ALL_PII_TYPES,
+    )[0],
 )
 secret_scan.configure(
     bzrk_search=bzrk_search_json,
@@ -674,7 +733,6 @@ SIMPLE = {
     "sre_top_error_messages": (Q_SRE_TOP_ERRORS, "1h ago"),
     "soc_high_severity_logs": (Q_SOC_HIGH_SEV, "1h ago"),
     "soc_log_spike": (Q_SOC_LOG_SPIKE, "1h ago"),
-    "soc_new_services": (Q_SOC_NEW_SERVICES, "24h ago"),
     "soc_repeated_errors": (Q_SOC_REPEATED_ERRORS, "6h ago"),
     "claude_recent": (Q_CC_RECENT, "1h ago"),
     "claude_sessions": (Q_CC_SESSIONS, "6h ago"),
@@ -1023,6 +1081,29 @@ def handle_call(name, arguments):
         since = arguments.get("since") or default_since
         return bzrk_search(kql, since)
 
+    if name == "soc_new_services":
+        since = arguments.get("since") or "24h ago"
+        out, err = bzrk_search(Q_SOC_NEW_SERVICES, since)
+        if err:
+            return out, True
+        baseline = parser_factory.load_json_dict(parser_factory._known_sources_path())
+        known = set(baseline.get("services", {}).keys())
+        if not known:
+            return (
+                "(no baseline — run detect_new_sources first to establish "
+                "known services; showing all active services)\n" + out
+            ), False
+        lines = out.strip().splitlines()
+        header = lines[0] if lines else ""
+        filtered = [header] if header else []
+        for line in lines[1:]:
+            svc_name = line.split()[0] if line.split() else ""
+            if svc_name and svc_name not in known:
+                filtered.append(line)
+        if len(filtered) <= 1:
+            return "No genuinely new services (all active services are in the baseline).", False
+        return "\n".join(filtered), False
+
     # --- tools needing input validation or extra calls ---
     if name == "schema":
         return do_schema()
@@ -1158,22 +1239,119 @@ def handle_call(name, arguments):
 
 
 # ---------- JSON-RPC plumbing ----------
+# BUG-005 (2026-07-18 security review): three real defects fixed together
+# here, since they're all about dispatch() trusting shapes it must not:
+#   1. dispatch([]) (or any non-dict top-level value) raised an uncaught
+#      AttributeError from req.get(...) -- confirmed live -- which propagated
+#      out of main()'s loop with no handler and killed the whole server
+#      process. A single malformed line from a connected stdio client was a
+#      full process-level denial of service.
+#   2. Every request branch (tools/call, initialize, tools/list, ping)
+#      unconditionally returned a response dict, even when the incoming
+#      message had no "id" -- i.e. was itself a notification. Only the
+#      unknown-method fallback checked for that. Notifications are one-way
+#      by JSON-RPC/MCP definition; a client sending e.g. a tools/call
+#      notification got a response anyway.
+#   3. initialize echoed back whatever protocolVersion the client sent,
+#      instead of negotiating: this server implements exactly one version
+#      (PROTOCOL_VERSION), so it must report that version regardless of
+#      what the client claims to speak.
+# A non-dict `params` (e.g. a list or string) hit the same AttributeError
+# class as (1) the moment any branch called params.get(...); validated here
+# too rather than per-branch.
+def _is_object(value):
+    return isinstance(value, dict)
+
+
+def _jsonrpc_error(code, message, id_=None):
+    return {"jsonrpc": "2.0", "id": id_, "error": {"code": code, "message": message}}
+
+
+def _jsonrpc_result(id_, result):
+    return {"jsonrpc": "2.0", "id": id_, "result": result}
+
+
+def _valid_mcp_id(value):
+    return isinstance(value, (str, int)) and not isinstance(value, bool)
+
+
 def dispatch(req):
-    """Handle one JSON-RPC request. Returns a response dict, or None for notifications."""
-    method = req.get("method")
+    """Handle one JSON-RPC request per JSON-RPC 2.0 and MCP 2025-06-18.
+
+    Returns a response dict, or None for valid notifications.
+    """
+    if not isinstance(req, dict):
+        return _jsonrpc_error(-32600, "Invalid Request")
+
+    if req.get("jsonrpc") != "2.0" or not isinstance(req.get("method"), str):
+        return _jsonrpc_error(-32600, "Invalid Request")
+
+    has_id = "id" in req
     id_ = req.get("id")
+    if has_id and not _valid_mcp_id(id_):
+        return _jsonrpc_error(-32600, "Invalid Request")
+
+    is_notification = not has_id
+    method = req["method"]
+
+    if "params" in req and not isinstance(req["params"], dict):
+        if is_notification:
+            return None
+        return _jsonrpc_error(-32602, "Invalid params", id_)
+
+    params = req.get("params") or {}
+
+    try:
+        return _dispatch_validated(method, params, id_, is_notification)
+    except Exception as exc:
+        log(f"dispatch failed: {type(exc).__name__}")
+        if is_notification:
+            return None
+        return _jsonrpc_error(-32603, "Internal error", id_)
+
+
+def _dispatch_validated(method, params, id_, is_notification):
+    """Dispatch a validated request envelope to the appropriate handler."""
+    def _reply(result):
+        if is_notification:
+            return None
+        return _jsonrpc_result(id_, result)
+
     if method == "initialize":
-        pv = (req.get("params") or {}).get("protocolVersion") or PROTOCOL_VERSION
-        return {"jsonrpc": "2.0", "id": id_, "result": {
-            "protocolVersion": pv,
+        if is_notification:
+            return None
+        pv = params.get("protocolVersion")
+        if not isinstance(pv, str) or not pv.strip():
+            return _jsonrpc_error(-32602, "Invalid params", id_)
+        caps = params.get("capabilities")
+        if caps is not None and not isinstance(caps, dict):
+            return _jsonrpc_error(-32602, "Invalid params", id_)
+        client_info = params.get("clientInfo")
+        if client_info is not None and not isinstance(client_info, dict):
+            return _jsonrpc_error(-32602, "Invalid params", id_)
+        return _jsonrpc_result(id_, {
+            "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": SERVER_INFO,
-            "instructions": INSTRUCTIONS}}
+            "instructions": INSTRUCTIONS,
+        })
     if method == "notifications/initialized":
+        if not is_notification:
+            return _jsonrpc_error(-32600, "Invalid Request", id_)
+        if params:
+            return None
         return None
     if method == "ping":
-        return {"jsonrpc": "2.0", "id": id_, "result": {}}
+        if params:
+            if is_notification:
+                return None
+            return _jsonrpc_error(-32602, "Invalid params", id_)
+        return _reply({})
     if method == "tools/list":
+        if params:
+            if is_notification:
+                return None
+            return _jsonrpc_error(-32602, "Invalid params", id_)
         allt = [t for t in TOOLS + MGMT_TOOLS if tool_visible(t)]
         tl = []
         for t in allt:
@@ -1184,28 +1362,31 @@ def dispatch(req):
                 "inputSchema": t["inputSchema"],
                 "annotations": annotations_for(t["name"]),
             })
-        return {"jsonrpc": "2.0", "id": id_, "result": {"tools": tl}}
+        return _reply({"tools": tl})
     if method == "tools/call":
-        params = req.get("params") or {}
-        try:
-            text, is_err = handle_call(params.get("name"), params.get("arguments") or {})
-        except Exception as e:
-            # Log the exception type only, not its message — the message can
-            # echo attacker-controlled argument content (e.g. a KeyError key)
-            # into stderr. Same rationale as the bad-JSON log path below.
-            log(f"handle_call crashed: {type(e).__name__}")
-            text, is_err = f"internal error: {type(e).__name__}", True
+        if is_notification:
+            return None
+        name = params.get("name")
+        if not name or not isinstance(name, str):
+            return _jsonrpc_error(-32602, "Invalid params", id_)
+        arguments = params.get("arguments")
+        if arguments is not None and not isinstance(arguments, dict):
+            return _jsonrpc_error(-32602, "Invalid params", id_)
+        arguments = arguments or {}
+        text, is_err = handle_call(name, arguments)
         text = secret_scan.apply_output_filter(
             text,
             mode=REDACT_MODE,
             include_entropy=REDACT_ENTROPY,
             pii_types=REDACT_PII_TYPES,
         )
-        return {"jsonrpc": "2.0", "id": id_, "result": {
-            "content": [{"type": "text", "text": text}], "isError": is_err}}
-    if "id" not in req:
-        return None  # unknown notification
-    return {"jsonrpc": "2.0", "id": id_, "error": {"code": -32601, "message": "method not found: " + str(method)}}
+        return _jsonrpc_result(id_, {
+            "content": [{"type": "text", "text": text}], "isError": is_err,
+        })
+
+    if is_notification:
+        return None
+    return _jsonrpc_error(-32601, "Method not found", id_)
 
 
 def send(msg):
@@ -1213,7 +1394,7 @@ def send(msg):
     sys.stdout.flush()
 
 
-def main():
+def _serve_mcp():
     log(f"starting v{__version__} (profile={PROFILE}, table={TABLE}, bzrk={BZRK_BIN})")
     while True:
         line = sys.stdin.readline()
@@ -1226,11 +1407,62 @@ def main():
             req = json.loads(line)
         except json.JSONDecodeError as e:
             log(f"bad json from client ({type(e).__name__})")
+            send({"jsonrpc": "2.0", "id": None,
+                  "error": {"code": -32700, "message": "Parse error"}})
             continue
-        resp = dispatch(req)
+        try:
+            resp = dispatch(req)
+        except Exception as e:  # pragma: no cover - defense in depth
+            log(f"dispatch crashed: {type(e).__name__}")
+            if isinstance(req, dict) and "id" in req and _valid_mcp_id(req["id"]):
+                resp = _jsonrpc_error(-32603, "Internal error", req["id"])
+            else:
+                continue
         if resp is not None:
             send(resp)
     log("stdin closed")
+
+
+def main():
+    import argparse
+    cli = argparse.ArgumentParser(
+        prog="berserk-mcp",
+        description="Berserk MCP observability server",
+        add_help=True,
+    )
+    cli.add_argument("--worker", action="store_true",
+                     help="run one headless discovery pass (for cron)")
+    cli.add_argument("--agent-report", action="store_true",
+                     help="run Claude Code agent analytics report")
+    cli.add_argument("--auto-queue", action="store_true",
+                     help="(worker) queue newly detected sources")
+    cli.add_argument("--max-jobs", type=int, default=3,
+                     help="(worker) max discovery jobs to drain")
+    cli.add_argument("--check-drift", action="store_true",
+                     help="(worker) check known services for schema drift")
+    cli.add_argument("--since", default="6h ago",
+                     help="(agent-report) time window")
+    cli.add_argument("--set-hermes-url", metavar="URL",
+                     help="persist the Hermes LLM endpoint and exit")
+    ns = cli.parse_args()
+    if ns.set_hermes_url:
+        try:
+            path = parser_factory.save_hermes_url(ns.set_hermes_url)
+            print(f"Saved Hermes URL to {path} (0600). It overrides the "
+                  f"localhost default; BERSERK_LLM_HERMES_URL still takes priority.")
+            sys.exit(0)
+        except Exception as e:
+            print(f"failed to save Hermes URL: {type(e).__name__}: {e}", file=sys.stderr)
+            sys.exit(2)
+    if ns.worker:
+        sys.exit(run_worker_pass(
+            auto_queue=ns.auto_queue,
+            max_jobs=max(1, min(ns.max_jobs, 5)),
+            check_drift=ns.check_drift,
+        ))
+    if ns.agent_report:
+        sys.exit(run_agent_report(since=ns.since))
+    _serve_mcp()
 
 
 def run_worker_pass(auto_queue=False, max_jobs=3, check_drift=False):
@@ -1270,33 +1502,4 @@ def run_agent_report(since="6h ago"):
 
 
 if __name__ == "__main__":
-    import argparse
-    _cli = argparse.ArgumentParser(add_help=False)
-    _cli.add_argument("--worker", action="store_true")
-    _cli.add_argument("--agent-report", action="store_true")
-    _cli.add_argument("--auto-queue", action="store_true")
-    _cli.add_argument("--max-jobs", type=int, default=3)
-    _cli.add_argument("--check-drift", action="store_true")
-    _cli.add_argument("--since", default="6h ago")
-    _cli.add_argument("--set-hermes-url", metavar="URL",
-                      help="persist the Hermes LLM endpoint to a local 0600 "
-                           "config file (kept out of the repo) and exit")
-    _ns, _ = _cli.parse_known_args()
-    if _ns.set_hermes_url:
-        try:
-            path = parser_factory.save_hermes_url(_ns.set_hermes_url)
-            print(f"Saved Hermes URL to {path} (0600). It overrides the "
-                  f"localhost default; BERSERK_LLM_HERMES_URL still takes priority.")
-            sys.exit(0)
-        except Exception as e:
-            print(f"failed to save Hermes URL: {type(e).__name__}: {e}", file=sys.stderr)
-            sys.exit(2)
-    if _ns.worker:
-        sys.exit(run_worker_pass(
-            auto_queue=_ns.auto_queue,
-            max_jobs=max(1, min(_ns.max_jobs, 5)),
-            check_drift=_ns.check_drift,
-        ))
-    if _ns.agent_report:
-        sys.exit(run_agent_report(since=_ns.since))
     main()

@@ -11,6 +11,11 @@ _table = None
 MAX_MATCHES = 100
 ALL_PII_TYPES = frozenset({"email", "ipv4", "ipv6", "credit_card"})
 
+
+class AuditParseError(ValueError):
+    """Raised when audit response cannot be fully decoded as a supported format."""
+    pass
+
 # Ordered most-specific-first. Later matches never replace an earlier overlap.
 _SECRET_PATTERNS = (
     ("private_key", re.compile(
@@ -123,31 +128,68 @@ def _candidate_matches(text, include_entropy, pii_types):
                 yield match.start(), match.end(), pii_type
 
 
+MAX_REDACT_CHARS = 1_000_000
+MAX_REDACT_CANDIDATES = 50_000
+
+
+def _limit_result(reason):
+    return (
+        "[REDACTED:redaction_limit]",
+        [{"type": reason, "count": 1, "first_offset": 0}],
+    )
+
+
 def redact(text, include_entropy=False, pii_types=ALL_PII_TYPES):
-    """Return (redacted text, aggregate findings) without retaining values."""
+    """Return (redacted text, aggregate findings) without retaining values.
+
+    Uses a sort-merge-join pipeline with explicit bounds. If input exceeds
+    MAX_REDACT_CHARS or candidates exceed MAX_REDACT_CANDIDATES, the entire
+    input is replaced with a fail-closed marker — no partial original is
+    ever returned.
+    """
     original = str(text or "")
+    if len(original) > MAX_REDACT_CHARS:
+        return _limit_result("input_too_large")
+
     enabled_pii = frozenset(pii_types or ())
-    accepted = []
-    occupied = []
-    for start, end, finding_type in _candidate_matches(original, include_entropy, enabled_pii):
-        if len(accepted) >= MAX_MATCHES:
-            break
-        if any(start < used_end and end > used_start for used_start, used_end in occupied):
-            continue
-        accepted.append((start, end, finding_type))
-        occupied.append((start, end))
+    candidates = []
+    for order, (start, end, finding_type) in enumerate(
+        _candidate_matches(original, include_entropy, enabled_pii)
+    ):
+        if order >= MAX_REDACT_CANDIDATES:
+            return _limit_result("too_many_matches")
+        candidates.append((start, end, finding_type, order))
 
-    clean = original
-    for start, end, finding_type in sorted(accepted, reverse=True):
-        clean = clean[:start] + f"[REDACTED:{finding_type}]" + clean[end:]
+    candidates.sort(key=lambda c: (c[0], c[1]))
 
+    merged = []
+    for start, end, finding_type, order in candidates:
+        if merged and start < merged[-1][1]:
+            prev_start, prev_end, prev_type, prev_order = merged[-1]
+            merged[-1] = (
+                prev_start,
+                max(prev_end, end),
+                prev_type if prev_order <= order else finding_type,
+                min(prev_order, order),
+            )
+        else:
+            merged.append((start, end, finding_type, order))
+
+    pieces = []
+    cursor = 0
     summary = {}
-    for start, _end, finding_type in accepted:
+    for start, end, finding_type, _order in merged:
+        pieces.append(original[cursor:start])
+        pieces.append(f"[REDACTED:{finding_type}]")
+        cursor = end
         item = summary.setdefault(finding_type, {
             "type": finding_type, "count": 0, "first_offset": start,
         })
         item["count"] += 1
         item["first_offset"] = min(item["first_offset"], start)
+    pieces.append(original[cursor:])
+    clean = "".join(pieces)
+
     findings = sorted(summary.values(), key=lambda item: (item["first_offset"], item["type"]))
     return clean, findings
 
@@ -178,61 +220,142 @@ def _audit_query():
     )
 
 
-def _audit_row(obj):
+def _normalize_audit_record(value):
+    """Validate and normalize one audit record. Raises AuditParseError on invalid shape."""
+    if not isinstance(value, dict):
+        raise AuditParseError("row_not_object")
+    if "body" not in value:
+        raise AuditParseError("row_missing_body")
+    if "service" not in value:
+        raise AuditParseError("row_missing_service")
+    if "ts" not in value and "timestamp" not in value:
+        raise AuditParseError("row_missing_timestamp")
     return {
-        "service": str(obj.get("service") or "(unknown)"),
-        "ts": str(obj.get("ts") or obj.get("timestamp") or ""),
-        "body": str(obj.get("body") or ""),
+        "service": str(value.get("service") or "(unknown)"),
+        "ts": str(value.get("ts") or value.get("timestamp") or ""),
+        "body": str(value.get("body") or ""),
     }
 
 
 def _json_records(parsed):
-    """Rows from a whole-document JSON value: a bare array or a wrapper object
-    keying rows under a common name. None if unrecognizable."""
+    """Extract and validate rows from a whole-document JSON value.
+
+    Raises AuditParseError on any unrecognized or structurally invalid shape.
+    Returns a list of validated audit-record dicts on success.
+    """
     if isinstance(parsed, list):
-        return parsed
-    if isinstance(parsed, dict):
-        for key in ("rows", "data", "results", "records"):
-            if isinstance(parsed.get(key), list):
-                return parsed[key]
-    return None
+        return [_normalize_audit_record(item) for item in parsed]
+
+    if not isinstance(parsed, dict):
+        raise AuditParseError("unsupported_shape")
+
+    tables = parsed.get("Tables")
+    if isinstance(tables, list):
+        if not tables:
+            raise AuditParseError("malformed_tables")
+        if len(tables) != 1:
+            raise AuditParseError("multiple_tables")
+        table = tables[0]
+        if not isinstance(table, dict):
+            raise AuditParseError("malformed_tables")
+        schema = table.get("schema")
+        if not isinstance(schema, dict):
+            raise AuditParseError("malformed_tables_schema")
+        columns_raw = schema.get("columns")
+        if not isinstance(columns_raw, list):
+            raise AuditParseError("malformed_tables_columns")
+        columns = []
+        for c in columns_raw:
+            if not isinstance(c, dict) or not c.get("name") or not isinstance(c["name"], str):
+                raise AuditParseError("malformed_tables_column_entry")
+            columns.append(c["name"])
+        if len(columns) != len(set(columns)):
+            raise AuditParseError("duplicate_column_names")
+        rows = table.get("rows")
+        if not isinstance(rows, list):
+            raise AuditParseError("malformed_tables_rows")
+        result = []
+        for row in rows:
+            if not isinstance(row, list):
+                raise AuditParseError("tables_row_not_list")
+            if len(row) != len(columns):
+                raise AuditParseError("tables_row_length_mismatch")
+            result.append(_normalize_audit_record(dict(zip(columns, row))))
+        return result
+
+    for key in ("rows", "data", "results", "records"):
+        if key in parsed:
+            value = parsed[key]
+            if not isinstance(value, list):
+                raise AuditParseError("wrapper_value_not_list")
+            return [_normalize_audit_record(item) for item in value]
+
+    if "body" in parsed and "service" in parsed:
+        return [_normalize_audit_record(parsed)]
+
+    raise AuditParseError("unsupported_shape")
 
 
 def _parse_audit_rows(text):
-    rows = []
+    """Return a fully validated list of audit records or raise AuditParseError.
+
+    A successful return of [] means the input was validly empty (e.g. "(no rows)"
+    or a zero-row Tables response with valid schema). Any unrecognized, malformed,
+    or truncated input raises rather than returning an ambiguous empty list.
+    """
     whole = str(text or "").strip()
     if not whole or whole == "(no rows)":
-        return rows
+        return []
 
-    # Whole-document JSON (array or {rows:[...]}) from --json. jsonl and a
-    # single object fall through to the line loop below.
     if whole[0] in "[{":
         try:
-            records = _json_records(json.loads(whole))
+            parsed = json.loads(whole)
         except json.JSONDecodeError:
-            records = None
-        if records is not None:
-            return [_audit_row(o) for o in records if isinstance(o, dict)]
+            pass
+        else:
+            return _json_records(parsed)
+
+        lines = [line for line in whole.splitlines() if line.strip()]
+        jsonl_candidate = all(line.lstrip().startswith("{") for line in lines)
+        if not jsonl_candidate:
+            raise AuditParseError("malformed_json")
+
+        rows = []
+        for line in lines:
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise AuditParseError("malformed_jsonl") from exc
+            rows.append(_normalize_audit_record(value))
+        return rows
 
     lines = [line for line in whole.splitlines() if line.strip()]
-    for line in lines:
-        if not line.lstrip().startswith("{"):
-            break
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            break
-        rows.append(_audit_row(obj))
-    if rows or not lines or lines == ["(no rows)"]:
+    if not lines:
+        return []
+
+    jsonl_candidate = all(line.lstrip().startswith("{") for line in lines)
+    if jsonl_candidate:
+        rows = []
+        for line in lines:
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise AuditParseError("malformed_jsonl") from exc
+            rows.append(_normalize_audit_record(value))
         return rows
 
     header = re.split(r"\t+|\s{2,}", lines[0].strip())
     if not {"service", "ts", "body"}.issubset(set(header)):
-        return []
+        raise AuditParseError("unknown_table_header")
+    if len(header) != len(set(header)):
+        raise AuditParseError("duplicate_table_columns")
+
+    rows = []
     for line in lines[1:]:
         parts = re.split(r"\t+|\s{2,}", line.strip(), maxsplit=len(header) - 1)
-        obj = {header[i]: parts[i] if i < len(parts) else "" for i in range(len(header))}
-        rows.append(obj)
+        if len(parts) < len(header):
+            raise AuditParseError("table_row_too_short")
+        rows.append({header[i]: parts[i] for i in range(len(header))})
     return rows
 
 
@@ -240,9 +363,16 @@ def scan_secrets(since="1h ago", include_entropy=False, pii_types=()):
     text, is_err = _bzrk_search(_audit_query(), since)
     if is_err:
         return text, True
+    try:
+        audit_rows = _parse_audit_rows(text)
+    except AuditParseError:
+        return (
+            "Secret scan failed: the query response was malformed or unsupported; "
+            "no clean result was produced."
+        ), True
     by_service = {}
     total = 0
-    for row in _parse_audit_rows(text):
+    for row in audit_rows:
         _clean, findings = redact(
             row.get("body", ""), include_entropy=include_entropy, pii_types=pii_types,
         )

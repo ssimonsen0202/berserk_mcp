@@ -303,6 +303,72 @@ class DetectNewSourcesTest(ParserFactoryTestBase):
         self.assertEqual(summary, "No new sources.")
         self.assertEqual(bm.load_json_list(bm.DISCOVERY_QUEUE_PATH), [])
 
+    def test_both_queries_fail_returns_error_baseline_unchanged(self):
+        self.responses["by service=tostring(resource['service.name'])"] = (
+            "service total\nsvcA 5\n", False)
+        self.responses["summarize samples=count() by metric_name"] = (
+            "metric_name samples\nmet1 2\n", False)
+        self._detect()  # seed baseline
+
+        baseline_before = pf.load_json_dict(pf._known_sources_path())
+
+        self.responses["by service=tostring(resource['service.name'])"] = (
+            "connection timeout", True)
+        self.responses["summarize samples=count() by metric_name"] = (
+            "connection timeout", True)
+        result = self._detect()
+        self.assertIn("failed", result)
+        self.assertIn("Baseline unchanged", result)
+
+        baseline_after = pf.load_json_dict(pf._known_sources_path())
+        self.assertEqual(baseline_before, baseline_after)
+
+    def test_first_run_with_partial_failure_refuses_to_seed(self):
+        self.responses["by service=tostring(resource['service.name'])"] = (
+            "service total\nsvcA 5\n", False)
+        self.responses["summarize samples=count() by metric_name"] = (
+            "backend error", True)
+        result = self._detect()
+        self.assertIn("failed", result)
+        self.assertIn("cannot initialize baseline", result)
+        self.assertFalse(pf.load_json_dict(pf._known_sources_path()))
+
+    def test_services_failure_skips_services_dimension(self):
+        self.responses["by service=tostring(resource['service.name'])"] = (
+            "service total\nsvcA 5\n", False)
+        self.responses["summarize samples=count() by metric_name"] = (
+            "metric_name samples\nmet1 2\n", False)
+        self._detect()  # seed
+
+        self.responses["by service=tostring(resource['service.name'])"] = (
+            "error", True)
+        self.responses["summarize samples=count() by metric_name"] = (
+            "metric_name samples\nmet1 2\nnewmet 3\n", False)
+        result = self._detect()
+        self.assertIn("services query failed", result)
+        self.assertIn("new_metrics", result)
+        baseline = pf.load_json_dict(pf._known_sources_path())
+        self.assertIn("svcA", baseline["services"])
+        self.assertIn("newmet", baseline["metrics"])
+
+    def test_metrics_failure_skips_metrics_dimension(self):
+        self.responses["by service=tostring(resource['service.name'])"] = (
+            "service total\nsvcA 5\n", False)
+        self.responses["summarize samples=count() by metric_name"] = (
+            "metric_name samples\nmet1 2\n", False)
+        self._detect()  # seed
+
+        self.responses["by service=tostring(resource['service.name'])"] = (
+            "service total\nsvcA 5\nnewsvc 3\n", False)
+        self.responses["summarize samples=count() by metric_name"] = (
+            "error", True)
+        result = self._detect()
+        self.assertIn("metrics query failed", result)
+        self.assertIn("newsvc", result)
+        baseline = pf.load_json_dict(pf._known_sources_path())
+        self.assertIn("newsvc", baseline["services"])
+        self.assertIn("met1", baseline["metrics"])
+
 
 # ---------- P4: generation pipeline ----------
 class GenerationPipelineTest(ParserFactoryTestBase):
@@ -315,7 +381,7 @@ class GenerationPipelineTest(ParserFactoryTestBase):
         self._stub_profile_responses()
         self.default_response = ("row1 col\nval 5", False)
         queries = [
-            {"name": "overview", "description": "overview", "kql": f"{bm.TABLE} | where resource['service.name'] == 'mysvc' | summarize n=count()", "since": "1h ago"},
+            {"name": "overview", "description": "overview", "kql": f"{bm.TABLE} | where resource['service.name'] == 'mysvc' | summarize n=count() | take 1", "since": "1h ago"},
             {"name": "errors", "description": "errors", "kql": f"{bm.TABLE} | where resource['service.name'] == 'mysvc' | where severity_text == 'ERROR' | take 10", "since": "1h ago"},
         ]
         self.llm_responses = [(self._reply(queries), None)]
@@ -399,6 +465,52 @@ class GenerationPipelineTest(ParserFactoryTestBase):
         gen_entry = next(it for it in items if it["name"] == "x_overview_gen")
         self.assertIn("generated_by", gen_entry)
 
+    # ---- FVR-002 regressions: policy bypass via quoted operator text ----
+    def test_summarize_inside_quoted_string_is_rejected(self):
+        q = {"name": "n", "description": "d",
+             "kql": f"{bm.TABLE} | where body contains '| summarize ' | project body",
+             "since": "1h ago"}
+        ok, err, _ = pf.validate_generated_query(q)
+        self.assertFalse(ok)
+        self.assertIn("take", err.lower())
+
+    def test_summarize_alone_without_terminal_take_is_rejected(self):
+        q = {"name": "n", "description": "d",
+             "kql": f"{bm.TABLE} | summarize n=count() by service",
+             "since": "1h ago"}
+        ok, err, _ = pf.validate_generated_query(q)
+        self.assertFalse(ok)
+        self.assertIn("take", err.lower())
+
+    def test_take_inside_comment_is_ignored(self):
+        q = {"name": "n", "description": "d",
+             "kql": f"{bm.TABLE} | where isnotnull(body) // ends with | take 5",
+             "since": "1h ago"}
+        ok, err, _ = pf.validate_generated_query(q)
+        self.assertFalse(ok)
+
+    def test_take_zero_is_rejected(self):
+        q = {"name": "n", "description": "d",
+             "kql": f"{bm.TABLE} | take 0",
+             "since": "1h ago"}
+        ok, err, _ = pf.validate_generated_query(q)
+        self.assertFalse(ok)
+
+    def test_take_fifty_one_is_rejected(self):
+        q = {"name": "n", "description": "d",
+             "kql": f"{bm.TABLE} | take 51",
+             "since": "1h ago"}
+        ok, err, _ = pf.validate_generated_query(q)
+        self.assertFalse(ok)
+
+    def test_terminal_take_fifty_is_accepted(self):
+        self.default_response = ("row\nval", False)
+        q = {"name": "n", "description": "d",
+             "kql": f"{bm.TABLE} | take 50",
+             "since": "1h ago"}
+        ok, err, _ = pf.validate_generated_query(q)
+        self.assertTrue(ok, err)
+
     def test_fenced_reply_parses(self):
         os.environ["BERSERK_LLM_LADDER"] = "hermes"
         os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
@@ -443,7 +555,7 @@ class SecurityTest(ParserFactoryTestBase):
     def test_no_key_material_in_report(self):
         os.environ["OPENAI_API_KEY"] = "sk-supersecretvalue"
         os.environ["BERSERK_LLM_LADDER"] = "openai"
-        self.llm_responses = [(None, "HTTP 401: unauthorized")]
+        self.llm_responses = [(None, "HTTP 401")]
         self._stub_profile_responses()
 
         report, ok = pf.generate_parser_for({"source": "x", "kind": "service", "role_hint": ""})
@@ -463,6 +575,75 @@ class SecurityTest(ParserFactoryTestBase):
         known_path = Path(bm.LEARNED_PATH).parent / pf.KNOWN_SOURCES_PATH_NAME
         self.assertEqual(oct(known_path.stat().st_mode & 0o777), oct(0o600))
         self.assertEqual(oct(known_path.parent.stat().st_mode & 0o777), oct(0o700))
+
+    def test_sample_body_secret_is_redacted_before_persistence_and_prompt(self):
+        """DR-002: ALL PII/secret types must be absent from profile and prompt."""
+        sensitive_values = [
+            "password=dummy-telemetry-secret",
+            "user@example.com",
+            "192.168.1.10",
+            "A1b2C3d4E5f6G7h8I9j0KLMNOPqrstuv",
+        ]
+        sensitive_body = " ".join(sensitive_values)
+        self._stub_profile_responses()
+        self.responses["take 6"] = (sensitive_body, False)
+        os.environ["BERSERK_LLM_LADDER"] = "openai"
+        os.environ["OPENAI_API_KEY"] = "test-key"
+        self.llm_responses = [(None, "HTTP 401")]
+
+        profile, err = pf.build_source_profile("mysvc", "service", "24h ago")
+        self.assertIsNone(err)
+        for val in sensitive_values:
+            self.assertNotIn(val, profile["sample_excerpt"], f"leaked: {val}")
+
+        knowledge_path = Path(bm.LEARNED_PATH).parent / pf.SCHEMA_KNOWLEDGE_PATH_NAME
+        persisted = knowledge_path.read_text(encoding="utf-8")
+        for val in sensitive_values:
+            self.assertNotIn(val, persisted, f"leaked in persisted: {val}")
+
+        report, ok = pf.generate_parser_for({"source": "mysvc", "kind": "service", "role_hint": ""})
+        self.assertFalse(ok)
+        self.assertEqual(len(self._llm_calls), 1)
+        _url, _headers, payload = self._llm_calls[0]
+        payload_text = json.dumps(payload)
+        for val in sensitive_values:
+            self.assertNotIn(val, payload_text, f"leaked in prompt: {val}")
+
+    def test_missing_redactor_fails_closed(self):
+        """DR-002: if redactor is not provided, configure must raise."""
+        with self.assertRaises(ValueError):
+            pf.configure(
+                bzrk_search=lambda q, s: ("", False), table="T",
+                get_store_dir=lambda: Path(self._tmp.name),
+                ensure_private_dir=lambda p: None, now_iso=lambda: "",
+                log=lambda m: None, persist_learned_query=lambda e, a: {},
+                sanitize_name=lambda n: n, redact=None,
+            )
+        # configure raised before mutating state, so globals are unchanged
+
+    def test_broken_redactor_fails_before_persistence(self):
+        """DR-002: a redactor that returns non-string must not allow persistence."""
+        orig = pf._redact
+        try:
+            pf._redact = lambda text: 42
+            self._stub_profile_responses()
+            self.responses["take 6"] = ("some sample data", False)
+            profile, err = pf.build_source_profile("badsvc", "service", "24h ago")
+            self.assertIsNone(profile)
+            self.assertIn("redaction failed", err)
+        finally:
+            pf._redact = orig
+
+    def test_default_query_projects_structural_info_not_values(self):
+        """DR-002: default queries must not project raw resource/attributes/body values."""
+        query = pf._q_discover_sample("myservice")
+        project_clause = query.split("project", 1)[1]
+        self.assertIn("bag_keys(resource)", project_clause)
+        self.assertIn("has_body", project_clause)
+        fields = [f.strip().split("=")[0] for f in project_clause.split(",")]
+        for f in fields:
+            self.assertNotIn(f.strip(), ("resource", "attributes", "body"),
+                             f"raw value field '{f.strip()}' projected")
 
 
 if __name__ == "__main__":

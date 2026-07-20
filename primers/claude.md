@@ -10,9 +10,12 @@ and where it's struggling.
 |---|---|
 | What has Claude been doing recently? | `claude_recent` |
 | Session-level rollup (turns, tools, errors) | `claude_sessions` |
-| Which tools does Claude use most? | `claude_tool_usage` |
+| Which tools does Claude use most? | `claude_tools` |
 | Where is Claude hitting errors? | `claude_errors` |
 | Search Claude activity for a keyword | `claude_search term=<word>` |
+| Is Claude stuck in a retry loop? | `claude_loop_check` |
+| Is the model well-suited to the task? | `claude_model_fit` |
+| Token consumption patterns | `claude_token_burn` |
 | What services are sending data? | `list_services` |
 | Ad-hoc KQL | `search` |
 
@@ -31,7 +34,7 @@ Key attributes:
 
 - High `claude_errors` rate → a tool is consistently failing; investigate which tool
 - Session with many turns but few tool calls → model may be stuck reasoning without acting
-- `claude_tool_usage` showing unexpected tools dominating → workflow drift
+- `claude_tools` showing unexpected tools dominating → workflow drift
 - Long gap between `first` and `last` in `claude_sessions` → long-running or stuck session
 
 ## Time windows

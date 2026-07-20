@@ -38,19 +38,30 @@ _now_iso = None          # callable() -> str
 _log = None              # callable(msg) -> None
 _persist_learned_query = None  # callable(entry, action_source) -> log_entry dict
 _sanitize_name = None    # callable(name) -> str
+_redact = None  # mandatory callable(str) -> str; set by configure()
 
 KQL_IDIOMS = ""  # set by configure() once TABLE is known
 
 
 def configure(bzrk_search, table, get_store_dir, ensure_private_dir, now_iso, log,
-              persist_learned_query, sanitize_name):
+              persist_learned_query, sanitize_name, redact=None):
     """Called once by berserk_mcp at import time.
 
     get_store_dir must be a zero-arg callable (not a Path) — see the
     comment on `_get_store_dir` above.
+
+    redact: optional callable(str)->str, same contract as agent_analytics's
+    redact hook (secret_scan.redact(...)[0]). SEC-001: sample bodies pulled
+    from live telemetry can contain real credentials; this is applied to the
+    sample excerpt before it is either persisted to the local schema-
+    knowledge store or embedded in an outbound LLM prompt (see
+    build_source_profile) -- both boundaries share one fix point rather than
+    redacting separately at each call site, so neither can be missed.
     """
+    if not callable(redact):
+        raise ValueError("parser_factory.configure requires a redactor")
     global _bzrk_search, _table, _get_store_dir, _ensure_private_dir, _now_iso
-    global _log, _persist_learned_query, _sanitize_name, KQL_IDIOMS
+    global _log, _persist_learned_query, _sanitize_name, _redact, KQL_IDIOMS
     _bzrk_search = bzrk_search
     _table = table
     _get_store_dir = get_store_dir
@@ -59,7 +70,18 @@ def configure(bzrk_search, table, get_store_dir, ensure_private_dir, now_iso, lo
     _log = log
     _persist_learned_query = persist_learned_query
     _sanitize_name = sanitize_name
+    _redact = redact
     KQL_IDIOMS = _build_kql_idioms()
+
+
+def _safe_excerpt(raw, cap):
+    """Sanitize text through the configured redactor before persistence/prompt use."""
+    if _redact is None:
+        raise RuntimeError("redactor not configured")
+    clean = _redact(raw)
+    if not isinstance(clean, str):
+        raise TypeError("redactor returned non-string")
+    return clean[:cap]
 
 
 SCHEMA_KNOWLEDGE_PATH_NAME = "schema_knowledge.json"
@@ -118,14 +140,11 @@ def _http_post_json(url, headers, payload, timeout=LLM_TIMEOUT):
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8")), None
     except urllib.error.HTTPError as e:
-        body = ""
-        try:
-            body = e.read().decode("utf-8", "replace")[:300]
-        except Exception:
-            pass
-        return None, f"HTTP {e.code}: {body}"
+        return None, f"HTTP {e.code}"
+    except urllib.error.URLError:
+        return None, "connection failed"
     except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
+        return None, f"{type(e).__name__}"
 
 
 def _http_get_json(url, headers, timeout=LLM_TIMEOUT):
@@ -133,8 +152,10 @@ def _http_get_json(url, headers, timeout=LLM_TIMEOUT):
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8")), None
+    except urllib.error.HTTPError as e:
+        return None, f"HTTP {e.code}"
     except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
+        return None, f"{type(e).__name__}"
 
 
 # Privacy-safe default: never hardcode a private endpoint in the repo. The
@@ -314,14 +335,20 @@ def _q_discover_keys(source):
 def _q_discover_sample(source):
     return (
         f"{_table} | where resource['service.name'] == '{source}' | take 6 "
-        f"| project resource, attributes, metric_name, severity_text, body"
+        f"| project resource_keys=bag_keys(resource), "
+        f"attribute_keys=bag_keys(attributes), "
+        f"has_body=isnotempty(tostring(body)), "
+        f"has_metric=isnotnull(metric_name), "
+        f"has_severity=isnotnull(severity_text)"
     )
 
 
 def _q_metric_sample(source):
     return (
         f"{_table} | where metric_name == '{source}' | take 6 "
-        f"| project resource, attributes, value, timestamp"
+        f"| project resource_keys=bag_keys(resource), "
+        f"attribute_keys=bag_keys(attributes), "
+        f"has_value=isnotnull(value)"
     )
 
 
@@ -347,19 +374,33 @@ def build_source_profile(source, kind, since):
         if sample_err:
             errors.append(f"sample: {sample_out}")
         else:
-            parts["sample_excerpt"] = sample_out[:SAMPLE_EXCERPT_CAP]
+            # SEC-001: this is real telemetry row content -- the one field
+            # in this profile most likely to carry an actual credential or
+            # PII, since discover_sample projects raw resource/attributes/
+            # body. Redact before it's capped, persisted below, or embedded
+            # in an outbound LLM prompt by generate_parser_for.
+            try:
+                parts["sample_excerpt"] = _safe_excerpt(sample_out, SAMPLE_EXCERPT_CAP)
+            except (RuntimeError, TypeError) as exc:
+                return None, f"redaction failed for sample: {type(exc).__name__}"
     else:
         sample_out, sample_err = _bzrk_search(_q_metric_sample(source), since)
         if sample_err:
             errors.append(f"sample: {sample_out}")
         else:
-            parts["sample_excerpt"] = sample_out[:SAMPLE_EXCERPT_CAP]
+            try:
+                parts["sample_excerpt"] = _safe_excerpt(sample_out, SAMPLE_EXCERPT_CAP)
+            except (RuntimeError, TypeError) as exc:
+                return None, f"redaction failed for sample: {type(exc).__name__}"
 
     schema_out, schema_err = _bzrk_search(f"{_table} | getschema", since)
     if schema_err:
         errors.append(f"getschema: {schema_out}")
     else:
-        parts["getschema_excerpt"] = schema_out[:GETSCHEMA_EXCERPT_CAP]
+        try:
+            parts["getschema_excerpt"] = _safe_excerpt(schema_out, GETSCHEMA_EXCERPT_CAP)
+        except (RuntimeError, TypeError) as exc:
+            return None, f"redaction failed for schema: {type(exc).__name__}"
 
     if not parts:
         return None, "; ".join(errors) or "profiling failed: no data returned"
@@ -467,20 +508,33 @@ def detect_new_sources(since="24h ago", auto_queue=False, check_drift=False,
     svc_out, svc_err = _bzrk_search(services_kql, since)
     met_out, met_err = _bzrk_search(metrics_kql, since)
 
-    live_services = {s for s in _parse_source_rows(svc_out) if _looks_like_service(s)} if not svc_err else set()
-    live_metrics = set(_parse_source_rows(met_out)) if not met_err else set()
+    if svc_err and met_err:
+        return "Source discovery failed: both inventory queries returned errors. Baseline unchanged."
 
     baseline = load_json_dict(_known_sources_path())
+    is_first_run = not baseline
+
+    if is_first_run and (svc_err or met_err):
+        return (
+            "Source discovery failed: cannot initialize baseline with partial data "
+            f"({'services query failed' if svc_err else 'metrics query failed'}). "
+            "Retry when the backend is healthy."
+        )
+
+    live_services = (
+        {s for s in _parse_source_rows(svc_out) if _looks_like_service(s)}
+        if not svc_err else None
+    )
+    live_metrics = set(_parse_source_rows(met_out)) if not met_err else None
+
     known_services = set(baseline.get("services", {}).keys())
     known_metrics = set(baseline.get("metrics", {}).keys())
 
-    is_first_run = not baseline
-
-    new_services = sorted(live_services - known_services)
-    new_metrics = sorted(live_metrics - known_metrics)
+    new_services = sorted(live_services - known_services) if live_services is not None else []
+    new_metrics = sorted(live_metrics - known_metrics) if live_metrics is not None else []
     drifted_services = []
 
-    if check_drift and not is_first_run:
+    if check_drift and not is_first_run and live_services is not None:
         for svc in sorted(live_services & known_services):
             keys_out, keys_err = _bzrk_search(_q_discover_keys(svc), since)
             if keys_err:
@@ -500,26 +554,18 @@ def detect_new_sources(since="24h ago", auto_queue=False, check_drift=False,
     baseline.setdefault("services", {})
     baseline.setdefault("metrics", {})
 
-    # Metrics are infra (bzrk.*/system.*/container.*/...) the assistant never
-    # queries per-metric: always record them so they never re-flag as "new",
-    # but NEVER auto-queue them. This removes the bulk of a real cluster's
-    # sources from the generation path.
-    for met in live_metrics:
-        if met not in baseline["metrics"]:
-            baseline["metrics"][met] = {"first_seen": _now_iso()}
+    if live_metrics is not None:
+        for met in live_metrics:
+            if met not in baseline["metrics"]:
+                baseline["metrics"][met] = {"first_seen": _now_iso()}
 
     queued = []
     if is_first_run or not auto_queue:
-        # Seed mode (first run, or an explicit detect-only call): record all
-        # services and queue nothing, so a partial baseline can never dump the
-        # whole cluster into the queue.
-        for svc in live_services:
-            if svc not in baseline["services"]:
-                baseline["services"][svc] = {"first_seen": _now_iso()}
+        if live_services is not None:
+            for svc in live_services:
+                if svc not in baseline["services"]:
+                    baseline["services"][svc] = {"first_seen": _now_iso()}
     else:
-        # Auto-queue mode: queue at most MAX_AUTOQUEUE_PER_RUN new/drifted
-        # services and fold ONLY those into the baseline, so any remainder is
-        # picked up on later runs (gradual drain). Hard cap = runaway fail-safe.
         to_queue = (new_services + drifted_services)[:MAX_AUTOQUEUE_PER_RUN]
         if to_queue:
             queue = load_json_list(discovery_queue_path)
@@ -545,10 +591,20 @@ def detect_new_sources(since="24h ago", auto_queue=False, check_drift=False,
             f"{len(live_metrics)} metrics (queued nothing)"
         )
 
+    warnings = []
+    if svc_err:
+        warnings.append("(services query failed — services dimension skipped)")
+    if met_err:
+        warnings.append("(metrics query failed — metrics dimension skipped)")
+
     if not new_services and not new_metrics and not drifted_services:
+        if warnings:
+            return "No new sources " + " ".join(warnings)
         return "No new sources."
 
     lines = []
+    if warnings:
+        lines.extend(warnings)
     if new_services:
         lines.append(f"new_services ({len(new_services)}): " + ", ".join(new_services))
     if drifted_services:
@@ -649,11 +705,64 @@ def _parse_generated_reply(text, source):
     return out, None
 
 
+MAX_GENERATED_QUERY_LEN = 2000
+MAX_GENERATED_TAKE = 50
+
+_TAKE_RE = re.compile(r"\|\s*take\s+(\d+)\s*$", re.IGNORECASE)
+
+
+def _strip_kql_literals(kql):
+    """Remove quoted string literals and // line comments so operator
+    detection cannot be tricked by text inside a string. Preserves length
+    approximately by replacing content with spaces (whitespace is not an
+    operator anywhere KQL cares about it in this pipeline)."""
+    out = []
+    i = 0
+    n = len(kql)
+    while i < n:
+        c = kql[i]
+        if c in ("'", '"'):
+            quote = c
+            out.append(" ")
+            i += 1
+            while i < n and kql[i] != quote:
+                if kql[i] == "\\" and i + 1 < n:
+                    out.append(" ")
+                    i += 2
+                    continue
+                out.append(" ")
+                i += 1
+            if i < n:
+                out.append(" ")
+                i += 1
+            continue
+        if c == "/" and i + 1 < n and kql[i + 1] == "/":
+            while i < n and kql[i] != "\n":
+                out.append(" ")
+                i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def validate_generated_query(q):
     """Returns (ok, error_or_none, warning_or_none)."""
     kql = q["kql"]
+
+    if len(kql) > MAX_GENERATED_QUERY_LEN:
+        return False, "query exceeds maximum length", None
+
     if not _kql_prefix_re().match(kql):
         return False, f"invalid KQL: must start with '{_table} | ...'", None
+
+    stripped = _strip_kql_literals(kql)
+    take_match = _TAKE_RE.search(stripped)
+    if not take_match:
+        return False, "generated query must end with '| take N' (1..50)", None
+    take_n = int(take_match.group(1))
+    if take_n < 1 or take_n > MAX_GENERATED_TAKE:
+        return False, f"take {take_n} out of range (1..{MAX_GENERATED_TAKE})", None
 
     out, err = _bzrk_search(kql, q.get("since") or "1h ago")
     if err:

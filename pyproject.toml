@@ -33,6 +33,7 @@ py-modules = ["berserk_mcp", "parser_factory", "agent_analytics", "secret_scan",
 
 [tool.setuptools.data-files]
 "share/berserk-mcp" = ["ingestion_catalog.json"]
+"share/berserk-mcp/primers" = ["primers/claude.md", "primers/soc.md", "primers/sre.md", "primers/windows-forensics.md"]
 
 [tool.setuptools.dynamic]
 version = { attr = "berserk_mcp.__version__" }

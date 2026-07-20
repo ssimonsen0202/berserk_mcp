@@ -333,7 +333,7 @@ Version 1.8.1 provides a read-only analytics layer for the `claude` lane:
 - `claude_loop_check` groups tool calls by session and reports repetition ratio, top repeated call, error-retry count, and a `healthy` / `some-repetition` / `likely-looping` verdict.
 - `claude_model_fit` maps model names to a coarse tier (`frontier`, `mid`, `cheap`) and compares that to a complexity proxy from tool count, errors, duration, and loop signals.
 - `claude_token_burn` uses `claude.tokens_input` + `claude.tokens_output` when present, falls back per session to `body characters / 4`, computes burn per distinct tool plus inferred file target, and highlights top-decile burn. Every result labels its source as exact or estimated.
-- `--agent-report` runs all three checks headlessly and exits non-zero when a session is likely looping, underpowered, or high-burn, so cron/systemd can pipe the stdout summary to an alert transport:
+- `--agent-report` runs all three checks headlessly and exits non-zero when a session is likely looping or underpowered, so cron/systemd can pipe the stdout summary to an alert transport. "high-burn" alone is a relative marker (always present because it is a top-decile ranking) and is intentionally excluded from the alert threshold:
 
 ```bash
 berserk-mcp --agent-report --since "6h ago"
@@ -700,8 +700,11 @@ cd berserk-mcp
 pip install .
 ```
 
-The single file has no dependencies, so you can also just drop `berserk_mcp.py`
-somewhere and run `python berserk_mcp.py`.
+The server uses only the Python standard library — no third-party runtime
+dependencies. Installation must include the accompanying local modules
+(`parser_factory.py`, `secret_scan.py`, `agent_analytics.py`,
+`ingestion_advisor.py`) and packaged data (`primers/`, `ingestion_catalog.json`).
+Use `pip install .` or a built wheel — do not copy `berserk_mcp.py` alone.
 
 ## Configure
 
@@ -808,7 +811,36 @@ that way if you add tools.
 - **Read-only by construction.** Every tool is annotated (`readOnlyHint`) and only issues read KQL. The sole exceptions are `save_query` (writes a local query file, never Berserk) and `request_discovery` (writes a local queue file).
 - **No shell.** `subprocess` is always invoked with an argument list (never `shell=True`); there is no `eval`.
 - **No secrets in this code.** The Berserk bearer token lives only in `bzrk`'s own config. This server never reads, stores, or logs it.
-- **Note on output.** Tool results are whatever your telemetry contains. If logs in Berserk hold sensitive values, `logs_for_service`/`search` can surface them — redact at ingest, not here.
+- **Fail-closed secret scanning.** `scan_secrets` refuses to report "clean" on any parse failure or multi-table response; the response is either fully decoded and every audit record validated, or a controlled `Secret scan failed` error is returned with no content echo.
+- **Structural telemetry only to LLM providers.** The generation pipeline projects `bag_keys(...)`, `has_body`, `has_metric`, and length-capped, fully-redacted excerpts only — raw telemetry values are never sent to any provider.
+- **Bounded redaction.** `redact()` uses explicit `MAX_REDACT_CHARS = 1_000_000` and `MAX_REDACT_CANDIDATES = 50_000` limits, and a sort-merge-join pipeline that fail-closes to `[REDACTED:redaction_limit]` on bound violations — no partial original text is ever returned.
+- **Constant auth-failure messaging.** `bzrk` auth failures always return the constant string `"bzrk authentication failed; run \`bzrk login\` and retry"` — never raw stderr, tokens, or tenant identifiers.
+- **JSON-RPC 2.0 strict envelope validation.** `initialize` requires a nonempty string `protocolVersion` and object-typed `capabilities`/`clientInfo`; `ping` and `tools/list` reject nonempty params; notifications sent as requests are rejected with `-32600`; unexpected handler exceptions surface as `-32603` rather than silently converting to `isError=true` results.
+- **Generated-query policy.** LLM-generated queries must start with `{table} | ...`, must terminate with `| take N` where `1 ≤ N ≤ 50`, and must fit within 2,000 characters. The policy check is applied to a stripped copy of the KQL with string literals and `//` comments removed, so operator text inside quoted strings or comments cannot satisfy the check.
+- **Provider error scrubbing.** HTTP errors from LLM providers return only `"HTTP <code>"` — response bodies and exception messages are never propagated to the caller.
+
+**Note on output.** Tool results are whatever your telemetry contains. If logs in Berserk hold sensitive values, `logs_for_service`/`search` can surface them — redact at ingest, not here.
+
+### Security review and testing
+
+The security-relevant surface has been through a multi-round audit and
+external scanner pass:
+
+- **Hand audit** covered 15 findings (7 blocking security/DR, plus 8
+  deferred behavioral/documentation issues) with adversarial regression
+  tests for each. Findings and closure evidence:
+  [`docs/security-bug-review-report-2026-07-18.md`](docs/security-bug-review-report-2026-07-18.md).
+- **Differential re-review** produced 6 additional findings (`FVR-001`
+  through `FVR-006`), all closed:
+  [`docs/security-fix-validation-report-2026-07-19.md`](docs/security-fix-validation-report-2026-07-19.md).
+- **External scanner pass** — Cisco AI Defense `mcp-scanner` (YARA
+  stdio + pip-audit) and MCP-Shield (wire-level tool description
+  keyword scan): 0 true findings; 3 keyword false positives from
+  MCP-Shield on domain vocabulary documented and explained:
+  [`docs/cisco-mcp-scanner-result-report-2026-07-19.md`](docs/cisco-mcp-scanner-result-report-2026-07-19.md).
+- **Ongoing verification:** the test suite (`tests/`, 254 tests + 2
+  role tests) includes an adversarial regression for every finding
+  above and is run before every release. See `## Testing` below.
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
