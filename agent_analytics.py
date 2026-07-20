@@ -565,6 +565,84 @@ def claude_token_burn(since="6h ago"):
     return "\n".join(lines), False
 
 
+def _daily_rows(text):
+    """Parse --json output rows for the daily cost query (generic dicts,
+    NOT _normalize_row'd — that helper is for event rows)."""
+    whole = str(text or "").strip()
+    if not whole or whole == "(no rows)":
+        return []
+    if whole[0] in "[{":
+        try:
+            records = _json_records(json.loads(whole))
+        except json.JSONDecodeError:
+            records = None
+        if records is not None:
+            return [r for r in records if isinstance(r, dict)]
+    rows = []
+    for ln in whole.splitlines():
+        ln = ln.strip()
+        if not ln.startswith("{"):
+            continue
+        try:
+            rows.append(json.loads(ln))
+        except json.JSONDecodeError:
+            return []
+    return rows
+
+
+def claude_cost_report(since="7d ago", group_by="day"):
+    """Multi-day Claude Code cost report. NOT yet live-verified (J0 pending)."""
+    group_by = str(group_by or "day").strip().lower()
+    if group_by not in ("day", "model", "project"):
+        return "invalid group_by: use 'day', 'model', or 'project'", True
+
+    if group_by == "project":
+        text, is_err = _bzrk_search(_burn_events_query(), since)
+        if is_err:
+            return text, True
+        events = _parse_rows(text)
+        if not events:
+            return "No Claude Code events found in this window.", False
+        by_project = {}
+        for ev in events:
+            tokens = (
+                _nonnegative_int(ev.get("tokens_in")) + _nonnegative_int(ev.get("tokens_out"))
+            ) if ev.get("has_token_usage") else len(ev.get("body", "")) // 4
+            project = "(unattributed)"
+            for tgt in _file_targets([ev]):
+                inferred = _infer_project(tgt)
+                if inferred != "(unattributed)":
+                    project = inferred
+                    break
+            slot = by_project.setdefault(project, {"tokens": 0, "events": 0})
+            slot["tokens"] += tokens
+            slot["events"] += 1
+        lines = [f"Claude Code cost by project (most recent {len(events)} events; "
+                 f"window {since}):"]
+        for name in sorted(by_project, key=lambda k: -by_project[k]["tokens"]):
+            s = by_project[name]
+            lines.append(f"- {_redact(name)}: ~{s['tokens']} tokens across {s['events']} events")
+        return "\n".join(lines), False
+
+    text, is_err = _bzrk_search(_cost_daily_query(), since)
+    if is_err:
+        return text, True
+    rows = _daily_rows(text)
+    if not rows:
+        return "No Claude Code activity found in this window.", False
+    rep = analyze_cost_daily(rows)
+    lines = [f"Claude Code cost report ({since}): verdict={rep['verdict']} "
+             f"(slope {rep['slope_pct_per_day']:+.1f}%/day)"]
+    if group_by == "model":
+        for model in sorted(rep["models"], key=lambda k: -rep["models"][k]):
+            lines.append(f"- {model}: ~{rep['models'][model]} tokens")
+    else:
+        for d in rep["days"]:
+            lines.append(f"- {d['day']}: ~{d['tokens']} tokens ({d['source']}), "
+                         f"{d['events']} events, {d['errors']} errors")
+    return "\n".join(lines), False
+
+
 def agent_report(since="6h ago"):
     loop_text, loop_err = claude_loop_check(since)
     fit_text, fit_err = claude_model_fit(since)

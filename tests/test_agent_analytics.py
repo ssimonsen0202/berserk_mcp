@@ -427,5 +427,98 @@ class AgentAnalyticsMcpTest(unittest.TestCase):
         self.assertEqual(text, "query failed")
 
 
+class _RewiredAnalytics(unittest.TestCase):
+    """Base for tests that must rewire aa._bzrk_search directly: saves and
+    restores the module wiring so later dispatch tests keep the production
+    configure() (lesson from the Task-2 pollution failure)."""
+
+    def setUp(self):
+        self._orig_search = aa._bzrk_search
+        self._orig_table = aa._table
+        self._orig_redact = aa._redact
+
+    def tearDown(self):
+        aa._bzrk_search = self._orig_search
+        aa._table = self._orig_table
+        aa._redact = self._orig_redact
+
+    def rewire(self, fn):
+        aa._bzrk_search = fn
+
+
+class CostReportToolTest(_RewiredAnalytics):
+    def test_cost_report_day_grouping_renders_verdict(self):
+        daily = [
+            {"day": f"2026-07-{d:02d}", "model": "m", "events": 5, "errors": 0,
+             "tokens_in_sum": 1000 * i, "tokens_out_sum": 0, "body_chars_sum": 0}
+            for i, d in enumerate(range(10, 15), start=1)
+        ]
+        self.rewire(lambda q, s: (json.dumps(daily), False))
+        text, err = aa.claude_cost_report()
+        self.assertFalse(err)
+        self.assertIn("burn-growing", text)
+        self.assertIn("exact", text)
+
+    def test_cost_report_project_grouping_uses_events(self):
+        events = [row("s1", "2026-07-14T10:00:00Z", "Edit", "/h/proj-a/src/a.py"),
+                  row("s2", "2026-07-14T11:00:00Z", "Edit", "/h/proj-b/src/b.py")]
+        self.rewire(lambda q, s: (jsonl(events), False))
+        text, err = aa.claude_cost_report(group_by="project")
+        self.assertFalse(err)
+        self.assertIn("proj-a", text)
+        self.assertIn("proj-b", text)
+        self.assertIn("most recent", text)  # event-cap labeled
+
+    def test_cost_report_invalid_group_by_rejected(self):
+        self.rewire(lambda q, s: ("", False))
+        text, err = aa.claude_cost_report(group_by="nonsense")
+        self.assertTrue(err)
+        self.assertIn("group_by", text)
+
+    def test_cost_report_propagates_query_error(self):
+        self.rewire(lambda q, s: ("backend down", True))
+        text, err = aa.claude_cost_report()
+        self.assertTrue(err)
+
+    def test_cost_report_no_data(self):
+        self.rewire(lambda q, s: ("(no rows)", False))
+        text, err = aa.claude_cost_report()
+        self.assertFalse(err)
+        self.assertIn("No Claude Code", text)
+
+    def test_cost_report_model_grouping(self):
+        daily = [
+            {"day": "2026-07-14", "model": "claude-opus-4-7", "events": 5, "errors": 0,
+             "tokens_in_sum": 3000, "tokens_out_sum": 0, "body_chars_sum": 0},
+            {"day": "2026-07-14", "model": "claude-haiku-4-5", "events": 5, "errors": 0,
+             "tokens_in_sum": 1000, "tokens_out_sum": 0, "body_chars_sum": 0},
+        ]
+        self.rewire(lambda q, s: (json.dumps(daily), False))
+        text, err = aa.claude_cost_report(group_by="model")
+        self.assertFalse(err)
+        self.assertIn("claude-opus-4-7", text)
+        self.assertIn("claude-haiku-4-5", text)
+
+    def test_cost_report_tool_dispatches_via_mcp(self):
+        orig = bm.run_bzrk
+        try:
+            bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: ("(no rows)", False)
+            text, err = bm.handle_call("claude_cost_report", {"since": "7d ago"})
+            self.assertFalse(err)
+            self.assertIn("No Claude Code", text)
+        finally:
+            bm.run_bzrk = orig
+
+    def test_cost_report_in_tools_list_for_claude_role(self):
+        orig_role = bm.ACTIVE_ROLE
+        try:
+            bm.ACTIVE_ROLE = "claude"
+            resp = bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+            names = {t["name"] for t in resp["result"]["tools"]}
+            self.assertIn("claude_cost_report", names)
+        finally:
+            bm.ACTIVE_ROLE = orig_role
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

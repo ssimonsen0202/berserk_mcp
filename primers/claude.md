@@ -16,6 +16,7 @@ and where it's struggling.
 | Is Claude stuck in a retry loop? | `claude_loop_check` |
 | Is the model well-suited to the task? | `claude_model_fit` |
 | Token consumption patterns | `claude_token_burn` |
+| Cost trends / burn by project or model | `claude_cost_report` |
 | What services are sending data? | `list_services` |
 | Ad-hoc KQL | `search` |
 

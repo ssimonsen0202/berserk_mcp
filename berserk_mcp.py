@@ -847,6 +847,7 @@ TOOLS = [
     {"name": "claude_loop_check", "roles": ["claude"], "description": "Claude Code loop detector. Heuristically flags sessions that repeat the same tool/target, retry errors, or oscillate between the same calls. Bodies are truncated; output is diagnostic, not raw transcript replay. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "claude_model_fit", "roles": ["claude"], "description": "Claude Code model-fit heuristic. Uses observed tool count, errors, duration, and loop signals to flag frontier models on trivial work or cheap models on complex/repetitive work. Not a billing statement. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "claude_token_burn", "roles": ["claude"], "description": "Claude Code token-burn analysis. Uses exact claude.tokens_input/output usage when present, falls back to a labeled body-length estimate per session, computes burn per distinct tool/file target, and joins high burn with loop signals. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "claude_cost_report", "roles": ["claude"], "description": "Claude Code multi-day cost report: per-day token burn with exact/estimated labeling, per-model split, optional per-project attribution from file paths, and a burn-growing/flat/declining trend verdict. Default 7d.", "inputSchema": {"type": "object", "properties": dict({"group_by": {"type": "string", "enum": ["day", "model", "project"], "description": "Aggregation: by day (default), model, or inferred project."}}, **_since())}},
     {"name": "scan_secrets", "roles": ["soc"], "description": "Audit recent log bodies for potential credentials and optionally selected PII categories. Returns only aggregate service/type counts and first-seen timestamps; secret values are never returned. Default 1h.", "inputSchema": {"type": "object", "properties": {"since": _since()["since"], "include_entropy": {"type": "boolean", "description": "Enable false-positive-prone high-entropy token detection."}, "include_pii": {"type": "array", "items": {"type": "string", "enum": ["email", "ipv4", "ipv6", "credit_card"]}, "description": "Optional PII categories to include."}}}},
     {"name": "suggest_ingestion", "description": "Recommend concrete telemetry sources for a role/use case. With check_gap=true, compares service and metric hints against live Berserk inventory and marks each source present or missing. Catalog-backed and read-only.", "inputSchema": {"type": "object", "properties": {"role_or_usecase": {"type": "string", "description": "Catalog key such as sre/onprem-ad-health, soc/endpoint-identity, change-management/ansible, or scom."}, "check_gap": {"type": "boolean", "description": "Compare recommendations with live service and metric inventory."}, "since": _since()["since"]}, "required": ["role_or_usecase"]}},
 ]
@@ -926,6 +927,7 @@ TITLES = {
     "claude_loop_check": "Claude Code: Loop Check",
     "claude_model_fit": "Claude Code: Model Fit",
     "claude_token_burn": "Claude Code: Token Burn",
+    "claude_cost_report": "Claude Code: Cost Report",
     "scan_secrets": "SOC: Secret Scan",
     "suggest_ingestion": "Suggest Telemetry Ingestion",
     "list_saved": "List Saved Queries",
@@ -1260,6 +1262,15 @@ def handle_call(name, arguments):
                 f"'2d ago', or 'now'."
             ), True
         return agent_analytics.claude_token_burn(since)
+    if name == "claude_cost_report":
+        since = arguments.get("since") or "7d ago"
+        if not valid_since(since):
+            return (
+                f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
+                f"'2d ago', or 'now'."
+            ), True
+        return agent_analytics.claude_cost_report(
+            since, group_by=arguments.get("group_by") or "day")
     if name == "scan_secrets":
         since = arguments.get("since") or "1h ago"
         if not valid_since(since):
