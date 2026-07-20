@@ -720,6 +720,80 @@ def claude_session_deep_dive(session_id, since="24h ago"):
     return "\n".join(lines), False
 
 
+def analyze_workflow_events(events):
+    """Aggregate workflow patterns across sessions. Pure function."""
+    by_session = {}
+    for ev in events:
+        by_session.setdefault(ev.get("session", "(none)"), []).append(ev)
+
+    seq_counts = {}
+    for sess_events in by_session.values():
+        tools = []
+        for ev in sess_events:
+            tools.extend(_tool_names(ev.get("tools")))
+        for size in (2, 3):
+            for i in range(len(tools) - size + 1):
+                pattern = "→".join(tools[i:i + size])
+                seq_counts[pattern] = seq_counts.get(pattern, 0) + 1
+    sequences = [{"pattern": p, "count": c}
+                 for p, c in sorted(seq_counts.items(), key=lambda kv: -kv[1])[:10]
+                 if c >= 2]
+
+    call_stats = {}
+    for call in _calls_for_events(events):
+        slot = call_stats.setdefault(call["key"], {"errors": 0, "calls": 0})
+        slot["calls"] += 1
+        if call["err"]:
+            slot["errors"] += 1
+    hotspots = [{"key": k, "errors": v["errors"], "calls": v["calls"]}
+                for k, v in sorted(call_stats.items(), key=lambda kv: -kv[1]["errors"])
+                if v["errors"] >= 2][:10]
+
+    burn_rank = []
+    for session, sess_events in by_session.items():
+        exact = sum(_nonnegative_int(ev.get("tokens_in")) + _nonnegative_int(ev.get("tokens_out"))
+                    for ev in sess_events if ev.get("has_token_usage"))
+        tokens = exact if exact > 0 else \
+            sum(len(ev.get("body", "")) for ev in sess_events) // 4
+        targets = max(1, len(_file_targets(sess_events)))
+        burn_rank.append({"session": session,
+                          "tokens_per_target": tokens // targets})
+    burn_rank.sort(key=lambda r: -r["tokens_per_target"])
+    decile = max(1, len(burn_rank) // 10)
+    inefficient = burn_rank[:decile] if len(burn_rank) >= 3 else []
+
+    return {"sequences": sequences, "hotspots": hotspots, "inefficient": inefficient}
+
+
+def claude_workflow_insights(since="7d ago"):
+    """Cross-session workflow patterns. NOT yet live-verified (J0 pending)."""
+    text, is_err = _bzrk_search(_burn_events_query(), since)
+    if is_err:
+        return text, True
+    events = _parse_rows(text)
+    if not events:
+        return "No Claude Code events found in this window.", False
+    rep = analyze_workflow_events(events)
+    lines = [f"Claude Code workflow insights ({since}, {len(events)} events):"]
+    if rep["sequences"]:
+        lines.append("Top tool sequences:")
+        for s in rep["sequences"][:5]:
+            lines.append(f"- {s['pattern']} x{s['count']}")
+    else:
+        lines.append("Top tool sequences: (not enough repeated activity)")
+    if rep["hotspots"]:
+        lines.append("Error hotspots (>=2 errors):")
+        for h in rep["hotspots"][:5]:
+            lines.append(f"- {_redact(h['key'])}: {h['errors']}/{h['calls']} failed")
+    else:
+        lines.append("Error hotspots: none")
+    if rep["inefficient"]:
+        lines.append("Top-decile burn per distinct target:")
+        for r in rep["inefficient"][:5]:
+            lines.append(f"- {r['session']}: ~{r['tokens_per_target']} tokens/target")
+    return "\n".join(lines), False
+
+
 def agent_report(since="6h ago"):
     loop_text, loop_err = claude_loop_check(since)
     fit_text, fit_err = claude_model_fit(since)

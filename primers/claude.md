@@ -18,6 +18,7 @@ and where it's struggling.
 | Token consumption patterns | `claude_token_burn` |
 | Cost trends / burn by project or model | `claude_cost_report` |
 | Drill into one session's timeline | `claude_session_deep_dive session_id=<id>` |
+| Overall workflow patterns / hotspots | `claude_workflow_insights` |
 | What services are sending data? | `list_services` |
 | Ad-hoc KQL | `search` |
 

@@ -582,5 +582,64 @@ class SessionDeepDiveTest(_RewiredAnalytics):
             bm.run_bzrk = orig
 
 
+class WorkflowInsightsTest(_RewiredAnalytics):
+    def test_bigram_sequences_counted(self):
+        events = []
+        for i in range(3):
+            events.append(row("s1", f"2026-07-14T10:{2*i:02d}:00Z", "Read", "a.py"))
+            events.append(row("s1", f"2026-07-14T10:{2*i+1:02d}:00Z", "Edit", "a.py"))
+        rep = aa.analyze_workflow_events(events)
+        patterns = {s["pattern"]: s["count"] for s in rep["sequences"]}
+        self.assertGreaterEqual(patterns.get("Read→Edit", 0), 3)
+
+    def test_error_hotspot_needs_min_two_errors(self):
+        events = [row("s1", f"2026-07-14T10:0{i}:00Z", "Bash", "npm test", err=True)
+                  for i in range(3)]
+        events.append(row("s1", "2026-07-14T10:09:00Z", "Read", "x.py", err=True))
+        rep = aa.analyze_workflow_events(events)
+        keys = [h["key"] for h in rep["hotspots"]]
+        self.assertTrue(any("Bash" in k for k in keys))
+        self.assertFalse(any("Read" in k for k in keys))  # only 1 error
+
+    def test_empty_events(self):
+        rep = aa.analyze_workflow_events([])
+        self.assertEqual(rep["sequences"], [])
+        self.assertEqual(rep["hotspots"], [])
+        self.assertEqual(rep["inefficient"], [])
+
+    def test_wrapper_renders_no_data(self):
+        self.rewire(lambda q, s: ("(no rows)", False))
+        text, err = aa.claude_workflow_insights()
+        self.assertFalse(err)
+        self.assertIn("No Claude Code", text)
+
+    def test_wrapper_full_render(self):
+        events = [row("s1", "2026-07-14T10:00:00Z", "Read", "/p/src/a.py"),
+                  row("s1", "2026-07-14T10:01:00Z", "Edit", "/p/src/a.py"),
+                  row("s1", "2026-07-14T10:02:00Z", "Bash", "pytest", err=True),
+                  row("s1", "2026-07-14T10:03:00Z", "Bash", "pytest", err=True)]
+        aa_events = jsonl(events + events)  # repeat so bigrams cross min-count
+        self.rewire(lambda q, s: (aa_events, False))
+        text, err = aa.claude_workflow_insights()
+        self.assertFalse(err)
+        self.assertIn("Read→Edit", text)
+        self.assertIn("Bash", text)
+
+    def test_wrapper_propagates_query_error(self):
+        self.rewire(lambda q, s: ("backend down", True))
+        text, err = aa.claude_workflow_insights()
+        self.assertTrue(err)
+
+    def test_wrapper_dispatches_via_mcp(self):
+        orig = bm.run_bzrk
+        try:
+            bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: ("(no rows)", False)
+            text, err = bm.handle_call("claude_workflow_insights", {})
+            self.assertFalse(err)
+            self.assertIn("No Claude Code", text)
+        finally:
+            bm.run_bzrk = orig
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
