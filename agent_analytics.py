@@ -643,6 +643,83 @@ def claude_cost_report(since="7d ago", group_by="day"):
     return "\n".join(lines), False
 
 
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_GAP_SECONDS = 300
+
+
+def _session_events_query(session_id):
+    return (
+        f"{_table} | where resource['service.name'] == 'claude-code' "
+        f"| where tostring(attributes['claude.session_id']) == '{session_id}' "
+        f"| project session=tostring(attributes['claude.session_id']), "
+        f"ts=timestamp, typ=tostring(attributes['claude.type']), "
+        f"model=tostring(attributes['claude.message_model']), "
+        f"tools=tostring(attributes['claude.tool_names']), "
+        f"err=tostring(attributes['claude.error']), body=tostring(body) "
+        f", tokens_in=tostring(attributes['{_TOKENS_IN_ATTR}']) "
+        f", tokens_out=tostring(attributes['{_TOKENS_OUT_ATTR}']) "
+        f"| sort by ts asc | take 2000"
+    )
+
+
+def analyze_session_events(events):
+    """Timeline analysis for one session's events. Pure function."""
+    phases = []
+    gaps = []
+    prev_ts = None
+    for ev in events:
+        names = _tool_names(ev.get("tools")) or ["(no-tool)"]
+        tool = names[0]
+        err = 1 if ev.get("err") == "true" else 0
+        ts = ev.get("ts", "")
+        cur = _parse_ts(ts)
+        if prev_ts is not None and cur is not None:
+            delta = (cur - prev_ts).total_seconds()
+            if delta > _GAP_SECONDS:
+                gaps.append({"after_ts": ts, "seconds": int(delta)})
+        if cur is not None:
+            prev_ts = cur
+        if phases and phases[-1]["tool"] == tool:
+            phases[-1]["count"] += 1
+            phases[-1]["errors"] += err
+            phases[-1]["last_ts"] = ts
+        else:
+            phases.append({"tool": tool, "count": 1, "errors": err,
+                           "first_ts": ts, "last_ts": ts})
+    exact = sum(_nonnegative_int(ev.get("tokens_in")) + _nonnegative_int(ev.get("tokens_out"))
+                for ev in events if ev.get("has_token_usage"))
+    if exact > 0:
+        burn = {"tokens": exact, "source": "exact"}
+    else:
+        burn = {"tokens": sum(len(ev.get("body", "")) for ev in events) // 4,
+                "source": "estimated"}
+    loops = analyze_loop_events(events)
+    loop_verdict = loops[0]["verdict"] if loops else "no-tool-calls"
+    return {"phases": phases, "gaps": gaps, "burn": burn, "loop": loop_verdict}
+
+
+def claude_session_deep_dive(session_id, since="24h ago"):
+    """Timeline + burn + loop drilldown for one session. NOT yet live-verified."""
+    sid = str(session_id or "").strip()
+    if not _SESSION_ID_RE.match(sid):
+        return "invalid session_id (allowed: letters, digits, '.', '_', '-')", True
+    text, is_err = _bzrk_search(_session_events_query(sid), since)
+    if is_err:
+        return text, True
+    events = _parse_rows(text)
+    if not events:
+        return f"No data for session {sid} in this window.", False
+    rep = analyze_session_events(events)
+    lines = [f"Session {sid} deep dive ({since}): loop={rep['loop']}, "
+             f"~{rep['burn']['tokens']} tokens ({rep['burn']['source']})"]
+    for p in rep["phases"]:
+        marker = f", {p['errors']} errors" if p["errors"] else ""
+        lines.append(f"- {p['first_ts']} {p['tool']} x{p['count']}{marker}")
+    for g in rep["gaps"]:
+        lines.append(f"- gap of {g['seconds']}s before {g['after_ts']}")
+    return "\n".join(lines), False
+
+
 def agent_report(since="6h ago"):
     loop_text, loop_err = claude_loop_check(since)
     fit_text, fit_err = claude_model_fit(since)

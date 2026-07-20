@@ -17,6 +17,7 @@ and where it's struggling.
 | Is the model well-suited to the task? | `claude_model_fit` |
 | Token consumption patterns | `claude_token_burn` |
 | Cost trends / burn by project or model | `claude_cost_report` |
+| Drill into one session's timeline | `claude_session_deep_dive session_id=<id>` |
 | What services are sending data? | `list_services` |
 | Ad-hoc KQL | `search` |
 

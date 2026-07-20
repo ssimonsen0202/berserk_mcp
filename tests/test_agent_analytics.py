@@ -520,5 +520,67 @@ class CostReportToolTest(_RewiredAnalytics):
             bm.ACTIVE_ROLE = orig_role
 
 
+class SessionDeepDiveTest(_RewiredAnalytics):
+    def _events(self):
+        return [
+            row("s1", "2026-07-14T10:00:00Z", "Read", "/p/src/a.py"),
+            row("s1", "2026-07-14T10:01:00Z", "Read", "/p/src/b.py"),
+            row("s1", "2026-07-14T10:02:00Z", "Edit", "/p/src/a.py", err=True),
+            # 10-minute gap
+            row("s1", "2026-07-14T10:12:00Z", "Bash", "pytest"),
+        ]
+
+    def test_phases_group_contiguous_tools(self):
+        rep = aa.analyze_session_events(self._events())
+        self.assertEqual([p["tool"] for p in rep["phases"]], ["Read", "Edit", "Bash"])
+        self.assertEqual(rep["phases"][0]["count"], 2)
+        self.assertEqual(rep["phases"][1]["errors"], 1)
+
+    def test_gap_over_threshold_detected(self):
+        rep = aa.analyze_session_events(self._events())
+        self.assertEqual(len(rep["gaps"]), 1)
+        self.assertGreaterEqual(rep["gaps"][0]["seconds"], 600)
+
+    def test_burn_labeled_estimated_without_usage(self):
+        rep = aa.analyze_session_events(self._events())
+        self.assertEqual(rep["burn"]["source"], "estimated")
+
+    def test_burn_exact_with_usage(self):
+        events = [usage_row("s1", "2026-07-14T10:00:00Z", "Read", 100, 50)]
+        rep = aa.analyze_session_events(events)
+        self.assertEqual(rep["burn"], {"tokens": 150, "source": "exact"})
+
+    def test_wrapper_validates_session_id(self):
+        self.rewire(lambda q, s: ("", False))
+        text, err = aa.claude_session_deep_dive("bad id; drop")
+        self.assertTrue(err)
+        self.assertIn("invalid session", text)
+
+    def test_wrapper_unknown_session_is_explicit(self):
+        self.rewire(lambda q, s: ("(no rows)", False))
+        text, err = aa.claude_session_deep_dive("s404")
+        self.assertFalse(err)
+        self.assertIn("No data for session", text)
+
+    def test_wrapper_renders_timeline(self):
+        self.rewire(lambda q, s: (jsonl(self._events()), False))
+        text, err = aa.claude_session_deep_dive("s1")
+        self.assertFalse(err)
+        self.assertIn("Read", text)
+        self.assertIn("gap", text.lower())
+
+    def test_wrapper_dispatches_via_mcp_and_requires_session_id(self):
+        orig = bm.run_bzrk
+        try:
+            bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: ("(no rows)", False)
+            text, err = bm.handle_call("claude_session_deep_dive", {"session_id": "s9"})
+            self.assertFalse(err)
+            self.assertIn("No data for session", text)
+            text, err = bm.handle_call("claude_session_deep_dive", {})
+            self.assertTrue(err)
+        finally:
+            bm.run_bzrk = orig
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
