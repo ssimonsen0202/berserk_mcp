@@ -219,3 +219,110 @@ rows actually carry `resource['host.name']` (run `bzrk-q` with the tool's query)
 - [BFCL v3 scores (pricepertoken)](https://pricepertoken.com/leaderboards/benchmark/bfcl-v3) · [BFCL on llm-stats](https://llm-stats.com/benchmarks/bfcl)
 - [MCP-Universe — site](https://mcp-universe.github.io/) · [paper (arXiv 2508.14704)](https://arxiv.org/abs/2508.14704) · [Salesforce repo](https://github.com/SalesforceAIResearch/MCP-Universe)
 - [MCP-Atlas: Large-Scale Benchmark for Tool-Use Competency with Real MCP Servers (arXiv 2602.00933)](https://arxiv.org/abs/2602.00933)
+
+---
+
+## Part 3 — Two-tier local routing: the 80% small-model goal (added 2026-07-20)
+
+Parts 1–2 answered "which single model drives the MCP." Part 3 answers the
+sovereign-deployment question: **can a fully local two-tier setup — a small
+open-weight model for everyday calls, a larger open-weight model for `@deep`
+calls — carry the whole workload, with the small tier handling ≥ 80% of
+interactions?** Everything here runs offline; no frontier API is involved
+except as a reference ceiling.
+
+### The two tiers and what routes where
+
+| Tier | Runs | Handles | Examples |
+|---|---|---|---|
+| **Small (default lane)** | 4–9B open-weight, Q4, consumer GPU / Apple silicon | Tool routing + reading verdict output. The server does the math, so the model only picks an intent, a `since`, and narrates a structured result. | `top_cpu`, `sre_error_rate`, `claude_cost_report`, `soc_timeline`, all verdict tools |
+| **Deep (`@deep` lane)** | Largest open-weight model the host can serve (single box, Q4/Q5) | Work that requires generation or synthesis, not just routing: parser-factory KQL authoring (the existing `hermes` lane), `claude_session_deep_dive` narrative interpretation, multi-tool investigation summaries, future `morning_report` narration. | `generate_parser`, `review_generated`, incident write-ups |
+
+Candidate families (fill in the current generation at test time; names below
+are the mid-2026 open-weight lines to shortlist from — re-check BFCL first):
+
+- **Small tier:** Qwen3 4B/8B, Llama 3.x 8B, Gemma 3 4B/12B, Ministral 8B,
+  Phi-4-mini, plus the homelab floor check (qwen3:1.7b).
+- **Deep tier:** Gemma 3 27B, Qwen3 32B, GLM-4.5-Air, DeepSeek-R1-Distill-32B,
+  GPT-OSS-20B, Llama 3.3 70B (Q4, needs ≥ 48 GB), Kimi K2 (MoE — only if a
+  server-class box is available; otherwise skip, do not run degraded quants).
+- **Reference ceiling (not a deployment target):** one frontier API model,
+  single run, to size the gap.
+
+All candidates must expose the OpenAI-compatible chat+tools API (Ollama
+`/v1`, vLLM, llama.cpp server, LM Studio all qualify) so the existing
+`run_eval.py` harness and the parser factory's `hermes` endpoint work
+unchanged — the deep tier is literally configured as
+`berserk-mcp --set-hermes-url http://<host>:<port>/v1/chat/completions`
+plus `BERSERK_LLM_HERMES_MODEL=<model>`.
+
+### What "80% handled by the small tier" means, precisely
+
+Escalation to the deep tier is counted per *interaction* (one user question
+or one worker job), not per token. An interaction escalates when any of:
+
+1. **Class-based (static):** the interaction is inherently deep — parser
+   generation, `review_generated`, or an explicitly requested `@deep`
+   analysis. These are known escalations by design.
+2. **Failure-based (dynamic):** the small model, on a regular interaction,
+   (a) calls a nonexistent tool, (b) fails argument validation twice,
+   (c) exceeds 4 turns without producing an answer, or (d) produces an
+   answer the harness scores as wrong.
+
+**Goal:** across the mixed workload below, escalations ≤ 20% of
+interactions, with the small tier still clearing Part 2's quality bars
+(≥ 95% tool selection, ≥ 90% args, ~0% hallucinated tools) on the
+interactions it keeps.
+
+### Test phases
+
+**Phase 3.1 — Small-tier router eval (extends Layer A).**
+Run `run_eval.py` router cases against every small-tier candidate, N ≥ 3
+repeats. Add ~10 new router cases covering the Phase J tools
+(`claude_cost_report group_by=project`, `claude_session_deep_dive` with a
+session id, `claude_workflow_insights`) so the case set reflects the current
+50-tool surface. Output: per-model routing table; candidates below 95%
+tool-selection are eliminated before any deeper testing.
+
+**Phase 3.2 — Deep-tier generation eval (new, reuses the parser factory).**
+For each deep-tier candidate, point the `hermes` lane at it and run
+`generate_parser` against a fixed set of 10 synthetic source profiles (stub
+`bzrk` exactly like `tests/test_parser_factory.py` does — no live backend
+needed; validation responses canned). Score: fraction of sources reaching
+`done` (all generated queries pass `validate_generated_query`) vs
+`needs_human`, and mean attempts per source. Bar: ≥ 70% `done`, ≤ 3 attempts
+mean. This is the measurable proxy for "good enough for @deep work."
+
+**Phase 3.3 — Mixed-workload escalation replay.**
+Build a 50-interaction workload file (JSONL) drawn from the real question
+distribution: ~40 regular questions (reuse + extend `router_cases.jsonl`)
+and ~10 deep jobs. Drive it through the two-tier policy (small first,
+escalate per the rules above) with the chosen small+deep pair. Report: small-
+tier share (target ≥ 80%), end-to-end success, added latency from
+escalations. Run 3×; report spread.
+
+**Phase 3.4 — A/B the escalation policy.**
+Same workload, three policies: (a) class-based only, (b) class+failure
+(the default), (c) everything-deep (ceiling cost). This quantifies what the
+failure-based rules actually buy and what the 80/20 split costs vs an
+all-deep setup — the sovereignty pitch needs that number.
+
+### Harness changes required (small, concrete)
+
+1. `run_eval.py`: add `--tier-policy` mode that wraps two backends
+   (`--small-model/--small-url`, `--deep-model/--deep-url`) and implements
+   the escalation rules; log `handled_by` per interaction.
+2. `router_cases.jsonl`: +10 Phase-J cases, each labeled
+   `"tier": "small"` or `"tier": "deep"` (class-based expectations).
+3. New `evals/deep_gen_cases/`: the 10 synthetic source profiles for
+   Phase 3.2 (service name, sampled keys, canned validation outputs).
+4. Results land in `evals/results/` as JSON + a Markdown summary table per
+   run, same convention as `results-2026-06-22.md`.
+
+### Exit criteria for the sovereign stack recommendation
+
+Publish (in this file) a recommended pairing once a combination clears:
+small tier ≥ 95% routing AND deep tier ≥ 70% generation AND mixed-workload
+small-tier share ≥ 80% AND total local footprint fits one documented
+hardware profile (state the GPU/RAM actually used). Until then the README's
+sovereignty section points here as "measurement in progress."

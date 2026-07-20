@@ -92,6 +92,47 @@ replace any of it — it sits next to it and adds the agent-facing surface. Conc
 | **KQL-injection guards** on free-text inputs | n/a (humans) | ✅ service-name allowlist · `claude_search` reject-list |
 | **Trace/span analysis** — find slow/failed traces, reconstruct a span tree with correlated logs | — | ✅ `trace_find_slow` · `trace_find_errors` · `trace_analyze` (v1.14.0; see [Trace tools](#trace-tools-all-lanes)) |
 
+### Why this complements Berserk's native MCP (not competes with it)
+
+Berserk ships its own MCP server (`bzrk mcp`): a raw query console —
+`query`/`start_query` sessions, table/database discovery, and `get_docs` for
+KQL reference. Its bet is "the agent writes the KQL." That console is exactly
+the right substrate, and exactly the wrong everyday interface: models guess
+table names, botch aggregations, and burn tokens retrying. berserk-mcp is the
+**deterministic interpretation layer on top of the same substrate** — the
+model picks a verified intent, the server does the math, and the answer comes
+back as a conclusion (a verdict, a baseline deviation, a cost trend), not a
+row dump. Use the native MCP when a human-grade KQL author is driving; use
+this one when you want *any* model — including small local ones — to answer
+reliably. They run side-by-side in the same client without conflict.
+
+### Sovereign & defense deployments (fully local stack)
+
+Every layer of this stack can run on hardware you own, with zero cloud
+egress — which makes it suitable for sovereignty-constrained and
+defense/air-gapped environments:
+
+- **Berserk** is self-hosted; telemetry never leaves your network.
+- **This server** is pure Python stdlib — no third-party packages, no
+  telemetry, no phone-home; auditable in an afternoon (five small files).
+- **The LLM layer is local-hostable too.** The parser factory's provider
+  ladder speaks the OpenAI-compatible API, so any locally hosted open-weight
+  model (via Ollama, llama.cpp, vLLM, LM Studio) plugs in as the `hermes`
+  endpoint — no frontier API required. The fixed-query design was built
+  precisely so that **small local models route reliably**: the model picks a
+  tool and a time window; it never authors KQL.
+- **Defense-in-depth on the egress path:** even when an LLM endpoint is
+  configured, it only ever receives structural telemetry (key names, shapes,
+  redacted excerpts) — never raw values — and the endpoint URL is
+  scheme-allowlisted and operator-controlled.
+
+The target operating model is **two-tier local**: a small open-weight model
+handles the everyday calls (goal: ≥ 80% of interactions), escalating to a
+larger locally hosted open-weight model only for `@deep` work — parser
+generation, deep-dive synthesis, incident narratives. The measurement plan
+for picking both tiers is in
+[`evals/model-eval-plan.md`](evals/model-eval-plan.md) (Part 3).
+
 ---
 
 ## Architecture
