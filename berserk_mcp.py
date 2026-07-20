@@ -43,6 +43,8 @@ import json
 import subprocess
 import re
 import os
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -214,6 +216,68 @@ def now_iso():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+_LOCK_STALE_SECONDS = 30
+_LOCK_TIMEOUT_SECONDS = 10
+_LOCK_RETRY_INTERVAL = 0.05
+
+
+class _FileLock:
+    """Portable (POSIX + Windows) advisory lock via atomic lockfile
+    creation, not fcntl/msvcrt -- keeps the project stdlib-only and
+    platform-uniform (F-007). os.O_CREAT|os.O_EXCL is atomic "create if
+    absent, fail if present" on every platform this project supports, so
+    no platform-specific locking module is needed.
+
+    Not reentrant. Guards the load-modify-save critical section for a
+    JSON store so two concurrent writers can't both read stale state and
+    have the second writer's atomic replace silently discard the first
+    writer's update -- unique-per-writer temp files alone don't fix that,
+    since the race is at the logical read-then-write level, not just the
+    file-rename level.
+
+    A lock older than _LOCK_STALE_SECONDS is assumed to be abandoned by a
+    crashed holder and is broken rather than causing a permanent
+    deadlock -- these are quick JSON read-modify-write operations that
+    should never legitimately hold the lock anywhere near that long.
+    """
+
+    def __init__(self, target_path):
+        self.lock_path = str(target_path) + ".lock"
+        self._fd = None
+
+    def __enter__(self):
+        deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                self._fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(self._fd, str(os.getpid()).encode("ascii"))
+                return self
+            except FileExistsError:
+                try:
+                    age = time.time() - os.path.getmtime(self.lock_path)
+                    if age > _LOCK_STALE_SECONDS:
+                        os.remove(self.lock_path)
+                        continue
+                except OSError:
+                    continue  # lock file vanished between exists and getmtime -- retry
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"could not acquire lock {self.lock_path} within "
+                        f"{_LOCK_TIMEOUT_SECONDS}s"
+                    )
+                time.sleep(_LOCK_RETRY_INTERVAL)
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
+        try:
+            os.remove(self.lock_path)
+        except OSError:
+            pass
+        return False
+
+
 def _ensure_private_dir(path):
     """Create path's parent directory, chmod'd 0700, if it doesn't already exist.
 
@@ -248,10 +312,21 @@ def load_json_list(path):
         return []
 
 
+def _unique_tmp_path(safe):
+    """Per-writer temp filename (F-007): a shared fixed '.tmp' path let two
+    concurrent writers targeting the same store collide on the SAME temp
+    file (one truncating what the other just wrote, or a FileNotFoundError
+    when one process's os.replace removed the file the other still had
+    open). Unique names close the file-IO race; callers additionally wrap
+    the whole load-modify-save cycle in _FileLock to close the LOGICAL
+    lost-update race that unique names alone don't fix."""
+    return f"{safe}.{os.getpid()}.{threading.get_ident()}.tmp"
+
+
 def save_json_list(path, items):
     safe = _validate_store_path(path, "store")
     _ensure_private_dir(safe)
-    tmp = str(safe) + ".tmp"
+    tmp = _unique_tmp_path(safe)
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(items, f, indent=2)
     os.chmod(tmp, 0o600)
@@ -672,7 +747,7 @@ def load_learned():
 def save_learned(items):
     safe = _validate_store_path(LEARNED_PATH, "LEARNED_PATH")
     _ensure_private_dir(safe)
-    tmp = str(safe) + ".tmp"
+    tmp = _unique_tmp_path(safe)
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(items, f, indent=2)
     os.chmod(tmp, 0o600)
@@ -738,46 +813,52 @@ def persist_learned_query(entry, action_source):
     this helper, so a same-name entry here simply replaces, matching the
     pre-refactor behavior.
     """
-    all_items = load_learned()
-    nm = entry["name"]
-    existing = next((it for it in all_items if it["name"] == nm), None)
-    is_amendment = existing is not None
-    if action_source == "generated":
-        entry = {**entry, "origin": "generated"}
-        by_name = {it["name"]: it for it in all_items}
+    # F-007: the whole load-modify-save cycle is one critical section --
+    # locking only around save_learned() would still let two concurrent
+    # callers both read the same stale all_items, compute independently,
+    # and have the second one's atomic replace silently discard the
+    # first's update.
+    with _FileLock(LEARNED_PATH):
+        all_items = load_learned()
+        nm = entry["name"]
+        existing = next((it for it in all_items if it["name"] == nm), None)
+        is_amendment = existing is not None
+        if action_source == "generated":
+            entry = {**entry, "origin": "generated"}
+            by_name = {it["name"]: it for it in all_items}
 
-        def _is_free_or_generated(candidate):
-            found = by_name.get(candidate)
-            return found is None or found.get("origin") == "generated"
+            def _is_free_or_generated(candidate):
+                found = by_name.get(candidate)
+                return found is None or found.get("origin") == "generated"
 
-        if not _is_free_or_generated(nm):
-            base = nm
-            gen_name = f"{base}_gen"
-            chosen = None
-            if _is_free_or_generated(gen_name):
-                chosen = gen_name
-            else:
-                # Bound by store cap (500) rather than an arbitrary suffix cap
-                for i in range(2, 502):
-                    candidate = f"{base}_gen{i}"
-                    if _is_free_or_generated(candidate):
-                        chosen = candidate
-                        break
-            if chosen is None:
-                raise ValueError(
-                    "cannot persist generated query: no free name available "
-                    "(base and all _gen/_genN suffixes are occupied by human entries)"
-                )
-            nm = chosen
-            entry = {**entry, "name": nm}
-        is_amendment = nm in by_name
+            if not _is_free_or_generated(nm):
+                base = nm
+                gen_name = f"{base}_gen"
+                chosen = None
+                if _is_free_or_generated(gen_name):
+                    chosen = gen_name
+                else:
+                    # Bound by store cap (500) rather than an arbitrary suffix cap
+                    for i in range(2, 502):
+                        candidate = f"{base}_gen{i}"
+                        if _is_free_or_generated(candidate):
+                            chosen = candidate
+                            break
+                if chosen is None:
+                    raise ValueError(
+                        "cannot persist generated query: no free name available "
+                        "(base and all _gen/_genN suffixes are occupied by human entries)"
+                    )
+                nm = chosen
+                entry = {**entry, "name": nm}
+            is_amendment = nm in by_name
 
-    items = [it for it in all_items if it["name"] != nm]
-    room_needed = (len(items) + 1) - LEARNED_STORE_CAP
-    if room_needed > 0:
-        items = _make_room(items, room_needed, protect_human=(action_source == "generated"))
-    items.append(entry)
-    save_learned(items)
+        items = [it for it in all_items if it["name"] != nm]
+        room_needed = (len(items) + 1) - LEARNED_STORE_CAP
+        if room_needed > 0:
+            items = _make_room(items, room_needed, protect_human=(action_source == "generated"))
+        items.append(entry)
+        save_learned(items)
 
     log_entry = {
         "ts": now_iso(),
@@ -788,10 +869,11 @@ def persist_learned_query(entry, action_source):
         "role": ACTIVE_ROLE,
     }
     amendments_path = Path(LEARNED_PATH).parent / "amendments_log.json"
-    amendments = load_json_list(amendments_path)
-    amendments.append(log_entry)
-    amendments = amendments[-1000:]  # cap to prevent unbounded growth
-    save_json_list(amendments_path, amendments)
+    with _FileLock(amendments_path):
+        amendments = load_json_list(amendments_path)
+        amendments.append(log_entry)
+        amendments = amendments[-1000:]  # cap to prevent unbounded growth
+        save_json_list(amendments_path, amendments)
     return log_entry
 
 
@@ -1009,6 +1091,14 @@ def annotations_for(name):
     return _ANNOTATIONS.get(name, _READ)
 
 
+def _job_identity(job):
+    """(source, kind, ts) uniquely identifies one queue entry -- ts is set
+    once at enqueue time in request_discovery/detect_new_sources and never
+    changes, so this survives a reload of the queue between snapshot and
+    save (F-007)."""
+    return (job.get("source"), job.get("kind"), job.get("ts"))
+
+
 def _drain_pending_jobs(max_jobs):
     """Drain up to max_jobs pending discovery jobs through the parser
     factory pipeline. Mutates and persists the discovery queue. Shared by
@@ -1017,29 +1107,50 @@ def _drain_pending_jobs(max_jobs):
     Returns (outcome_lines, any_needs_human), or (None, False) if there was
     nothing pending -- callers render their own "no jobs" message so the
     MCP tool and the CLI can phrase it appropriately for their contexts.
+
+    F-007: generate_parser_for can run for minutes (LLM calls, retries),
+    so this does NOT hold the queue lock across that work -- another
+    writer (e.g. request_discovery enqueueing a new job) would otherwise
+    be blocked or time out. Instead: snapshot the jobs to process under a
+    brief lock, do the slow work unlocked, then re-acquire the lock,
+    reload the CURRENT on-disk queue, and merge in only the status/report
+    updates for the jobs we actually processed (matched by identity) --
+    any change another writer made to the queue in the meantime (a new
+    enqueue, a status change) is preserved rather than clobbered by a
+    stale in-memory copy.
     """
-    queue = load_json_list(DISCOVERY_QUEUE_PATH)
-    pending = [it for it in queue if it.get("status") == "pending"]
+    with _FileLock(DISCOVERY_QUEUE_PATH):
+        queue = load_json_list(DISCOVERY_QUEUE_PATH)
+        pending = [it for it in queue if it.get("status") == "pending"]
     if not pending:
         return None, False
+
+    updates = {}  # job identity -> (status, report)
     outcomes = []
     any_needs_human = False
     for job in pending[:max_jobs]:
         report, ok = parser_factory.generate_parser_for(job)
         if ok:
-            job["status"] = "done"
-            job["report"] = report.get("report", {})
-            names = ", ".join(job["report"].get("queries_saved", []))
+            job_report = report.get("report", {})
+            names = ", ".join(job_report.get("queries_saved", []))
+            updates[_job_identity(job)] = ("done", job_report)
             outcomes.append(f"- {job['source']}: done ({names})")
         else:
-            job["status"] = "needs_human"
-            job["report"] = {
+            job_report = {
                 "reason": report.get("reason"),
                 "last_errors": report.get("last_errors", []),
             }
+            updates[_job_identity(job)] = ("needs_human", job_report)
             outcomes.append(f"- {job['source']}: needs_human ({report.get('reason','')})")
             any_needs_human = True
-    save_json_list(DISCOVERY_QUEUE_PATH, queue)
+
+    with _FileLock(DISCOVERY_QUEUE_PATH):
+        fresh_queue = load_json_list(DISCOVERY_QUEUE_PATH)
+        for it in fresh_queue:
+            update = updates.get(_job_identity(it))
+            if update is not None:
+                it["status"], it["report"] = update
+        save_json_list(DISCOVERY_QUEUE_PATH, fresh_queue)
     return outcomes, any_needs_human
 
 
@@ -1113,17 +1224,18 @@ def handle_call(name, arguments):
         if count_result_is_zero(visible):
             return f"{target} is not currently visible in Berserk; verify it is ingesting before queueing.", True
         role_hint = normalize_roles(arguments.get("role_hint"))
-        queue = load_json_list(DISCOVERY_QUEUE_PATH)
         job = {
             "source": target, "kind": kind,
             "role_hint": role_hint[0] if role_hint else (ACTIVE_ROLE if ACTIVE_ROLE != "all" else ""),
             "requested_by": str(arguments.get("requested_by") or "").strip() or "manual",
             "status": "pending", "ts": now_iso(),
         }
-        queue = [it for it in queue if not (it.get("source") == target and it.get("kind") == kind and it.get("status") == "pending")]
-        queue.append(job)
-        queue = queue[-500:]  # cap to prevent unbounded growth
-        save_json_list(DISCOVERY_QUEUE_PATH, queue)
+        with _FileLock(DISCOVERY_QUEUE_PATH):  # F-007: whole RMW cycle, not just the save
+            queue = load_json_list(DISCOVERY_QUEUE_PATH)
+            queue = [it for it in queue if not (it.get("source") == target and it.get("kind") == kind and it.get("status") == "pending")]
+            queue.append(job)
+            queue = queue[-500:]  # cap to prevent unbounded growth
+            save_json_list(DISCOVERY_QUEUE_PATH, queue)
         return f"{target} queued for integration ({kind}). The author lane will author, verify, and save a query for it.", False
     if name == "discovery_status":
         items = load_json_list(DISCOVERY_QUEUE_PATH)

@@ -547,6 +547,105 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertNotIn("q0", [it["name"] for it in items])
         self.assertIn("one_more", [it["name"] for it in items])
 
+    # ---- F-007: concurrency-safe store writes ----
+    def test_file_lock_provides_mutual_exclusion(self):
+        """Two threads racing for the same lock must never both be
+        'inside' the critical section at once."""
+        import threading
+        lock_target = Path(self._tmp.name) / "mutex_test.json"
+        inside = []
+        max_concurrent = [0]
+        lock_obj = threading.Lock()
+
+        def worker():
+            with bm._FileLock(lock_target):
+                with lock_obj:
+                    inside.append(1)
+                    max_concurrent[0] = max(max_concurrent[0], len(inside))
+                import time as _t
+                _t.sleep(0.01)
+                with lock_obj:
+                    inside.pop()
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+        self.assertEqual(max_concurrent[0], 1)
+
+    def test_file_lock_breaks_a_stale_lock(self):
+        lock_target = Path(self._tmp.name) / "stale_test.json"
+        lock_path = str(lock_target) + ".lock"
+        Path(lock_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "w") as f:
+            f.write("99999999")  # simulate an abandoned lock from a dead pid
+        orig_stale = bm._LOCK_STALE_SECONDS
+        bm._LOCK_STALE_SECONDS = 0  # treat any existing lock as immediately stale
+        try:
+            with bm._FileLock(lock_target):
+                pass  # must not raise TimeoutError -- the stale lock is broken
+        finally:
+            bm._LOCK_STALE_SECONDS = orig_stale
+
+    def test_concurrent_persist_learned_query_loses_no_entries(self):
+        """Direct reproduction of the F-007 PoC: N threads each persisting
+        a DIFFERENT generated entry concurrently must end up with all N
+        entries present, not a subset due to a lost update."""
+        import threading
+        n = 12
+        errors = []
+
+        def worker(i):
+            try:
+                bm.persist_learned_query(
+                    {"name": f"concurrent_{i}", "description": "d",
+                     "kql": "default | take 1"},
+                    action_source="generated")
+            except Exception as e:  # pragma: no cover - surfaced via errors list
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        self.assertEqual(errors, [])
+        items = bm.load_learned()
+        names = {it["name"] for it in items}
+        for i in range(n):
+            self.assertIn(f"concurrent_{i}", names)
+
+    def test_concurrent_request_discovery_loses_no_jobs(self):
+        import threading
+        orig_queue_path = bm.DISCOVERY_QUEUE_PATH
+        orig_run_bzrk = bm.run_bzrk
+        bm.DISCOVERY_QUEUE_PATH = Path(self._tmp.name) / "queue.json"
+        bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: ("n\n5", False)
+        try:
+            n = 10
+            errors = []
+
+            def worker(i):
+                try:
+                    bm.handle_call("request_discovery", {"service": f"svc{i}"})
+                except Exception as e:  # pragma: no cover
+                    errors.append(e)
+
+            threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+            self.assertEqual(errors, [])
+            queue = bm.load_json_list(bm.DISCOVERY_QUEUE_PATH)
+            sources = {it["source"] for it in queue}
+            for i in range(n):
+                self.assertIn(f"svc{i}", sources)
+        finally:
+            bm.DISCOVERY_QUEUE_PATH = orig_queue_path
+            bm.run_bzrk = orig_run_bzrk
+
     # ---- JSON-RPC protocol ----
     def test_initialize_requires_protocol_version(self):
         """FVR-004: initialize without a protocolVersion must return -32602,

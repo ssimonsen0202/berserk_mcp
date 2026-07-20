@@ -19,6 +19,7 @@ import ipaddress
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -224,6 +225,59 @@ def _safe_path(path, purpose):
     return resolved
 
 
+# F-007: portable (POSIX + Windows) advisory lock, mirrors berserk_mcp's
+# _FileLock (duplicated here to avoid a circular import; keep the
+# semantics aligned). Guards a load-modify-save critical section so two
+# concurrent writers can't both read stale state and have the second
+# writer's atomic replace silently discard the first writer's update.
+_LOCK_STALE_SECONDS = 30
+_LOCK_TIMEOUT_SECONDS = 10
+_LOCK_RETRY_INTERVAL = 0.05
+
+
+class _FileLock:
+    def __init__(self, target_path):
+        self.lock_path = str(target_path) + ".lock"
+        self._fd = None
+
+    def __enter__(self):
+        deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                self._fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(self._fd, str(os.getpid()).encode("ascii"))
+                return self
+            except FileExistsError:
+                try:
+                    age = time.time() - os.path.getmtime(self.lock_path)
+                    if age > _LOCK_STALE_SECONDS:
+                        os.remove(self.lock_path)
+                        continue
+                except OSError:
+                    continue
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"could not acquire lock {self.lock_path} within "
+                        f"{_LOCK_TIMEOUT_SECONDS}s"
+                    )
+                time.sleep(_LOCK_RETRY_INTERVAL)
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
+        try:
+            os.remove(self.lock_path)
+        except OSError:
+            pass
+        return False
+
+
+def _unique_tmp_path(safe):
+    """Per-writer temp filename (F-007) -- see berserk_mcp._unique_tmp_path."""
+    return f"{safe}.{os.getpid()}.{threading.get_ident()}.tmp"
+
+
 def load_json_dict(path):
     try:
         safe = _safe_path(path, "store")
@@ -246,7 +300,7 @@ def load_json_dict(path):
 def save_json_dict(path, data):
     safe = _safe_path(path, "store")
     _ensure_private_dir(safe)
-    tmp = str(safe) + ".tmp"
+    tmp = _unique_tmp_path(safe)
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     os.chmod(tmp, 0o600)
@@ -681,18 +735,19 @@ def build_source_profile(source, kind, since):
         "verified_queries": [],
     }
 
-    knowledge = load_json_dict(_schema_knowledge_path())
-    sources = knowledge.setdefault("sources", {})
-    key = f"{kind}:{source}"
-    if key in sources:
-        profile["first_profiled"] = sources[key].get("first_profiled", profile["first_profiled"])
-        profile["verified_queries"] = sources[key].get("verified_queries", [])
-    sources[key] = profile
-    if len(sources) > MAX_SOURCES_CACHED:
-        oldest = sorted(sources.items(), key=lambda kv: kv[1].get("first_profiled", ""))
-        for old_key, _ in oldest[: len(sources) - MAX_SOURCES_CACHED]:
-            del sources[old_key]
-    save_json_dict(_schema_knowledge_path(), knowledge)
+    with _FileLock(_schema_knowledge_path()):  # F-007: whole RMW cycle, not just the save
+        knowledge = load_json_dict(_schema_knowledge_path())
+        sources = knowledge.setdefault("sources", {})
+        key = f"{kind}:{source}"
+        if key in sources:
+            profile["first_profiled"] = sources[key].get("first_profiled", profile["first_profiled"])
+            profile["verified_queries"] = sources[key].get("verified_queries", [])
+        sources[key] = profile
+        if len(sources) > MAX_SOURCES_CACHED:
+            oldest = sorted(sources.items(), key=lambda kv: kv[1].get("first_profiled", ""))
+            for old_key, _ in oldest[: len(sources) - MAX_SOURCES_CACHED]:
+                del sources[old_key]
+        save_json_dict(_schema_knowledge_path(), knowledge)
 
     return profile, None
 
@@ -771,79 +826,88 @@ def detect_new_sources(since="24h ago", auto_queue=False, check_drift=False,
     if svc_err and met_err:
         return "Source discovery failed: both inventory queries returned errors. Baseline unchanged."
 
-    baseline = load_json_dict(_known_sources_path())
-    is_first_run = not baseline
+    # F-007: lock spans load through save for the known-sources baseline,
+    # including the drift-check queries and auto-queue enqueue below (they
+    # read/write `baseline` in the same critical section). This function
+    # typically runs on a cron cadence rather than concurrently with
+    # itself, so holding the lock across the (bounded) drift-check queries
+    # is an acceptable tradeoff against the complexity of unlocking around
+    # them the way the slower, MCP-tool-driven _drain_pending_jobs does.
+    with _FileLock(_known_sources_path()):
+        baseline = load_json_dict(_known_sources_path())
+        is_first_run = not baseline
 
-    if is_first_run and (svc_err or met_err):
-        return (
-            "Source discovery failed: cannot initialize baseline with partial data "
-            f"({'services query failed' if svc_err else 'metrics query failed'}). "
-            "Retry when the backend is healthy."
+        if is_first_run and (svc_err or met_err):
+            return (
+                "Source discovery failed: cannot initialize baseline with partial data "
+                f"({'services query failed' if svc_err else 'metrics query failed'}). "
+                "Retry when the backend is healthy."
+            )
+
+        live_services = (
+            {s for s in _parse_source_rows(svc_out) if _looks_like_service(s)}
+            if not svc_err else None
         )
+        live_metrics = set(_parse_source_rows(met_out)) if not met_err else None
 
-    live_services = (
-        {s for s in _parse_source_rows(svc_out) if _looks_like_service(s)}
-        if not svc_err else None
-    )
-    live_metrics = set(_parse_source_rows(met_out)) if not met_err else None
+        known_services = set(baseline.get("services", {}).keys())
+        known_metrics = set(baseline.get("metrics", {}).keys())
 
-    known_services = set(baseline.get("services", {}).keys())
-    known_metrics = set(baseline.get("metrics", {}).keys())
+        new_services = sorted(live_services - known_services) if live_services is not None else []
+        new_metrics = sorted(live_metrics - known_metrics) if live_metrics is not None else []
+        drifted_services = []
 
-    new_services = sorted(live_services - known_services) if live_services is not None else []
-    new_metrics = sorted(live_metrics - known_metrics) if live_metrics is not None else []
-    drifted_services = []
+        if check_drift and not is_first_run and live_services is not None:
+            for svc in sorted(live_services & known_services):
+                keys_out, keys_err = _bzrk_search(_q_discover_keys(svc), since)
+                if keys_err:
+                    continue
+                keys = []
+                for line in keys_out.strip().splitlines():
+                    tokens = line.strip().split()
+                    if tokens and tokens[0] != "key":
+                        keys.append(tokens[0])
+                new_hash = _hash_keys(keys)
+                old_hash = baseline.get("services", {}).get(svc, {}).get("keys_hash")
+                if old_hash and old_hash != new_hash:
+                    drifted_services.append(svc)
+                if svc in baseline.get("services", {}):
+                    baseline["services"][svc]["keys_hash"] = new_hash
 
-    if check_drift and not is_first_run and live_services is not None:
-        for svc in sorted(live_services & known_services):
-            keys_out, keys_err = _bzrk_search(_q_discover_keys(svc), since)
-            if keys_err:
-                continue
-            keys = []
-            for line in keys_out.strip().splitlines():
-                tokens = line.strip().split()
-                if tokens and tokens[0] != "key":
-                    keys.append(tokens[0])
-            new_hash = _hash_keys(keys)
-            old_hash = baseline.get("services", {}).get(svc, {}).get("keys_hash")
-            if old_hash and old_hash != new_hash:
-                drifted_services.append(svc)
-            if svc in baseline.get("services", {}):
-                baseline["services"][svc]["keys_hash"] = new_hash
+        baseline.setdefault("services", {})
+        baseline.setdefault("metrics", {})
 
-    baseline.setdefault("services", {})
-    baseline.setdefault("metrics", {})
+        if live_metrics is not None:
+            for met in live_metrics:
+                if met not in baseline["metrics"]:
+                    baseline["metrics"][met] = {"first_seen": _now_iso()}
 
-    if live_metrics is not None:
-        for met in live_metrics:
-            if met not in baseline["metrics"]:
-                baseline["metrics"][met] = {"first_seen": _now_iso()}
+        queued = []
+        if is_first_run or not auto_queue:
+            if live_services is not None:
+                for svc in live_services:
+                    if svc not in baseline["services"]:
+                        baseline["services"][svc] = {"first_seen": _now_iso()}
+        else:
+            to_queue = (new_services + drifted_services)[:MAX_AUTOQUEUE_PER_RUN]
+            if to_queue:
+                with _FileLock(discovery_queue_path):
+                    queue = load_json_list(discovery_queue_path)
+                    for svc in to_queue:
+                        rb = "drift-detect" if svc in drifted_services else "auto-detect"
+                        _enqueue_job(queue, svc, "service", rb, active_role)
+                        queued.append(svc)
+                        if svc not in baseline["services"]:
+                            baseline["services"][svc] = {"first_seen": _now_iso()}
+                    queue = queue[-500:]
+                    save_json_list(discovery_queue_path, queue)
 
-    queued = []
-    if is_first_run or not auto_queue:
-        if live_services is not None:
-            for svc in live_services:
-                if svc not in baseline["services"]:
-                    baseline["services"][svc] = {"first_seen": _now_iso()}
-    else:
-        to_queue = (new_services + drifted_services)[:MAX_AUTOQUEUE_PER_RUN]
-        if to_queue:
-            queue = load_json_list(discovery_queue_path)
-            for svc in to_queue:
-                rb = "drift-detect" if svc in drifted_services else "auto-detect"
-                _enqueue_job(queue, svc, "service", rb, active_role)
-                queued.append(svc)
-                if svc not in baseline["services"]:
-                    baseline["services"][svc] = {"first_seen": _now_iso()}
-            queue = queue[-500:]
-            save_json_list(discovery_queue_path, queue)
+        if len(baseline["services"]) > MAX_BASELINE_ENTRIES:
+            baseline["services"] = dict(list(baseline["services"].items())[-MAX_BASELINE_ENTRIES:])
+        if len(baseline["metrics"]) > MAX_BASELINE_ENTRIES:
+            baseline["metrics"] = dict(list(baseline["metrics"].items())[-MAX_BASELINE_ENTRIES:])
 
-    if len(baseline["services"]) > MAX_BASELINE_ENTRIES:
-        baseline["services"] = dict(list(baseline["services"].items())[-MAX_BASELINE_ENTRIES:])
-    if len(baseline["metrics"]) > MAX_BASELINE_ENTRIES:
-        baseline["metrics"] = dict(list(baseline["metrics"].items())[-MAX_BASELINE_ENTRIES:])
-
-    save_json_dict(_known_sources_path(), baseline)
+        save_json_dict(_known_sources_path(), baseline)
 
     if is_first_run:
         return (
@@ -1178,11 +1242,12 @@ def generate_parser_for(job):
         log_entry = _persist_learned_query(entry, action_source="generated")
         saved_names.append(log_entry.get("name", q["name"]))
 
-    knowledge = load_json_dict(_schema_knowledge_path())
-    key = f"{kind}:{source}"
-    if key in knowledge.get("sources", {}):
-        knowledge["sources"][key]["verified_queries"] = saved_names
-        save_json_dict(_schema_knowledge_path(), knowledge)
+    with _FileLock(_schema_knowledge_path()):  # F-007: whole RMW cycle, not just the save
+        knowledge = load_json_dict(_schema_knowledge_path())
+        key = f"{kind}:{source}"
+        if key in knowledge.get("sources", {}):
+            knowledge["sources"][key]["verified_queries"] = saved_names
+            save_json_dict(_schema_knowledge_path(), knowledge)
 
     report = {
         "provider": used_provider,
