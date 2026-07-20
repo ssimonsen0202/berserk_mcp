@@ -280,7 +280,9 @@ class LlmClientTest(ParserFactoryTestBase):
             self.assertEqual(received_by_target, [])  # redirect was never followed
         finally:
             target_server.shutdown()
+            target_server.server_close()
             redirect_server.shutdown()
+            redirect_server.server_close()
 
     # ---- SNYK-003: dict-store helpers refuse tainted paths at the sink ----
     def test_load_json_dict_refuses_relative_path(self):
@@ -339,6 +341,7 @@ class LlmClientTest(ParserFactoryTestBase):
             self.assertIn("exceeds", err)
         finally:
             server.shutdown()
+            server.server_close()
 
     def test_http_post_json_accepts_response_at_the_cap(self):
         import threading
@@ -364,6 +367,7 @@ class LlmClientTest(ParserFactoryTestBase):
             self.assertEqual(out["choices"][0]["message"]["content"], "ok")
         finally:
             server.shutdown()
+            server.server_close()
 
     # ---- F-005: hermes model discovery is cached, not re-fetched per attempt ----
     def test_hermes_model_discovery_is_cached_across_calls(self):

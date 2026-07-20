@@ -61,10 +61,11 @@ the [`bzrk`](https://docs.bzrk.dev) CLI and log in to a profile — see the
 
 ## Tests
 
-Every PR runs the suite on Linux + Windows × Python 3.8 / 3.11 / 3.12. Locally:
+Every PR runs the full suite on Linux + Windows × Python 3.8 / 3.11 / 3.12. Locally:
 
 ```bash
-python tests/test_berserk_mcp.py     # must stay green
+python tests/test_berserk_mcp.py     # fast focused run, must stay green
+python -m unittest discover -s tests # full suite (all test_*.py files) -- run this before opening a PR
 ```
 
 New tools should add a locked-string KQL test and a callable test (see the existing
