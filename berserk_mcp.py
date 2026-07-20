@@ -72,15 +72,60 @@ REDACT_PII_TYPES = frozenset(
 )
 
 
+class StorePathError(ValueError):
+    """Raised when a caller-supplied store path fails safety validation."""
+
+
+def _validate_store_path(candidate, purpose):
+    """Defense-in-depth guard for operator-supplied filesystem paths.
+
+    Env vars (BERSERK_MCP_LEARNED_PATH, XDG_CONFIG_HOME, APPDATA) are set
+    by the operator running this process, so a rogue value is self-inflicted
+    rather than remote-attacker-controlled. This validator still rejects
+    the two mistakes most likely to cause real damage:
+
+    - a non-absolute path (rules out unpredictable CWD-relative writes)
+    - traversal patterns (``..`` in any segment before or after resolve)
+
+    Returns the resolved absolute ``Path`` on success; raises
+    ``StorePathError`` otherwise.
+    """
+    if not candidate:
+        raise StorePathError(f"{purpose} path is empty")
+    if not isinstance(candidate, (str, Path)):
+        raise StorePathError(f"{purpose} path must be a string or Path")
+    text = str(candidate)
+    if any(ord(c) < 32 for c in text):
+        raise StorePathError(f"{purpose} path contains control characters")
+    p = Path(text)
+    if not p.is_absolute():
+        raise StorePathError(f"{purpose} path must be absolute (got {text!r})")
+    if ".." in p.parts:
+        raise StorePathError(f"{purpose} path must not contain '..' segments")
+    resolved = p.resolve(strict=False)
+    if ".." in resolved.parts:
+        raise StorePathError(f"{purpose} path resolves through '..'")
+    return resolved
+
+
 def _default_learned_path() -> Path:
-    """Where to persist learned queries, following platform conventions."""
+    """Where to persist learned queries, following platform conventions.
+
+    Any operator-supplied env-var override is validated through
+    ``_validate_store_path``: absolute, no ``..`` segments, no control
+    characters. Standard OS env vars (APPDATA, XDG_CONFIG_HOME) go through
+    the same guard, so a poisoned XDG_CONFIG_HOME cannot direct writes
+    outside a predictable absolute location either.
+    """
     env = os.environ.get("BERSERK_MCP_LEARNED_PATH")
     if env:
-        return Path(env)
+        return _validate_store_path(env, "BERSERK_MCP_LEARNED_PATH")
     if os.name == "nt":
-        base = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))
+        raw = os.environ.get("APPDATA")
+        base = _validate_store_path(raw, "APPDATA") if raw else (Path.home() / "AppData" / "Roaming")
     else:
-        base = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+        raw = os.environ.get("XDG_CONFIG_HOME")
+        base = _validate_store_path(raw, "XDG_CONFIG_HOME") if raw else (Path.home() / ".config")
     return base / "berserk-mcp" / "learned.json"
 
 

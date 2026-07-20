@@ -291,6 +291,53 @@ class BerserkMcpTest(unittest.TestCase):
         bm.handle_call("save_query", {"name": "one_more", "description": "x", "kql": "default | count"})
         self.assertEqual(len(bm.load_json_list(amendments_path)), 1000)
 
+    # ---- SNYK-002: store-path validation (CWE-23) ----
+    def test_store_path_rejects_relative_path(self):
+        with self.assertRaises(bm.StorePathError):
+            bm._validate_store_path("relative/path/learned.json", "TEST")
+
+    def test_store_path_rejects_empty(self):
+        with self.assertRaises(bm.StorePathError):
+            bm._validate_store_path("", "TEST")
+        with self.assertRaises(bm.StorePathError):
+            bm._validate_store_path(None, "TEST")
+
+    def test_store_path_rejects_dotdot_segment(self):
+        with self.assertRaises(bm.StorePathError):
+            bm._validate_store_path("/tmp/foo/../../../etc/shadow", "TEST")
+
+    def test_store_path_rejects_control_chars(self):
+        with self.assertRaises(bm.StorePathError):
+            bm._validate_store_path("/tmp/foo\nbar", "TEST")
+
+    def test_store_path_accepts_absolute_clean_path(self):
+        resolved = bm._validate_store_path("/tmp/berserk/learned.json", "TEST")
+        self.assertTrue(resolved.is_absolute())
+
+    def test_default_learned_path_rejects_traversal_env_var(self):
+        orig = os.environ.get("BERSERK_MCP_LEARNED_PATH")
+        try:
+            os.environ["BERSERK_MCP_LEARNED_PATH"] = "/tmp/../etc/passwd"
+            with self.assertRaises(bm.StorePathError):
+                bm._default_learned_path()
+        finally:
+            if orig is None:
+                os.environ.pop("BERSERK_MCP_LEARNED_PATH", None)
+            else:
+                os.environ["BERSERK_MCP_LEARNED_PATH"] = orig
+
+    def test_default_learned_path_rejects_relative_env_var(self):
+        orig = os.environ.get("BERSERK_MCP_LEARNED_PATH")
+        try:
+            os.environ["BERSERK_MCP_LEARNED_PATH"] = "learned.json"
+            with self.assertRaises(bm.StorePathError):
+                bm._default_learned_path()
+        finally:
+            if orig is None:
+                os.environ.pop("BERSERK_MCP_LEARNED_PATH", None)
+            else:
+                os.environ["BERSERK_MCP_LEARNED_PATH"] = orig
+
     # ---- FVR-005: primer routing/signal fields must reference real tools ----
     def test_primer_referenced_tools_all_exist(self):
         """FVR-005: every tool name that appears in a primer routing table
