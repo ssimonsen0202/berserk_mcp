@@ -194,13 +194,17 @@ class LlmClientTest(ParserFactoryTestBase):
         self.assertEqual(pf.load_json_dict("relative/x.json"), {})
 
     def test_load_json_dict_refuses_traversal_path(self):
-        self.assertEqual(pf.load_json_dict("/tmp/../etc/shadow"), {})
+        import tempfile
+        bad = str(Path(tempfile.gettempdir()) / ".." / "etc" / "shadow")
+        self.assertEqual(pf.load_json_dict(bad), {})
 
     def test_save_json_dict_refuses_tainted_path(self):
+        import tempfile
+        traversal = str(Path(tempfile.gettempdir()) / ".." / "etc" / "x.json")
         with self.assertRaises(pf.StorePathError):
             pf.save_json_dict("relative/x.json", {})
         with self.assertRaises(pf.StorePathError):
-            pf.save_json_dict("/tmp/../etc/x.json", {})
+            pf.save_json_dict(traversal, {})
 
     def test_http_helpers_refuse_non_http_scheme_at_call_time(self):
         """Even if a bad URL somehow reached _http_post_json/_http_get_json

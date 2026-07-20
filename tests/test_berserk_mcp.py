@@ -303,21 +303,31 @@ class BerserkMcpTest(unittest.TestCase):
             bm._validate_store_path(None, "TEST")
 
     def test_store_path_rejects_dotdot_segment(self):
+        # Build a platform-correct absolute path with a '..' segment so the
+        # "no traversal" rule is what's under test on both POSIX and Windows.
+        traversal = str(Path(tempfile.gettempdir()) / "foo" / ".." / ".." / "etc" / "shadow")
         with self.assertRaises(bm.StorePathError):
-            bm._validate_store_path("/tmp/foo/../../../etc/shadow", "TEST")
+            bm._validate_store_path(traversal, "TEST")
 
     def test_store_path_rejects_control_chars(self):
+        bad = str(Path(tempfile.gettempdir()) / "foo") + "\nbar"
         with self.assertRaises(bm.StorePathError):
-            bm._validate_store_path("/tmp/foo\nbar", "TEST")
+            bm._validate_store_path(bad, "TEST")
 
     def test_store_path_accepts_absolute_clean_path(self):
-        resolved = bm._validate_store_path("/tmp/berserk/learned.json", "TEST")
+        # tempfile.gettempdir() returns a platform-correct absolute path
+        # (POSIX: /tmp; Windows: C:\Users\...\Temp), so this test verifies
+        # the "happy path" on both Linux and Windows CI runners.
+        p = str(Path(tempfile.gettempdir()) / "berserk-test" / "learned.json")
+        resolved = bm._validate_store_path(p, "TEST")
         self.assertTrue(resolved.is_absolute())
 
     def test_default_learned_path_rejects_traversal_env_var(self):
         orig = os.environ.get("BERSERK_MCP_LEARNED_PATH")
         try:
-            os.environ["BERSERK_MCP_LEARNED_PATH"] = "/tmp/../etc/passwd"
+            os.environ["BERSERK_MCP_LEARNED_PATH"] = str(
+                Path(tempfile.gettempdir()) / ".." / "etc" / "passwd"
+            )
             with self.assertRaises(bm.StorePathError):
                 bm._default_learned_path()
         finally:
@@ -344,19 +354,22 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertEqual(bm.load_json_list("relative/x.json"), [])
 
     def test_load_json_list_refuses_traversal_path(self):
-        self.assertEqual(bm.load_json_list("/tmp/../etc/shadow"), [])
+        bad = str(Path(tempfile.gettempdir()) / ".." / "etc" / "shadow")
+        self.assertEqual(bm.load_json_list(bad), [])
 
     def test_save_json_list_refuses_tainted_path(self):
+        traversal = str(Path(tempfile.gettempdir()) / ".." / "etc" / "x.json")
         with self.assertRaises(bm.StorePathError):
             bm.save_json_list("relative/x.json", [])
         with self.assertRaises(bm.StorePathError):
-            bm.save_json_list("/tmp/../etc/x.json", [])
+            bm.save_json_list(traversal, [])
 
     def test_ensure_private_dir_refuses_tainted_path(self):
+        traversal = str(Path(tempfile.gettempdir()) / ".." / "root" / "x.json")
         with self.assertRaises(bm.StorePathError):
             bm._ensure_private_dir("relative/x.json")
         with self.assertRaises(bm.StorePathError):
-            bm._ensure_private_dir("/tmp/../root/x.json")
+            bm._ensure_private_dir(traversal)
 
     # ---- FVR-005: primer routing/signal fields must reference real tools ----
     def test_primer_referenced_tools_all_exist(self):
@@ -541,10 +554,15 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertIn("error", resp)
         self.assertEqual(resp["error"]["code"], -32603)
 
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "subprocess-driven CI test relies on POSIX stdin/EOF semantics; "
+        "the bug the test protects against (duplicate main() call) is OS-"
+        "agnostic and is exercised by the Ubuntu matrix cell"
+    )
     def test_module_execution_runs_main_exactly_once(self):
         """FVR-006: `python -m berserk_mcp` with closed stdin must run
         exactly one MCP-serve lifecycle, not two."""
-        import subprocess
         project_root = str(Path(bm.__file__).resolve().parent)
         result = subprocess.run(
             [sys.executable, "-m", "berserk_mcp"],
