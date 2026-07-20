@@ -11,9 +11,9 @@ afternoon on something that won't land.
 ## Setup
 
 ```bash
-git clone https://github.com/ssi0202/berserk-mcp
-cd berserk-mcp
-python tests/test_berserk_mcp.py     # must pass before you touch anything
+git clone https://github.com/ssimonsen0202/berserk_mcp
+cd berserk_mcp
+python -m unittest discover -s tests     # must pass before you touch anything
 ```
 
 You don't need a live Berserk to develop. The tests stub the `bzrk` CLI and verify

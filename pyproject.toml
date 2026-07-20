@@ -22,8 +22,8 @@ dynamic = ["version"]
 dependencies = []  # stdlib only — by design
 
 [project.urls]
-Homepage = "https://github.com/ssi0202/berserk-mcp"
-Issues = "https://github.com/ssi0202/berserk-mcp/issues"
+Homepage = "https://github.com/ssimonsen0202/berserk_mcp"
+Issues = "https://github.com/ssimonsen0202/berserk_mcp/issues"
 
 [project.scripts]
 berserk-mcp = "berserk_mcp:main"

@@ -628,7 +628,8 @@ skipped):
 |---|---|---|
 | `BERSERK_LLM_LADDER` | `hermes,openai,anthropic` | Provider order for generation. |
 | `HERMES_API_KEY` | — | Bearer token for the Hermes/Open WebUI endpoint. |
-| `BERSERK_LLM_HERMES_URL` | `http://localhost:3000/api/chat/completions` | Hermes chat-completions endpoint. Resolution order: this env var → local `llm_config.json` → default. Persist a private URL without an env var (and without hardcoding it in the repo) via `berserk-mcp --set-hermes-url <URL>`, which writes `~/.config/berserk-mcp/llm_config.json` (0600). |
+| `BERSERK_LLM_HERMES_URL` | `http://localhost:3000/api/chat/completions` | Hermes chat-completions endpoint. Resolution order: this env var → local `llm_config.json` → default. Persist a private URL without an env var (and without hardcoding it in the repo) via `berserk-mcp --set-hermes-url <URL>`, which writes `~/.config/berserk-mcp/llm_config.json` (0600). Plaintext `http://` is only accepted for a loopback host (`localhost`/`127.0.0.1`/`::1`) by default — see `BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE` below if Hermes runs on a private/VPN network. |
+| `BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE` | unset | Set to `1` to allow `BERSERK_LLM_HERMES_URL`/`--set-hermes-url` to point at a **non-loopback** host over plain `http://` (e.g. a Tailscale/private-LAN Hermes gateway). Without this, a non-loopback `http://` URL is rejected at both save-time and call-time — the bearer token would otherwise cross the network unencrypted. Prefer `https://` when the endpoint supports it; this flag is for trusted private networks that don't. |
 | `BERSERK_LLM_HERMES_MODEL` | auto-discovered via `/api/models` | Hermes model id. |
 | `OPENAI_API_KEY` | — | OpenAI API key. |
 | `BERSERK_LLM_OPENAI_MODEL` | `gpt-4o` | OpenAI model. |
@@ -739,21 +740,18 @@ Write a 10-line digest, flag anything anomalous, and stop.
 
 ## Install
 
-```bash
-pip install berserk-mcp
-# or, isolated:
-pipx install berserk-mcp
-# or run without installing:
-uvx berserk-mcp
-```
-
-From source:
+Not yet published to PyPI. Install from source:
 
 ```bash
-git clone https://github.com/ssi0202/berserk-mcp
-cd berserk-mcp
+git clone https://github.com/ssimonsen0202/berserk_mcp
+cd berserk_mcp
 pip install .
 ```
+
+(`pip install berserk-mcp` / `pipx install berserk-mcp` / `uvx berserk-mcp` will
+work once this is published under that name — don't run them yet: that name is
+currently unclaimed on PyPI, so those commands would silently succeed against
+whatever unrelated or malicious package claims it first.)
 
 The server uses only the Python standard library — no third-party runtime
 dependencies. Installation must include the accompanying local modules
@@ -934,12 +932,17 @@ that way if you add tools.
 - **No secrets in this code.** The Berserk bearer token lives only in `bzrk`'s own config. This server never reads, stores, or logs it.
 - **Fail-closed secret scanning.** `scan_secrets` refuses to report "clean" on any parse failure or multi-table response; the response is either fully decoded and every audit record validated, or a controlled `Secret scan failed` error is returned with no content echo.
 - **Structural telemetry only to LLM providers.** The generation pipeline projects `bag_keys(...)`, `has_body`, `has_metric`, and length-capped, fully-redacted excerpts only — raw telemetry values are never sent to any provider.
+- **Resource-key tokens are allowlisted, not just capped.** `bag_keys(resource)` output feeds the generation prompt as attribute-name tokens; each token must match `[A-Za-z0-9._-]` (the shape of a real OTel dotted key) or it's dropped outright — an instruction-shaped or control-character key from a misbehaving telemetry producer never reaches the prompt or the persisted schema cache. The list is capped at 50 keys, 80 chars each.
+- **Backend diagnostics are redacted before they cross the LLM/report boundary.** A non-auth `bzrk` execution failure (profiling, query validation, or generation retry) has its raw stdout/stderr redacted and length-capped before it's embedded in a refinement prompt or a persisted worker report — the same fix point (`_safe_diag_text`) is used at every crossing so none can be missed.
+- **Bounded generation resources.** A single `time.monotonic()` deadline (`BERSERK_LLM_JOB_DEADLINE_SECONDS`, default 300s) spans an entire `generate_parser_for` job — profiling, model discovery, every provider call, query verification, and retries — not just each individual HTTP call's own timeout. LLM provider responses are read with a hard byte cap (`MAX_PROVIDER_RESPONSE_BYTES`, 2 MB) rather than an unbounded `resp.read()`. The refinement-attempt budget (`MAX_TOTAL_ATTEMPTS`, default 8) is now one total across the whole provider ladder, not `MAX_REFINEMENT_ATTEMPTS` attempts *per provider* (a 3-provider ladder previously allowed up to 15 LLM calls for one job). Hermes model discovery is cached per endpoint for 5 minutes instead of re-querying `/api/models` on every attempt. The generated-job report is genuinely bounded to `REPORT_CAP` characters — oversized list fields are trimmed first, and if a single field is still oversized the report falls back to a capped-scalar skeleton rather than silently exceeding the bound.
+- **Bounded `bzrk` diagnostic output.** A non-zero-exit `bzrk` diagnostic (not a successful query result) is capped at `MAX_BZRK_DIAGNOSTIC_CHARS` (100,000 chars) before being returned — legitimate large query results (`returncode == 0`) are never truncated.
 - **Bounded redaction.** `redact()` uses explicit `MAX_REDACT_CHARS = 1_000_000` and `MAX_REDACT_CANDIDATES = 50_000` limits, and a sort-merge-join pipeline that fail-closes to `[REDACTED:redaction_limit]` on bound violations — no partial original text is ever returned.
 - **Constant auth-failure messaging.** `bzrk` auth failures always return the constant string `"bzrk authentication failed; run \`bzrk login\` and retry"` — never raw stderr, tokens, or tenant identifiers.
 - **JSON-RPC 2.0 strict envelope validation.** `initialize` requires a nonempty string `protocolVersion` and object-typed `capabilities`/`clientInfo`; `ping` and `tools/list` reject nonempty params; notifications sent as requests are rejected with `-32600`; unexpected handler exceptions surface as `-32603` rather than silently converting to `isError=true` results.
 - **Generated-query policy.** LLM-generated queries must start with `{table} | ...`, must terminate with `| take N` where `1 ≤ N ≤ 50`, and must fit within 2,000 characters. The policy check is applied to a stripped copy of the KQL with string literals and `//` comments removed, so operator text inside quoted strings or comments cannot satisfy the check.
 - **Provider error scrubbing.** HTTP errors from LLM providers return only `"HTTP <code>"` — response bodies and exception messages are never propagated to the caller.
-- **LLM endpoint scheme allowlist.** The operator-configured LLM endpoint URL (via `--set-hermes-url` or `BERSERK_LLM_HERMES_URL`) is validated at both write time and call time: only `http://` and `https://` schemes are accepted; control characters and newline-injection variants are rejected before any `urllib.request.urlopen` call. Defense-in-depth against `file://`, `gopher://`, `ftp://`, and request-smuggling attempts even though the operator is inside the trust boundary.
+- **LLM endpoint scheme allowlist + loopback-gated plaintext.** The operator-configured LLM endpoint URL (via `--set-hermes-url` or `BERSERK_LLM_HERMES_URL`) is validated at both write time and call time: only `http://` and `https://` schemes are accepted; control characters and newline-injection variants are rejected before any request is made. Defense-in-depth against `file://`, `gopher://`, `ftp://`, and request-smuggling attempts even though the operator is inside the trust boundary. Plaintext `http://` is additionally rejected for any non-loopback host unless `BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE=1` is explicitly set — a bearer token should not cross the network unencrypted by default.
+- **No automatic redirect following on LLM calls.** The HTTP client used for `_http_post_json`/`_http_get_json` never follows a 3xx response — a compromised or misbehaving LLM endpoint cannot redirect the request (with its `Authorization` header) to a different origin, a downgraded scheme, or a link-local metadata address. A redirect surfaces as a plain `HTTP <code>` error instead.
 - **Store-path validation.** Filesystem paths read from operator env vars (`BERSERK_MCP_LEARNED_PATH`, `XDG_CONFIG_HOME`, `APPDATA`) are validated before use: must be absolute, must not contain `..` segments, must not resolve through `..`, must not contain control characters. The same validator runs at every I/O sink (`load_json_list`, `save_json_list`, `load_learned`, `save_learned`, `_ensure_private_dir`, `load_json_dict`, `save_json_dict`) so any future caller — not just the operator env-var path — is guarded too. Defense-in-depth so a typo or a poisoned env var cannot redirect any read or write outside the intended location.
 
 **Note on output.** Tool results are whatever your telemetry contains. If logs in Berserk hold sensitive values, `logs_for_service`/`search` can surface them — redact at ingest, not here.

@@ -828,6 +828,25 @@ class RunBzrkAuthTest(unittest.TestCase):
         self.assertTrue(is_err)
         self.assertIn("syntax error", text)
 
+    # ---- F-005: bounded diagnostic text on non-zero exit ----
+    def test_oversized_nonzero_exit_diagnostic_is_truncated(self):
+        huge = "x" * (bm.MAX_BZRK_DIAGNOSTIC_CHARS + 5000)
+        self._mock_run(1, "", huge)
+        text, is_err = bm.run_bzrk(["search", "default | take 1"])
+        self.assertTrue(is_err)
+        self.assertLessEqual(len(text), bm.MAX_BZRK_DIAGNOSTIC_CHARS + len("\n...[truncated]"))
+        self.assertIn("truncated", text)
+
+    def test_large_successful_result_is_never_truncated(self):
+        """F-005: the diagnostic cap must never affect legitimate large
+        query RESULTS on a successful (returncode 0) run."""
+        huge_but_legitimate = "row\n" + "\n".join(f"val{i} {i}" for i in range(50000))
+        self.assertGreater(len(huge_but_legitimate), bm.MAX_BZRK_DIAGNOSTIC_CHARS)
+        self._mock_run(0, huge_but_legitimate, "")
+        text, is_err = bm.run_bzrk(["search", "default | take 50000"])
+        self.assertFalse(is_err)
+        self.assertEqual(text, huge_but_legitimate)
+
 
 class RoleFilterTest(unittest.TestCase):
     """tool_visible / item_visible / tools-list filtering by ACTIVE_ROLE."""

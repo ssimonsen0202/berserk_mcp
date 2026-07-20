@@ -73,6 +73,7 @@ class ParserFactoryTestBase(unittest.TestCase):
         self._orig_env = {k: os.environ.get(k) for k in self._env_keys}
         for k in self._env_keys:
             os.environ.pop(k, None)
+        pf._reset_hermes_model_cache()
 
     def tearDown(self):
         bm.run_bzrk = self._orig_run
@@ -86,6 +87,7 @@ class ParserFactoryTestBase(unittest.TestCase):
             else:
                 os.environ[k] = v
         self._tmp.cleanup()
+        pf._reset_hermes_model_cache()
 
     # convenience for the profiling responses every generation test needs
     def _stub_profile_responses(self):
@@ -145,16 +147,16 @@ class LlmClientTest(ParserFactoryTestBase):
         self.assertEqual(pf._hermes_url(), "http://localhost:3000/api/chat/completions")
 
     def test_hermes_url_precedence_env_over_config_over_default(self):
-        path = pf.save_hermes_url("http://config-host:3000/api/chat/completions")
+        path = pf.save_hermes_url("https://config-host:3000/api/chat/completions")
         # config used when no env var is set
-        self.assertEqual(pf._hermes_url(), "http://config-host:3000/api/chat/completions")
+        self.assertEqual(pf._hermes_url(), "https://config-host:3000/api/chat/completions")
         # env var wins over the config file
-        os.environ["BERSERK_LLM_HERMES_URL"] = "http://env-host:3000/api/chat/completions"
-        self.assertEqual(pf._hermes_url(), "http://env-host:3000/api/chat/completions")
+        os.environ["BERSERK_LLM_HERMES_URL"] = "https://env-host:3000/api/chat/completions"
+        self.assertEqual(pf._hermes_url(), "https://env-host:3000/api/chat/completions")
 
     @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
     def test_saved_hermes_config_is_private(self):
-        path = pf.save_hermes_url("http://config-host:3000/api/chat/completions")
+        path = pf.save_hermes_url("https://config-host:3000/api/chat/completions")
         self.assertEqual(oct(path.stat().st_mode & 0o777), oct(0o600))
         self.assertEqual(oct(path.parent.stat().st_mode & 0o777), oct(0o700))
 
@@ -186,8 +188,99 @@ class LlmClientTest(ParserFactoryTestBase):
             pf.save_hermes_url("http:///path-only")
 
     def test_save_hermes_url_accepts_http_and_https(self):
-        pf.save_hermes_url("http://host-a:3000/v1")
+        pf.save_hermes_url("http://localhost:3000/v1")
+        pf.save_hermes_url("http://127.0.0.1:3000/v1")
         pf.save_hermes_url("https://host-b/v1")
+
+    # ---- F-013: plaintext http to non-loopback hosts is fail-closed by default ----
+    def test_save_hermes_url_rejects_plaintext_remote_by_default(self):
+        with self.assertRaises(pf.LlmUrlError) as ctx:
+            pf.save_hermes_url("http://100.64.1.2:3000/api/chat/completions")
+        self.assertIn("plaintext", str(ctx.exception))
+
+    def test_save_hermes_url_rejects_plaintext_hostname_by_default(self):
+        with self.assertRaises(pf.LlmUrlError):
+            pf.save_hermes_url("http://hermes-box.tailnet.ts.net:3000/api/chat/completions")
+
+    def test_save_hermes_url_allows_plaintext_remote_with_explicit_opt_in(self):
+        orig = os.environ.get("BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE")
+        try:
+            os.environ["BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE"] = "1"
+            pf.save_hermes_url("http://100.64.1.2:3000/api/chat/completions")  # must not raise
+        finally:
+            if orig is None:
+                os.environ.pop("BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE", None)
+            else:
+                os.environ["BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE"] = orig
+
+    def test_https_to_remote_host_never_needs_the_opt_in(self):
+        orig = os.environ.pop("BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE", None)
+        try:
+            pf.save_hermes_url("https://100.64.1.2:3000/api/chat/completions")  # must not raise
+        finally:
+            if orig is not None:
+                os.environ["BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE"] = orig
+
+    def test_is_loopback_host_recognizes_localhost_ipv4_ipv6(self):
+        self.assertTrue(pf._is_loopback_host("localhost"))
+        self.assertTrue(pf._is_loopback_host("127.0.0.1"))
+        self.assertTrue(pf._is_loopback_host("127.5.5.5"))
+        self.assertTrue(pf._is_loopback_host("::1"))
+        self.assertFalse(pf._is_loopback_host("100.64.1.2"))
+        self.assertFalse(pf._is_loopback_host("example.com"))
+        self.assertFalse(pf._is_loopback_host(""))
+        self.assertFalse(pf._is_loopback_host(None))
+
+    # ---- F-002: no automatic redirect-following (credential/downgrade leak) ----
+    def test_http_post_json_does_not_follow_redirect(self):
+        """A 302 from the configured endpoint must surface as an HTTP-302
+        error, never be silently followed to a different origin with our
+        Authorization header intact."""
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        received_by_target = []
+
+        class TargetHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                received_by_target.append(dict(self.headers.items()))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"choices":[{"message":{"content":"leaked"}}]}')
+
+            def log_message(self, *a):
+                pass
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{target_port}/")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        target_server = HTTPServer(("127.0.0.1", 0), TargetHandler)
+        target_port = target_server.server_address[1]
+        redirect_server = HTTPServer(("127.0.0.1", 0), RedirectHandler)
+        redirect_port = redirect_server.server_address[1]
+        for s in (target_server, redirect_server):
+            threading.Thread(target=s.serve_forever, daemon=True).start()
+        try:
+            out, err = self._orig_post(
+                f"http://127.0.0.1:{redirect_port}/",
+                {"Authorization": "Bearer secret-token"},
+                {"x": 1},
+            )
+            self.assertIsNone(out)
+            self.assertIn("HTTP 302", err)
+            self.assertEqual(received_by_target, [])  # redirect was never followed
+        finally:
+            target_server.shutdown()
+            redirect_server.shutdown()
 
     # ---- SNYK-003: dict-store helpers refuse tainted paths at the sink ----
     def test_load_json_dict_refuses_relative_path(self):
@@ -218,6 +311,81 @@ class LlmClientTest(ParserFactoryTestBase):
         result, err = self._orig_get("gopher://x/", {})
         self.assertIsNone(result)
         self.assertIn("invalid endpoint", err)
+
+    # ---- F-005: bounded HTTP reads ----
+    def test_http_post_json_rejects_oversized_response(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        oversized = b'{"x":"' + b"a" * (pf.MAX_PROVIDER_RESPONSE_BYTES + 100) + b'"}'
+
+        class BigHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(oversized)
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), BigHandler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            out, err = self._orig_post(f"http://127.0.0.1:{port}/", {}, {"x": 1})
+            self.assertIsNone(out)
+            self.assertIn("exceeds", err)
+        finally:
+            server.shutdown()
+
+    def test_http_post_json_accepts_response_at_the_cap(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class OkHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"choices":[{"message":{"content":"ok"}}]}')
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), OkHandler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            out, err = self._orig_post(f"http://127.0.0.1:{port}/", {}, {"x": 1})
+            self.assertIsNone(err)
+            self.assertEqual(out["choices"][0]["message"]["content"], "ok")
+        finally:
+            server.shutdown()
+
+    # ---- F-005: hermes model discovery is cached, not re-fetched per attempt ----
+    def test_hermes_model_discovery_is_cached_across_calls(self):
+        self.llm_responses = [
+            ({"choices": [{"message": {"content": "1"}}]}, None),
+            ({"choices": [{"message": {"content": "2"}}]}, None),
+            ({"choices": [{"message": {"content": "3"}}]}, None),
+        ]
+        for _ in range(3):
+            text, err = pf.llm_complete("hermes", "s", "u")
+            self.assertIsNone(err)
+        self.assertEqual(len(self._llm_get_calls), 1)
+
+    def test_reset_hermes_model_cache_forces_rediscovery(self):
+        self.llm_responses = [
+            ({"choices": [{"message": {"content": "1"}}]}, None),
+            ({"choices": [{"message": {"content": "2"}}]}, None),
+        ]
+        pf.llm_complete("hermes", "s", "u")
+        pf._reset_hermes_model_cache()
+        pf.llm_complete("hermes", "s", "u")
+        self.assertEqual(len(self._llm_get_calls), 2)
 
 
 # ---------- P2: source profiling and schema knowledge store ----------
@@ -253,6 +421,130 @@ class SourceProfileTest(ParserFactoryTestBase):
         self.assertTrue(err)
         schema_path = Path(bm.LEARNED_PATH).parent / pf.SCHEMA_KNOWLEDGE_PATH_NAME
         self.assertFalse(schema_path.exists())
+
+    # ---- F-004: raw bzrk diagnostic text is redacted before it crosses
+    # into the profiling error message ----
+    def test_profiling_error_redacts_raw_bzrk_output(self):
+        self.default_response = ("password=dummy-backend-secret-987654", True)
+        profile, err = pf.build_source_profile("x", "service", "1h ago")
+        self.assertIsNone(profile)
+        self.assertNotIn("password=dummy-backend-secret-987654", err)
+
+    def test_validate_generated_query_redacts_execution_failure(self):
+        q = {"name": "n", "description": "d",
+             "kql": f"{bm.TABLE} | take 1", "since": "1h ago"}
+        self.default_response = ("password=dummy-backend-secret-987654", True)
+        ok, verr, _ = pf.validate_generated_query(q)
+        self.assertFalse(ok)
+        self.assertNotIn("password=dummy-backend-secret-987654", verr)
+
+    def test_validate_generated_query_redacts_retry_execution_failure(self):
+        q = {"name": "n", "description": "d",
+             "kql": f"{bm.TABLE} | take 1", "since": "1h ago"}
+        self.responses[f"{bm.TABLE} | take 1"] = ("(no rows)", False)
+        self.default_response = ("password=dummy-backend-secret-987654", True)
+        ok, verr, _ = pf.validate_generated_query(q)
+        self.assertFalse(ok)
+        self.assertNotIn("password=dummy-backend-secret-987654", verr)
+
+    def test_bzrk_error_never_reaches_persisted_report_or_next_prompt(self):
+        """End-to-end: a backend failure containing secret-shaped text must
+        not appear in either the final worker report (last_errors) or any
+        prompt sent to a subsequent provider attempt."""
+        os.environ["BERSERK_LLM_LADDER"] = "hermes"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        self._stub_profile_responses()
+        # Generation query executes but always fails with secret-shaped text.
+        self.responses[f"{bm.TABLE} | take 1"] = ("password=dummy-backend-secret-987654", True)
+        captured_prompts = []
+
+        def spy_llm_complete(provider, system_prompt, user_prompt):
+            captured_prompts.append(user_prompt)
+            return json.dumps({"queries": [
+                {"name": "q", "description": "d",
+                 "kql": f"{bm.TABLE} | take 1", "since": "1h ago"},
+            ]}), None
+        orig = pf.llm_complete
+        pf.llm_complete = spy_llm_complete
+        try:
+            report, ok = pf.generate_parser_for({"source": "x", "kind": "service", "role_hint": ""})
+        finally:
+            pf.llm_complete = orig
+        self.assertFalse(ok)
+        blob = json.dumps(report)
+        self.assertNotIn("password=dummy-backend-secret-987654", blob)
+        for prompt in captured_prompts:
+            self.assertNotIn("password=dummy-backend-secret-987654", prompt)
+
+    # ---- F-003: resource-key tokens are strictly validated and bounded ----
+    def test_instruction_shaped_resource_key_is_dropped(self):
+        self.responses["bag_keys(resource)"] = (
+            "key n\nservice.name 5\npassword=dummy-resource-key-secret 1\n", False)
+        self.responses["take 6"] = ("x" * 100, False)
+        self.responses[f"{bm.TABLE} | getschema"] = ("y" * 100, False)
+        profile, err = pf.build_source_profile("mysvc", "service", "24h ago")
+        self.assertIsNone(err)
+        self.assertEqual(profile["resource_keys"], ["service.name"])
+        self.assertNotIn("password", " ".join(profile["resource_keys"]))
+
+    def test_control_character_resource_key_is_dropped(self):
+        # \x07 (BEL) is not whitespace, so it stays embedded in one token
+        # rather than being split off -- this exercises the character-class
+        # rejection, not accidental whitespace tokenization.
+        self.responses["bag_keys(resource)"] = (
+            "key n\nservice.name 5\nweird\x07key 1\n", False)
+        self.responses["take 6"] = ("x" * 100, False)
+        self.responses[f"{bm.TABLE} | getschema"] = ("y" * 100, False)
+        profile, err = pf.build_source_profile("mysvc", "service", "24h ago")
+        self.assertIsNone(err)
+        self.assertEqual(profile["resource_keys"], ["service.name"])
+
+    def test_oversized_resource_key_is_dropped(self):
+        huge = "a" * 200
+        self.responses["bag_keys(resource)"] = (
+            f"key n\nservice.name 5\n{huge} 1\n", False)
+        self.responses["take 6"] = ("x" * 100, False)
+        self.responses[f"{bm.TABLE} | getschema"] = ("y" * 100, False)
+        profile, err = pf.build_source_profile("mysvc", "service", "24h ago")
+        self.assertIsNone(err)
+        self.assertEqual(profile["resource_keys"], ["service.name"])
+
+    def test_resource_key_count_is_capped(self):
+        lines = "\n".join(f"k{i}.attr {i}" for i in range(pf.MAX_RESOURCE_KEYS + 20))
+        self.responses["bag_keys(resource)"] = (f"key n\n{lines}\n", False)
+        self.responses["take 6"] = ("x" * 100, False)
+        self.responses[f"{bm.TABLE} | getschema"] = ("y" * 100, False)
+        profile, err = pf.build_source_profile("mysvc", "service", "24h ago")
+        self.assertIsNone(err)
+        self.assertLessEqual(len(profile["resource_keys"]), pf.MAX_RESOURCE_KEYS)
+
+    def test_resource_keys_never_reach_the_generation_prompt_when_malicious(self):
+        """End-to-end: an instruction-shaped resource key must not appear in
+        either the persisted schema knowledge or the LLM prompt built from
+        it (F-003 was a true positive on both sinks)."""
+        os.environ["BERSERK_LLM_LADDER"] = "hermes"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        self.responses["bag_keys(resource)"] = (
+            "key n\nservice.name 5\npassword=dummy-resource-key-secret 1\n", False)
+        self.responses["take 6"] = ("x" * 100, False)
+        self.responses[f"{bm.TABLE} | getschema"] = ("y" * 100, False)
+        captured_prompts = []
+        orig_llm_complete = pf.llm_complete
+
+        def spy_llm_complete(provider, system_prompt, user_prompt):
+            captured_prompts.append(user_prompt)
+            return None, "stub: no completion needed for this test"
+        pf.llm_complete = spy_llm_complete
+        try:
+            pf.generate_parser_for({"source": "mysvc", "kind": "service", "role_hint": ""})
+        finally:
+            pf.llm_complete = orig_llm_complete
+        self.assertTrue(captured_prompts)
+        for prompt in captured_prompts:
+            self.assertNotIn("password=dummy-resource-key-secret", prompt)
+        schema_path = Path(bm.LEARNED_PATH).parent / pf.SCHEMA_KNOWLEDGE_PATH_NAME
+        knowledge_text = schema_path.read_text()
+        self.assertNotIn("password=dummy-resource-key-secret", knowledge_text)
 
 
 # ---------- P3: new-source detection ----------
@@ -585,6 +877,68 @@ class GenerationPipelineTest(ParserFactoryTestBase):
 
         report, ok = pf.generate_parser_for({"source": "x", "kind": "service", "role_hint": ""})
         self.assertTrue(ok, report)
+
+    # ---- F-005: one total-attempt budget across the WHOLE ladder ----
+    def test_total_attempt_budget_across_ladder_is_capped(self):
+        """Previously MAX_REFINEMENT_ATTEMPTS was a PER-PROVIDER budget, so
+        a 3-provider ladder could make up to 15 LLM calls for one job.
+        Every attempt below returns malformed JSON (a parse_err), which
+        never triggers the immediate-provider-failure shortcut, so the old
+        code would burn a full 5-attempt budget on each of the 3
+        providers. The new code must stop at MAX_TOTAL_ATTEMPTS regardless
+        of ladder length."""
+        os.environ["BERSERK_LLM_LADDER"] = "hermes,openai,anthropic"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        os.environ["OPENAI_API_KEY"] = "dummy-key"
+        os.environ["ANTHROPIC_API_KEY"] = "dummy-key"
+        self._stub_profile_responses()
+        self.llm_responses = [
+            ({"choices": [{"message": {"content": "not valid json"}}]}, None)
+            for _ in range(20)
+        ]
+        report, ok = pf.generate_parser_for({"source": "x", "kind": "service", "role_hint": ""})
+        self.assertFalse(ok)
+        self.assertLessEqual(len(self._llm_calls), pf.MAX_TOTAL_ATTEMPTS)
+        self.assertEqual(len(self._llm_calls), pf.MAX_TOTAL_ATTEMPTS)
+
+    # ---- F-005: one monotonic deadline spans the whole job ----
+    def test_job_deadline_aborts_before_any_llm_call(self):
+        self._stub_profile_responses()
+        orig_deadline = pf.JOB_DEADLINE_SECONDS
+        pf.JOB_DEADLINE_SECONDS = -1  # already expired before the function even starts
+        try:
+            report, ok = pf.generate_parser_for({"source": "x", "kind": "service", "role_hint": ""})
+        finally:
+            pf.JOB_DEADLINE_SECONDS = orig_deadline
+        self.assertFalse(ok)
+        self.assertIn("deadline", report["reason"])
+        self.assertEqual(len(self._llm_calls), 0)
+
+    # ---- F-005: _bound_report guarantees a serialization bound ----
+    def test_bound_report_trims_oversized_list_field(self):
+        report = {
+            "status": "needs_human",
+            "reason": "all providers exhausted",
+            "last_errors": ["x" * 500 for _ in range(20)],
+        }
+        bounded = pf._bound_report(report)
+        self.assertLessEqual(len(json.dumps(bounded)), pf.REPORT_CAP)
+        self.assertIn("last_errors", bounded)
+
+    def test_bound_report_caps_oversized_scalar_field_in_skeleton_fallback(self):
+        report = {
+            "status": "needs_human",
+            "reason": "y" * 5000,
+            "last_errors": ["z"],
+        }
+        bounded = pf._bound_report(report)
+        self.assertTrue(bounded.get("_truncated"))
+        self.assertLessEqual(len(json.dumps(bounded)), pf.REPORT_CAP)
+        self.assertLessEqual(len(bounded["reason"]), 200)
+
+    def test_bound_report_passthrough_when_already_small(self):
+        report = {"status": "done", "report": {"provider": "hermes"}}
+        self.assertEqual(pf._bound_report(report), report)
 
 
 # ---------- P6: headless worker mode ----------

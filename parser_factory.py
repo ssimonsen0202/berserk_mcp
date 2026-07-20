@@ -15,9 +15,11 @@ callables (run_bzrk-backed `bzrk_search`, store helpers, TABLE, etc.) rather
 than this module importing berserk_mcp, which would create a cycle.
 """
 import hashlib
+import ipaddress
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -85,6 +87,57 @@ def _safe_excerpt(raw, cap):
     return clean[:cap]
 
 
+def _safe_diag_text(raw, cap=None):
+    """Redact and bound a raw bzrk stdout/stderr diagnostic before it is
+    embedded in a persisted report or an LLM prompt (F-004). Non-auth bzrk
+    failures echo the CLI's raw stdout/stderr, which can itself contain
+    query content, backend error bodies, or telemetry values verbatim --
+    this is the one fix point for that class of boundary crossing, mirroring
+    how _safe_excerpt is the one fix point for sample/schema telemetry.
+
+    cap defaults to FEEDBACK_ERROR_CAP, resolved at call time since that
+    constant is declared below this function in the module."""
+    try:
+        return _safe_excerpt(raw, cap if cap is not None else FEEDBACK_ERROR_CAP)
+    except (RuntimeError, TypeError):
+        return "(diagnostic redaction unavailable)"
+
+
+def _bound_report(report, cap=None):
+    """Ensure a report dict returned by generate_parser_for serializes
+    within `cap` characters (F-005). Component strings are already
+    individually bounded by the time they reach here (FEEDBACK_ERROR_CAP,
+    MAX_GENERATED_QUERY_LEN, etc.), but a LIST of several such strings --
+    last_errors accumulated across up to MAX_TOTAL_ATTEMPTS attempts, or
+    an oversized warnings list -- was never bounded as a whole. Trims
+    list-valued fields progressively rather than truncating the JSON text
+    itself, which would risk invalid JSON or breaking a caller's `.get()`
+    on the returned dict.
+
+    The result is genuinely guaranteed to fit within a small multiple of
+    `cap`: the final fallback caps every remaining scalar field too, not
+    just the list fields, so one oversized string alone can't defeat the
+    bound."""
+    cap = cap if cap is not None else REPORT_CAP
+    if len(json.dumps(report)) <= cap:
+        return report
+    trimmed = dict(report)
+    for list_field in ("warnings", "last_errors", "queries_saved"):
+        if list_field in trimmed and isinstance(trimmed[list_field], list):
+            trimmed[list_field] = trimmed[list_field][:1]
+    if len(json.dumps(trimmed)) <= cap:
+        return trimmed
+    skeleton = {}
+    for k, v in trimmed.items():
+        if isinstance(v, str):
+            skeleton[k] = v[:200]
+        elif isinstance(v, (int, float, bool)) or v is None:
+            skeleton[k] = v
+        # lists and other structures are dropped entirely in the fallback
+    skeleton["_truncated"] = True
+    return skeleton
+
+
 SCHEMA_KNOWLEDGE_PATH_NAME = "schema_knowledge.json"
 KNOWN_SOURCES_PATH_NAME = "known_sources.json"
 
@@ -96,6 +149,47 @@ FEEDBACK_ERROR_CAP = 400
 REPORT_CAP = 2000
 MAX_REFINEMENT_ATTEMPTS = 5
 MAX_QUERIES_PER_JOB = 4
+
+# F-005: MAX_REFINEMENT_ATTEMPTS was previously a PER-PROVIDER budget, so a
+# 3-provider ladder could make up to 15 LLM calls for one job. This is now
+# the TOTAL attempt budget across the whole ladder -- generous enough for
+# one provider's full refinement budget plus fallback tries elsewhere, but
+# bounded regardless of how many providers an operator configures.
+MAX_TOTAL_ATTEMPTS = 8
+# One monotonic deadline spanning profiling, model discovery, every
+# provider call, query verification, and retries -- not just a per-HTTP-
+# call timeout. Overridable for slow backends via env var.
+JOB_DEADLINE_SECONDS = int(os.environ.get("BERSERK_LLM_JOB_DEADLINE_SECONDS", "300"))
+
+# F-003: resource-key tokens (bag_keys(resource) output) are attribute
+# NAMES, not values -- genuine OTel resource keys are always short dotted
+# identifiers like service.name / host.name / k8s.pod.name. Unlike free-text
+# excerpts, a key token has no legitimate reason to contain anything outside
+# this character class, so an allowlist is stricter and simpler here than
+# pattern-based redaction, and rejects instruction-shaped or control-
+# character tokens outright rather than trying to sanitize them.
+MAX_RESOURCE_KEYS = 50
+MAX_RESOURCE_KEY_LEN = 80
+_RESOURCE_KEY_RE = re.compile(r"^[A-Za-z0-9._-]{1,%d}$" % MAX_RESOURCE_KEY_LEN)
+
+
+def _safe_resource_keys(raw_lines_text):
+    """Extract, validate, and bound resource-key tokens from a keys-listing
+    query result before they are persisted or joined into an LLM prompt.
+    Non-conforming tokens (control chars, oversized, instruction-shaped, or
+    any character outside [A-Za-z0-9._-]) are dropped, not sanitized-in-
+    place -- a key list has no use for a "redacted" placeholder token."""
+    keys = []
+    for line in str(raw_lines_text or "").splitlines():
+        tokens = line.strip().split()
+        if not tokens or tokens[0] in ("key", "n"):
+            continue
+        token = tokens[0]
+        if _RESOURCE_KEY_RE.match(token):
+            keys.append(token)
+        if len(keys) >= MAX_RESOURCE_KEYS:
+            break
+    return keys
 # Fail-safe: a single detect_new_sources pass auto-queues at most this many new
 # services, so an empty/partial baseline against a large cluster can never flood
 # the queue. Internal metrics are never auto-queued at all (they are infra the
@@ -167,15 +261,36 @@ class LlmUrlError(ValueError):
     """Raised when an LLM endpoint URL fails scheme/format validation."""
 
 
+def _is_loopback_host(host):
+    """True for localhost / 127.0.0.0/8 / ::1 — the only hosts plaintext
+    HTTP is allowed to reach without an explicit operator override."""
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def _validate_llm_url(url):
     """Defense-in-depth guard for the LLM endpoint URL.
 
     The operator sets this via --set-hermes-url or BERSERK_LLM_HERMES_URL on
     their own machine, so classic SSRF (remote-attacker-controlled URL) does
-    not apply. This validator still rejects non-http(s) schemes and control
-    characters so a malformed config file, an environment misconfiguration,
-    or a typo can never let urllib.request open a file://, gopher://, ftp://
-    or similar unusual protocol handler.
+    not apply at the point of *initial configuration*. This validator still
+    rejects non-http(s) schemes and control characters so a malformed config
+    file, an environment misconfiguration, or a typo can never let
+    urllib.request open a file://, gopher://, ftp:// or similar unusual
+    protocol handler.
+
+    Plaintext http:// is only permitted to a loopback host by default (the
+    bearer token would otherwise cross the network in the clear). Operators
+    running an LLM gateway on a private/VPN network they trust (e.g. a
+    Tailscale endpoint) can opt in with
+    BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE=1 — this is a deliberate, explicit
+    choice, not a silent default (F-013).
 
     Returns the URL unchanged on success; raises LlmUrlError otherwise.
     """
@@ -186,13 +301,58 @@ def _validate_llm_url(url):
     if any(ord(c) < 32 or c in " \t\r\n\x7f" for c in url):
         raise LlmUrlError("llm endpoint url contains invalid control characters")
     parsed = urllib.parse.urlsplit(url)
-    if parsed.scheme.lower() not in _ALLOWED_LLM_SCHEMES:
+    scheme = parsed.scheme.lower()
+    if scheme not in _ALLOWED_LLM_SCHEMES:
         raise LlmUrlError(
             f"llm endpoint url scheme must be one of {sorted(_ALLOWED_LLM_SCHEMES)}"
         )
     if not parsed.netloc:
         raise LlmUrlError("llm endpoint url missing host")
+    if scheme == "http" and not _is_loopback_host(parsed.hostname):
+        if os.environ.get("BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE") != "1":
+            raise LlmUrlError(
+                "plaintext http to a non-loopback host is rejected by default "
+                "(the bearer token would cross the network unencrypted); use "
+                "https, point at localhost/127.0.0.1, or set "
+                "BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE=1 to explicitly allow it "
+                "on a trusted private network"
+            )
     return url
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect. The LLM endpoint is a single operator-fixed
+    URL; there is no legitimate reason for it to 3xx, and the stdlib default
+    handler would otherwise re-send our Authorization header to whatever
+    Location a compromised or misbehaving endpoint returns — including a
+    different origin, a downgraded http:// scheme, or a link-local metadata
+    address (F-002). redirect_request returning None makes urllib fall
+    through to a plain HTTPError for the 3xx status, which the existing
+    `except urllib.error.HTTPError` branch below already handles."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler)
+
+# F-005: an LLM/gateway endpoint response is network-controlled by whatever
+# is on the other end of the configured URL; without a cap, resp.read()
+# would buffer an arbitrarily large body into memory before json.loads even
+# gets a chance to reject it. Read one byte past the cap so an exactly-
+# capped legitimate response isn't misclassified as oversized.
+MAX_PROVIDER_RESPONSE_BYTES = 2 * 1024 * 1024  # 2 MB; generous for a chat-completions JSON body
+
+
+def _read_bounded_json(resp, cap=MAX_PROVIDER_RESPONSE_BYTES):
+    """Read at most cap+1 bytes from an HTTP response and json.loads it.
+    Raises ValueError if the body exceeds cap -- never silently truncates
+    a response and hands truncated bytes to json.loads (which could parse
+    to a subtly-wrong, still-valid-looking JSON value in edge cases)."""
+    body = resp.read(cap + 1)
+    if len(body) > cap:
+        raise ValueError(f"response body exceeds {cap} bytes")
+    return json.loads(body.decode("utf-8"))
 
 
 def _http_post_json(url, headers, payload, timeout=LLM_TIMEOUT):
@@ -210,12 +370,14 @@ def _http_post_json(url, headers, payload, timeout=LLM_TIMEOUT):
         headers={**headers, "Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8")), None
+        with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
+            return _read_bounded_json(resp), None
     except urllib.error.HTTPError as e:
         return None, f"HTTP {e.code}"
     except urllib.error.URLError:
         return None, "connection failed"
+    except ValueError as e:
+        return None, str(e)
     except Exception as e:
         return None, f"{type(e).__name__}"
 
@@ -227,10 +389,12 @@ def _http_get_json(url, headers, timeout=LLM_TIMEOUT):
         return None, f"invalid endpoint: {e}"
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8")), None
+        with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
+            return _read_bounded_json(resp), None
     except urllib.error.HTTPError as e:
         return None, f"HTTP {e.code}"
+    except ValueError as e:
+        return None, str(e)
     except Exception as e:
         return None, f"{type(e).__name__}"
 
@@ -294,11 +458,29 @@ def save_hermes_url(url):
     return path
 
 
+# F-005: without a cache, one generation job's refinement loop calls
+# _hermes_model() -- and so GET /api/models -- on every one of up to
+# MAX_TOTAL_ATTEMPTS attempts, even though the available models don't
+# change mid-job. Cache per resolved URL with a short TTL so a long-running
+# server still picks up a redeployed Hermes within a few minutes.
+_hermes_model_cache = {}  # url -> (model_id, expires_at_monotonic)
+HERMES_MODEL_CACHE_TTL = 300  # seconds
+
+
+def _reset_hermes_model_cache():
+    """Test seam: clear the discovery cache so tests don't leak a cached
+    model id across otherwise-independent test cases."""
+    _hermes_model_cache.clear()
+
+
 def _hermes_model():
     configured = os.environ.get("BERSERK_LLM_HERMES_MODEL")
     if configured:
         return configured, None
     url = _hermes_url()
+    cached = _hermes_model_cache.get(url)
+    if cached is not None and cached[1] > time.monotonic():
+        return cached[0], None
     models_url = url.rsplit("/", 3)[0] + "/api/models" if "/api/" in url else None
     if not models_url:
         return None, "hermes: cannot derive /api/models from configured URL"
@@ -315,6 +497,7 @@ def _hermes_model():
         model_id = first.get("id") or first.get("name")
         if not model_id:
             return None, "hermes: model discovery returned no usable id"
+        _hermes_model_cache[url] = (model_id, time.monotonic() + HERMES_MODEL_CACHE_TTL)
         return model_id, None
     except (AttributeError, TypeError, IndexError):
         return None, "hermes: unexpected /api/models response shape"
@@ -448,13 +631,13 @@ def build_source_profile(source, kind, since):
     if kind == "service":
         keys_out, keys_err = _bzrk_search(_q_discover_keys(source), since)
         if keys_err:
-            errors.append(f"keys: {keys_out}")
+            errors.append(f"keys: {_safe_diag_text(keys_out)}")
         else:
             parts["resource_keys_raw"] = keys_out
 
         sample_out, sample_err = _bzrk_search(_q_discover_sample(source), since)
         if sample_err:
-            errors.append(f"sample: {sample_out}")
+            errors.append(f"sample: {_safe_diag_text(sample_out)}")
         else:
             # SEC-001: this is real telemetry row content -- the one field
             # in this profile most likely to carry an actual credential or
@@ -468,7 +651,7 @@ def build_source_profile(source, kind, since):
     else:
         sample_out, sample_err = _bzrk_search(_q_metric_sample(source), since)
         if sample_err:
-            errors.append(f"sample: {sample_out}")
+            errors.append(f"sample: {_safe_diag_text(sample_out)}")
         else:
             try:
                 parts["sample_excerpt"] = _safe_excerpt(sample_out, SAMPLE_EXCERPT_CAP)
@@ -477,7 +660,7 @@ def build_source_profile(source, kind, since):
 
     schema_out, schema_err = _bzrk_search(f"{_table} | getschema", since)
     if schema_err:
-        errors.append(f"getschema: {schema_out}")
+        errors.append(f"getschema: {_safe_diag_text(schema_out)}")
     else:
         try:
             parts["getschema_excerpt"] = _safe_excerpt(schema_out, GETSCHEMA_EXCERPT_CAP)
@@ -487,12 +670,7 @@ def build_source_profile(source, kind, since):
     if not parts:
         return None, "; ".join(errors) or "profiling failed: no data returned"
 
-    resource_keys = []
-    if "resource_keys_raw" in parts:
-        for line in parts["resource_keys_raw"].splitlines():
-            tokens = line.strip().split()
-            if tokens and tokens[0] not in ("key", "n"):
-                resource_keys.append(tokens[0])
+    resource_keys = _safe_resource_keys(parts.get("resource_keys_raw", ""))
 
     profile = {
         "kind": kind,
@@ -848,12 +1026,12 @@ def validate_generated_query(q):
 
     out, err = _bzrk_search(kql, q.get("since") or "1h ago")
     if err:
-        return False, f"execution failed: {out}", None
+        return False, f"execution failed: {_safe_diag_text(out)}", None
 
     if out.strip() == "(no rows)" or _count_result_is_zero(out):
         out2, err2 = _bzrk_search(kql, "24h ago")
         if err2:
-            return False, f"execution failed on retry: {out2}", None
+            return False, f"execution failed on retry: {_safe_diag_text(out2)}", None
         if out2.strip() == "(no rows)" or _count_result_is_zero(out2):
             return False, "returns no data in 24h", None
         out = out2
@@ -876,12 +1054,23 @@ def generate_parser_for(job):
     kind = job["kind"]
     role_hint = job.get("role_hint") or ""
 
+    # F-005: one monotonic deadline spans the whole job -- profiling, model
+    # discovery, every provider call, query verification, and retries -- not
+    # just each individual HTTP call's own timeout.
+    deadline = time.monotonic() + JOB_DEADLINE_SECONDS
+
     profile, err = build_source_profile(source, kind, "24h ago")
     if err:
-        return {
+        return _bound_report({
             "status": "needs_human",
             "reason": f"profiling failed: {err}",
-        }, False
+        }), False
+
+    if time.monotonic() >= deadline:
+        return _bound_report({
+            "status": "needs_human",
+            "reason": f"job deadline ({JOB_DEADLINE_SECONDS}s) exceeded during profiling",
+        }), False
 
     user_prompt_base = (
         KQL_IDIOMS + "\n\n"
@@ -898,11 +1087,17 @@ def generate_parser_for(job):
     attempts_used = 0
     validated_queries = None
     warnings = []
+    budget_exhausted = False
 
     for provider in ladder():
         feedback = ""
         provider_failed_immediately = False
         for attempt in range(1, MAX_REFINEMENT_ATTEMPTS + 1):
+            # F-005: one TOTAL attempt budget across the whole ladder (not
+            # MAX_REFINEMENT_ATTEMPTS per provider), plus the job deadline.
+            if attempts_used >= MAX_TOTAL_ATTEMPTS or time.monotonic() >= deadline:
+                budget_exhausted = True
+                break
             attempts_used += 1
             text, llm_err = llm_complete(provider, GEN_SYSTEM, user_prompt_base + feedback)
             if llm_err:
@@ -947,15 +1142,22 @@ def generate_parser_for(job):
 
         if validated_queries:
             break
+        if budget_exhausted:
+            break
         if provider_failed_immediately:
             continue
 
     if not validated_queries:
-        return {
+        reason = (
+            "job deadline exceeded" if time.monotonic() >= deadline
+            else "attempt budget exhausted" if budget_exhausted
+            else "all providers exhausted"
+        )
+        return _bound_report({
             "status": "needs_human",
-            "reason": "all providers exhausted",
+            "reason": reason,
             "last_errors": last_errors,
-        }, False
+        }), False
 
     saved_names = []
     for q in validated_queries:
@@ -989,9 +1191,7 @@ def generate_parser_for(job):
         "queries_saved": saved_names,
         "warnings": warnings,
     }
-    report_json = json.dumps(report)
-    if len(report_json) > REPORT_CAP:
-        report["warnings"] = report["warnings"][:1]
-        report_json = json.dumps(report)[:REPORT_CAP]
-
-    return {"status": "done", "report": report}, True
+    # _bound_report trims top-level list fields, so bound the inner report
+    # dict directly -- warnings/queries_saved live there, not at the
+    # top level of the {"status", "report"} envelope.
+    return {"status": "done", "report": _bound_report(report)}, True

@@ -529,6 +529,18 @@ _AUTH_FAILURE_RE = re.compile(
 
 AUTH_FAILURE_MESSAGE = "bzrk authentication failed; run `bzrk login` and retry"
 
+# F-005: bound the DIAGNOSTIC text returned on a non-zero exit -- this text
+# is always error/status output, never the actual data a caller asked for,
+# so capping it has no effect on legitimate large query results. The
+# success path (p.returncode == 0) is intentionally left unbounded here:
+# real KQL result sets are wanted output, and tool queries already bound
+# row counts via `take N`. This does not bound subprocess.run's own
+# in-memory buffering while bzrk is running -- bzrk is an operator-
+# installed, trusted local CLI, and the existing `timeout` already bounds
+# worst-case duration; a full rewrite to streamed/spooled capture was
+# judged disproportionate to that residual risk.
+MAX_BZRK_DIAGNOSTIC_CHARS = 100_000
+
 
 def run_bzrk(args, timeout=DEFAULT_TIMEOUT):
     """Run the bzrk CLI with the given argument list. Returns (text, is_error)."""
@@ -541,7 +553,10 @@ def run_bzrk(args, timeout=DEFAULT_TIMEOUT):
         if err and _AUTH_FAILURE_RE.search(err):
             return AUTH_FAILURE_MESSAGE, True
         if p.returncode != 0:
-            return ((out + "\n" + err).strip() or f"bzrk exited {p.returncode}"), True
+            diagnostic = (out + "\n" + err).strip() or f"bzrk exited {p.returncode}"
+            if len(diagnostic) > MAX_BZRK_DIAGNOSTIC_CHARS:
+                diagnostic = diagnostic[:MAX_BZRK_DIAGNOSTIC_CHARS] + "\n...[truncated]"
+            return diagnostic, True
         return (out or "(no rows)"), False
     except FileNotFoundError:
         return (
