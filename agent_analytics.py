@@ -474,6 +474,75 @@ def analyze_token_burn_events(events):
     return reports
 
 
+def _cost_daily_query():
+    return (
+        f"{_table} | where resource['service.name'] == 'claude-code' "
+        f"| summarize events=count(), "
+        f"errors=countif(tostring(attributes['claude.error']) == 'true'), "
+        f"tokens_in_sum=sum(toint(attributes['{_TOKENS_IN_ATTR}'])), "
+        f"tokens_out_sum=sum(toint(attributes['{_TOKENS_OUT_ATTR}'])), "
+        f"body_chars_sum=sum(strlen(tostring(body))) "
+        f"by day=bin(timestamp, 1d), model=tostring(attributes['claude.message_model']) "
+        f"| sort by day asc"
+    )
+
+
+_SLOPE_FLAT_PCT = 10.0  # |slope| below this %/day of mean burn counts as flat
+
+
+def analyze_cost_daily(rows):
+    """Aggregate per-day+model cost rows into a report dict. Pure function.
+
+    Per-day tokens prefer the exact sums; a day with no exact usage falls
+    back to body_chars_sum / 4 and is labeled "estimated" (doctrine from
+    claude_token_burn). Verdict is a least-squares slope over daily totals,
+    expressed as %/day of the mean; needs >= 3 days else insufficient-data.
+    """
+    by_day = {}
+    models = {}
+    for r in rows:
+        day = str(r.get("day") or "")[:10]
+        if not day:
+            continue
+        exact = _nonnegative_int(r.get("tokens_in_sum")) + _nonnegative_int(r.get("tokens_out_sum"))
+        est = _nonnegative_int(r.get("body_chars_sum")) // 4
+        tokens = exact if exact > 0 else est
+        source = "exact" if exact > 0 else "estimated"
+        slot = by_day.setdefault(day, {"day": day, "tokens": 0, "source": source,
+                                       "events": 0, "errors": 0})
+        slot["tokens"] += tokens
+        if source == "estimated" and slot["tokens"] == tokens:
+            slot["source"] = "estimated"
+        slot["events"] += _nonnegative_int(r.get("events"))
+        slot["errors"] += _nonnegative_int(r.get("errors"))
+        model = str(r.get("model") or "").strip()
+        if model:
+            models[model] = models.get(model, 0) + tokens
+
+    days = sorted(by_day.values(), key=lambda d: d["day"])
+    if len(days) < 3:
+        return {"days": days, "models": models,
+                "verdict": "insufficient-data", "slope_pct_per_day": 0.0}
+
+    ys = [d["tokens"] for d in days]
+    n = len(ys)
+    mean_x = (n - 1) / 2.0
+    mean_y = sum(ys) / float(n)
+    num = sum((i - mean_x) * (y - mean_y) for i, y in enumerate(ys))
+    den = sum((i - mean_x) ** 2 for i in range(n))
+    slope = num / den if den else 0.0
+    slope_pct = (slope / mean_y * 100.0) if mean_y else 0.0
+
+    if slope_pct > _SLOPE_FLAT_PCT:
+        verdict = "burn-growing"
+    elif slope_pct < -_SLOPE_FLAT_PCT:
+        verdict = "burn-declining"
+    else:
+        verdict = "burn-flat"
+    return {"days": days, "models": models,
+            "verdict": verdict, "slope_pct_per_day": round(slope_pct, 1)}
+
+
 def claude_token_burn(since="6h ago"):
     text, is_err = _bzrk_search(_burn_events_query(), since)
     if is_err:

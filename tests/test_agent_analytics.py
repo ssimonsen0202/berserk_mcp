@@ -204,6 +204,71 @@ class AgentAnalyticsPureTest(unittest.TestCase):
         self.assertEqual(aa._parse_rows(json.dumps(doc)), [])
 
 
+def daily_row(day, model="m", events=10, errors=0, tin=0, tout=0, chars=0):
+    return {"day": day, "model": model, "events": events, "errors": errors,
+            "tokens_in_sum": tin, "tokens_out_sum": tout, "body_chars_sum": chars}
+
+
+class CostReportPureTest(unittest.TestCase):
+    def test_exact_tokens_preferred_and_summed(self):
+        rows = [daily_row("2026-07-14", tin=1000, tout=500),
+                daily_row("2026-07-15", tin=2000, tout=1000)]
+        rep = aa.analyze_cost_daily(rows)
+        self.assertEqual(rep["days"][0]["tokens"], 1500)
+        self.assertEqual(rep["days"][0]["source"], "exact")
+        self.assertEqual(rep["days"][1]["tokens"], 3000)
+
+    def test_estimate_fallback_when_no_token_sums(self):
+        rows = [daily_row("2026-07-14", chars=8000)]
+        rep = aa.analyze_cost_daily(rows)
+        self.assertEqual(rep["days"][0]["tokens"], 2000)  # chars / 4
+        self.assertEqual(rep["days"][0]["source"], "estimated")
+
+    def test_insufficient_data_under_three_days(self):
+        rep = aa.analyze_cost_daily([daily_row("2026-07-14", tin=100),
+                                     daily_row("2026-07-15", tin=100)])
+        self.assertEqual(rep["verdict"], "insufficient-data")
+
+    def test_growing_flat_declining_verdicts(self):
+        grow = [daily_row(f"2026-07-{d:02d}", tin=1000 * i)
+                for i, d in enumerate(range(10, 15), start=1)]
+        self.assertEqual(aa.analyze_cost_daily(grow)["verdict"], "burn-growing")
+        flat = [daily_row(f"2026-07-{d:02d}", tin=1000) for d in range(10, 15)]
+        self.assertEqual(aa.analyze_cost_daily(flat)["verdict"], "burn-flat")
+        decl = [daily_row(f"2026-07-{d:02d}", tin=1000 * (6 - i))
+                for i, d in enumerate(range(10, 15), start=1)]
+        self.assertEqual(aa.analyze_cost_daily(decl)["verdict"], "burn-declining")
+
+    def test_per_model_split(self):
+        rows = [daily_row("2026-07-14", model="opus", tin=3000),
+                daily_row("2026-07-14", model="haiku", tin=1000)]
+        rep = aa.analyze_cost_daily(rows)
+        self.assertEqual(rep["models"]["opus"], 3000)
+        self.assertEqual(rep["models"]["haiku"], 1000)
+
+    def test_mixed_day_rows_merge(self):
+        rows = [daily_row("2026-07-14", model="a", tin=100),
+                daily_row("2026-07-14", model="b", tin=200)]
+        rep = aa.analyze_cost_daily(rows)
+        self.assertEqual(len(rep["days"]), 1)
+        self.assertEqual(rep["days"][0]["tokens"], 300)
+
+    def test_empty_rows(self):
+        rep = aa.analyze_cost_daily([])
+        self.assertEqual(rep["verdict"], "insufficient-data")
+        self.assertEqual(rep["days"], [])
+
+    def test_cost_daily_query_shape(self):
+        # _table is already wired by the production configure() in berserk_mcp's
+        # import; do NOT call aa.configure here — that would permanently rewire
+        # the module's _bzrk_search and break later MCP dispatch tests.
+        q = aa._cost_daily_query()
+        self.assertIn("bin(timestamp, 1d)", q)
+        self.assertIn("claude-code", q)
+        self.assertIn("summarize", q)
+        self.assertNotIn("take ", q)
+
+
 class ProjectInferenceTest(unittest.TestCase):
     def test_marker_segment_yields_parent_dir(self):
         self.assertEqual(aa._infer_project("/home/u/proj-a/src/app.py"), "proj-a")
