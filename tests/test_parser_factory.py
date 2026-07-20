@@ -158,6 +158,50 @@ class LlmClientTest(ParserFactoryTestBase):
         self.assertEqual(oct(path.stat().st_mode & 0o777), oct(0o600))
         self.assertEqual(oct(path.parent.stat().st_mode & 0o777), oct(0o700))
 
+    # ---- Snyk SSRF-scheme defense-in-depth (CWE-918) ----
+    def test_save_hermes_url_rejects_file_scheme(self):
+        with self.assertRaises(pf.LlmUrlError):
+            pf.save_hermes_url("file:///etc/passwd")
+
+    def test_save_hermes_url_rejects_gopher_scheme(self):
+        with self.assertRaises(pf.LlmUrlError):
+            pf.save_hermes_url("gopher://internal-service:70/")
+
+    def test_save_hermes_url_rejects_ftp_scheme(self):
+        with self.assertRaises(pf.LlmUrlError):
+            pf.save_hermes_url("ftp://mirror.example.com/pkg")
+
+    def test_save_hermes_url_rejects_control_chars(self):
+        with self.assertRaises(pf.LlmUrlError):
+            pf.save_hermes_url("http://example.com/\r\nHost: evil.internal")
+
+    def test_save_hermes_url_rejects_empty(self):
+        with self.assertRaises(pf.LlmUrlError):
+            pf.save_hermes_url("")
+        with self.assertRaises(pf.LlmUrlError):
+            pf.save_hermes_url("   ")
+
+    def test_save_hermes_url_rejects_missing_host(self):
+        with self.assertRaises(pf.LlmUrlError):
+            pf.save_hermes_url("http:///path-only")
+
+    def test_save_hermes_url_accepts_http_and_https(self):
+        pf.save_hermes_url("http://host-a:3000/v1")
+        pf.save_hermes_url("https://host-b/v1")
+
+    def test_http_helpers_refuse_non_http_scheme_at_call_time(self):
+        """Even if a bad URL somehow reached _http_post_json/_http_get_json
+        (e.g. a stale config file predating this validation), the request
+        must be refused before urlopen is called. Calls the real (unstubbed)
+        helpers via _orig_post / _orig_get so we exercise the validator,
+        not the test double."""
+        result, err = self._orig_post("file:///etc/passwd", {}, {"x": 1})
+        self.assertIsNone(result)
+        self.assertIn("invalid endpoint", err)
+        result, err = self._orig_get("gopher://x/", {})
+        self.assertIsNone(result)
+        self.assertIn("invalid endpoint", err)
+
 
 # ---------- P2: source profiling and schema knowledge store ----------
 class SourceProfileTest(ParserFactoryTestBase):

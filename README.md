@@ -818,6 +818,7 @@ that way if you add tools.
 - **JSON-RPC 2.0 strict envelope validation.** `initialize` requires a nonempty string `protocolVersion` and object-typed `capabilities`/`clientInfo`; `ping` and `tools/list` reject nonempty params; notifications sent as requests are rejected with `-32600`; unexpected handler exceptions surface as `-32603` rather than silently converting to `isError=true` results.
 - **Generated-query policy.** LLM-generated queries must start with `{table} | ...`, must terminate with `| take N` where `1 ≤ N ≤ 50`, and must fit within 2,000 characters. The policy check is applied to a stripped copy of the KQL with string literals and `//` comments removed, so operator text inside quoted strings or comments cannot satisfy the check.
 - **Provider error scrubbing.** HTTP errors from LLM providers return only `"HTTP <code>"` — response bodies and exception messages are never propagated to the caller.
+- **LLM endpoint scheme allowlist.** The operator-configured LLM endpoint URL (via `--set-hermes-url` or `BERSERK_LLM_HERMES_URL`) is validated at both write time and call time: only `http://` and `https://` schemes are accepted; control characters and newline-injection variants are rejected before any `urllib.request.urlopen` call. Defense-in-depth against `file://`, `gopher://`, `ftp://`, and request-smuggling attempts even though the operator is inside the trust boundary.
 
 **Note on output.** Tool results are whatever your telemetry contains. If logs in Berserk hold sensitive values, `logs_for_service`/`search` can surface them — redact at ingest, not here.
 
@@ -834,11 +835,16 @@ external scanner pass:
   through `FVR-006`), all closed:
   [`docs/security-fix-validation-report-2026-07-19.md`](docs/security-fix-validation-report-2026-07-19.md).
 - **External scanner pass** — Cisco AI Defense `mcp-scanner` (YARA
-  stdio + pip-audit) and MCP-Shield (wire-level tool description
-  keyword scan): 0 true findings; 3 keyword false positives from
-  MCP-Shield on domain vocabulary documented and explained:
+  stdio + pip-audit), MCP-Shield (wire-level tool description keyword
+  scan), and Snyk Code (SAST on the GitHub source): 0 true findings.
+  MCP-Shield produced 3 keyword false positives on domain vocabulary
+  (documented). Snyk flagged one CWE-918 taint flow on the
+  operator-configured LLM endpoint URL — a false positive by threat
+  model (operator is inside the trust boundary), addressed with a
+  defense-in-depth scheme allowlist and control-character check
+  anyway. Full analysis:
   [`docs/cisco-mcp-scanner-result-report-2026-07-19.md`](docs/cisco-mcp-scanner-result-report-2026-07-19.md).
-- **Ongoing verification:** the test suite (`tests/`, 254 tests + 2
+- **Ongoing verification:** the test suite (`tests/`, 262 tests + 2
   role tests) includes an adversarial regression for every finding
   above and is run before every release. See `## Testing` below.
 

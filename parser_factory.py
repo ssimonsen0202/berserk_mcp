@@ -19,6 +19,7 @@ import json
 import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -126,11 +127,50 @@ def save_json_dict(path, data):
 
 
 # ---------- P1: LLM client with escalation ladder ----------
+_ALLOWED_LLM_SCHEMES = frozenset({"http", "https"})
+
+
+class LlmUrlError(ValueError):
+    """Raised when an LLM endpoint URL fails scheme/format validation."""
+
+
+def _validate_llm_url(url):
+    """Defense-in-depth guard for the LLM endpoint URL.
+
+    The operator sets this via --set-hermes-url or BERSERK_LLM_HERMES_URL on
+    their own machine, so classic SSRF (remote-attacker-controlled URL) does
+    not apply. This validator still rejects non-http(s) schemes and control
+    characters so a malformed config file, an environment misconfiguration,
+    or a typo can never let urllib.request open a file://, gopher://, ftp://
+    or similar unusual protocol handler.
+
+    Returns the URL unchanged on success; raises LlmUrlError otherwise.
+    """
+    if not isinstance(url, str) or not url.strip():
+        raise LlmUrlError("llm endpoint url must be a non-empty string")
+    # Control characters, whitespace, or embedded newlines are invalid in URLs
+    # and would allow request smuggling or header injection tricks.
+    if any(ord(c) < 32 or c in " \t\r\n\x7f" for c in url):
+        raise LlmUrlError("llm endpoint url contains invalid control characters")
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme.lower() not in _ALLOWED_LLM_SCHEMES:
+        raise LlmUrlError(
+            f"llm endpoint url scheme must be one of {sorted(_ALLOWED_LLM_SCHEMES)}"
+        )
+    if not parsed.netloc:
+        raise LlmUrlError("llm endpoint url missing host")
+    return url
+
+
 def _http_post_json(url, headers, payload, timeout=LLM_TIMEOUT):
     """POST JSON, return (parsed_json, None) or (None, error_string).
 
     error_string must never contain header values (keys live there).
     """
+    try:
+        _validate_llm_url(url)
+    except LlmUrlError as e:
+        return None, f"invalid endpoint: {e}"
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url, data=data, method="POST",
@@ -148,6 +188,10 @@ def _http_post_json(url, headers, payload, timeout=LLM_TIMEOUT):
 
 
 def _http_get_json(url, headers, timeout=LLM_TIMEOUT):
+    try:
+        _validate_llm_url(url)
+    except LlmUrlError as e:
+        return None, f"invalid endpoint: {e}"
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -197,7 +241,12 @@ def _hermes_url():
 
 def save_hermes_url(url):
     """Persist the Hermes endpoint to the local 0600 config file so the URL
-    lives on the operator's machine, not in the repo. Returns the path."""
+    lives on the operator's machine, not in the repo. Returns the path.
+
+    Validates scheme/format before writing so a bad URL can never be
+    persisted to the config file that later feeds urllib.request.urlopen.
+    """
+    _validate_llm_url(url)
     path = _llm_config_path()
     if path is None:
         raise RuntimeError("parser_factory is not configured (no store dir)")
