@@ -302,6 +302,21 @@ def _unique_tmp_path(safe):
     return f"{safe}.{os.getpid()}.{threading.get_ident()}.tmp"
 
 
+def _atomic_replace(tmp, safe):
+    """os.replace with a bounded retry -- see berserk_mcp._atomic_replace.
+    Guards against a transient Windows PermissionError when another
+    handle briefly has the just-written temp file open."""
+    attempts = 5
+    for i in range(attempts):
+        try:
+            os.replace(tmp, safe)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(0.05)
+
+
 def load_json_dict(path):
     try:
         safe = _safe_path(path, "store")
@@ -328,7 +343,7 @@ def save_json_dict(path, data):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     os.chmod(tmp, 0o600)
-    os.replace(tmp, safe)
+    _atomic_replace(tmp, safe)
 
 
 # ---------- P1: LLM client with escalation ladder ----------
@@ -532,7 +547,7 @@ def save_hermes_url(url):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    _atomic_replace(tmp, path)
     return path
 
 

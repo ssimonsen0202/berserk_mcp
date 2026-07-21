@@ -374,6 +374,25 @@ def _unique_tmp_path(safe):
     return f"{safe}.{os.getpid()}.{threading.get_ident()}.tmp"
 
 
+def _atomic_replace(tmp, safe):
+    """os.replace with a bounded retry for a known Windows flake: unlike
+    POSIX rename, MoveFileEx (what os.replace uses under the hood on
+    Windows) can transiently fail with PermissionError if another handle
+    -- Defender's on-access scanner, an indexer -- briefly has the
+    just-written temp file open. Retries a handful of times with a short
+    backoff; still raises if the permission error persists, so a genuine
+    permissions problem is not silently swallowed."""
+    attempts = 5
+    for i in range(attempts):
+        try:
+            os.replace(tmp, safe)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(0.05)
+
+
 def save_json_list(path, items):
     safe = _validate_store_path(path, "store")
     _ensure_private_dir(safe)
@@ -381,7 +400,7 @@ def save_json_list(path, items):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(items, f, indent=2)
     os.chmod(tmp, 0o600)
-    os.replace(tmp, safe)
+    _atomic_replace(tmp, safe)
 
 
 # ---------- verified queries (do not edit field names; they are confirmed
@@ -802,7 +821,7 @@ def save_learned(items):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(items, f, indent=2)
     os.chmod(tmp, 0o600)
-    os.replace(tmp, safe)
+    _atomic_replace(tmp, safe)
 
 
 def sanitize_name(n):
