@@ -37,10 +37,12 @@ instead of hand-authoring KQL.
 
 ## Why this exists
 
-**Berserk** is a self-hosted observability backend: it ingests logs, metrics, and
-traces over OTLP and lets you query them with a Kusto-style language (KQL) through
-the `bzrk` CLI or its web UI. It's the storage and the query engine, and it assumes
-a human who already knows KQL.
+**Berserk** is a self-hosted, OTEL-native, schemaless observability engine built
+for petabyte scale: it ingests logs, metrics, and traces over OTLP and lets you
+query them with a Kusto-style language (KQL) through the `bzrk` CLI or its web UI.
+It's [headless by design](https://www.bzrk.dev) — built for "agents asking
+questions," not dashboards. It's the storage and the query engine, and — on its
+own — it still assumes whoever (or whatever) is asking already knows KQL.
 
 **The gap.** A raw query language is the one thing LLMs are reliably bad at. Point a
 model at `bzrk` and it invents table names, mistypes fields, and burns tokens on
