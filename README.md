@@ -207,6 +207,22 @@ Three things the diagram makes clear:
 2. **The learning loop closes back into the cheap lane.** Pay the capable model once to author + verify a query; the cheap lane runs it free forever via `run_saved`.
 3. **The worker is the automation bridge.** When `request_discovery` queues a new source, the worker drains it autonomously — discovers, authors KQL, saves — without operator KQL authoring.
 
+### Monitored hosts (not shown in the diagram)
+
+The diagram above covers the **query path** — how an agent asks questions.
+The **ingestion path** is separate: each monitored host runs a lightweight
+`journal-forwarder` script that tails selected systemd units and ships OTLP
+log payloads through a local `otel-collector` into the Berserk gateway.
+
+| Host | Key services forwarded |
+|---|---|
+| **HermesRuntime** | `hermes-discord`, `docker`, `otel-collector`, `ssh` |
+| **OpenClaw** | `ollama`, `openclaw`, `docker`, `otel-collector`, `check-esxi-snap`, `ssh` |
+
+Each unit is shipped under its own `resource['service.name']` (e.g. `ollama`,
+`hermes-discord`), so `list_services`, `logs_for_service`, and `search` can
+filter by the actual service rather than the forwarding mechanism.
+
 ---
 
 ## Role lanes
