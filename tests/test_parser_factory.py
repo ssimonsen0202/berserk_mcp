@@ -1056,6 +1056,91 @@ class WorkerCliTest(ParserFactoryTestBase):
         queue = bm.load_json_list(bm.DISCOVERY_QUEUE_PATH)
         self.assertEqual(queue[0]["status"], "needs_human")
 
+    # ---- run_worker_pass Discord alert wiring ----
+    def _discord_alert_server(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        received = []
+
+        class AlertHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                received.append(json.loads(self.rfile.read(length).decode("utf-8"))["text"])
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), AlertHandler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server, port, received
+
+    def test_run_worker_pass_skips_alert_when_nothing_noteworthy(self):
+        server, port, received = self._discord_alert_server()
+        orig_url, orig_secret = bm.DISCORD_ALERT_URL, bm.DISCORD_ALERT_SECRET
+        bm.DISCORD_ALERT_URL = f"http://127.0.0.1:{port}/alert"
+        bm.DISCORD_ALERT_SECRET = "s3cr3t"
+        try:
+            self.responses["by service=tostring(resource['service.name'])"] = (
+                "service total\nknown 5\n", False)
+            self.responses["summarize samples=count() by metric_name"] = (
+                "metric_name samples\n", False)
+            bm.run_worker_pass(auto_queue=False, max_jobs=1, check_drift=False)  # seed baseline
+            received.clear()
+            bm.run_worker_pass(auto_queue=False, max_jobs=1, check_drift=False)  # nothing new
+            self.assertEqual(received, [])
+        finally:
+            bm.DISCORD_ALERT_URL, bm.DISCORD_ALERT_SECRET = orig_url, orig_secret
+            server.shutdown()
+            server.server_close()
+
+    def test_run_worker_pass_posts_alert_when_new_source_found(self):
+        server, port, received = self._discord_alert_server()
+        orig_url, orig_secret = bm.DISCORD_ALERT_URL, bm.DISCORD_ALERT_SECRET
+        bm.DISCORD_ALERT_URL = f"http://127.0.0.1:{port}/alert"
+        bm.DISCORD_ALERT_SECRET = "s3cr3t"
+        try:
+            self.responses["by service=tostring(resource['service.name'])"] = (
+                "service total\n", False)
+            self.responses["summarize samples=count() by metric_name"] = (
+                "metric_name samples\n", False)
+            bm.run_worker_pass(auto_queue=False, max_jobs=1, check_drift=False)  # seed empty baseline
+            received.clear()
+            self.responses["by service=tostring(resource['service.name'])"] = (
+                "service total\nnewsvc 5\n", False)
+            bm.run_worker_pass(auto_queue=False, max_jobs=1, check_drift=False)
+            self.assertEqual(len(received), 1)
+            self.assertIn("newsvc", received[0])
+        finally:
+            bm.DISCORD_ALERT_URL, bm.DISCORD_ALERT_SECRET = orig_url, orig_secret
+            server.shutdown()
+            server.server_close()
+
+    def test_run_worker_pass_drains_amendments_changelog(self):
+        server, port, received = self._discord_alert_server()
+        orig_url, orig_secret = bm.DISCORD_ALERT_URL, bm.DISCORD_ALERT_SECRET
+        bm.DISCORD_ALERT_URL = f"http://127.0.0.1:{port}/alert"
+        bm.DISCORD_ALERT_SECRET = "s3cr3t"
+        try:
+            amendments_path = Path(bm.LEARNED_PATH).parent / "amendments_log.json"
+            bm.save_json_list(amendments_path, [
+                {"name": "q1", "description": "d1", "action": "created"},
+            ])
+            self.responses["by service=tostring(resource['service.name'])"] = (
+                "service total\nknown 5\n", False)
+            self.responses["summarize samples=count() by metric_name"] = (
+                "metric_name samples\n", False)
+            bm.run_worker_pass(auto_queue=False, max_jobs=1, check_drift=False)
+            self.assertEqual(bm.load_json_list(amendments_path), [])
+            self.assertTrue(any("q1" in text for text in received))
+        finally:
+            bm.DISCORD_ALERT_URL, bm.DISCORD_ALERT_SECRET = orig_url, orig_secret
+            server.shutdown()
+            server.server_close()
+
 
 # ---------- P7: security posture ----------
 class SecurityTest(ParserFactoryTestBase):

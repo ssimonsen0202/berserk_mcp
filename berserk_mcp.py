@@ -45,6 +45,8 @@ import re
 import os
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -97,6 +99,16 @@ REDACT_PII_TYPES = frozenset(
     for item in os.environ.get("BERSERK_MCP_REDACT_PII", "").split(",")
     if item.strip().lower() in secret_scan.ALL_PII_TYPES
 )
+
+# Discord alert bridge (--worker cron mode only; see run_worker_pass). Off by
+# default -- only active if BERSERK_DISCORD_ALERT_SECRET is set. Posts to a
+# local HTTP bridge (loopback by default, matching the same
+# BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE opt-in convention as the LLM endpoint)
+# rather than talking to Discord's API directly, so no Discord token or
+# webhook secret needs to live in this process.
+DISCORD_ALERT_URL = os.environ.get("BERSERK_DISCORD_ALERT_URL", "http://127.0.0.1:8765/alert")
+DISCORD_ALERT_SECRET = os.environ.get("BERSERK_DISCORD_ALERT_SECRET", "")
+DISCORD_ALERT_MAX_CHARS = 3800  # two bridge-side 1900-char chunks' worth
 
 
 class StorePathError(ValueError):
@@ -1774,10 +1786,83 @@ def main():
     _serve_mcp()
 
 
+def _post_discord_alert(text):
+    """POST a text alert to the local Discord bridge (see
+    DISCORD_ALERT_URL/_SECRET above). No-ops silently if the secret isn't
+    configured -- this is an opt-in feature for the --worker cron path,
+    never a requirement. Never raises: a failed or unconfigured alert must
+    never affect the worker pass's own exit code or job outcomes.
+
+    Returns True on a confirmed post, False otherwise (unconfigured,
+    validation failure, network error, or a non-2xx bridge response).
+    """
+    if not DISCORD_ALERT_SECRET:
+        return False
+    text = str(text or "").strip()
+    if not text:
+        return False
+    try:
+        parser_factory._validate_llm_url(DISCORD_ALERT_URL)
+    except parser_factory.LlmUrlError as e:
+        log(f"discord alert: endpoint rejected: {e}")
+        return False
+    payload = json.dumps({"text": text[:DISCORD_ALERT_MAX_CHARS]}).encode("utf-8")
+    req = urllib.request.Request(
+        DISCORD_ALERT_URL, data=payload, method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-Auth-Token": DISCORD_ALERT_SECRET,
+        },
+    )
+    try:
+        with parser_factory._NO_REDIRECT_OPENER.open(req, timeout=10) as resp:
+            return 200 <= resp.status < 300
+    except urllib.error.HTTPError as e:
+        log(f"discord alert: bridge returned HTTP {e.code}")
+        return False
+    except Exception as e:
+        log(f"discord alert failed: {type(e).__name__}")
+        return False
+
+
+_AMENDMENT_EMOJI = {"generated": "\U0001F916", "updated": "✏️", "created": "✨"}
+
+
+def _drain_amendments_changelog():
+    """Read amendments_log.json, format a Discord changelog line per entry
+    (emoji keyed by action -- generated/updated/created), and clear the
+    log ONLY if the alert bridge confirms the post. If Discord isn't
+    configured, or the post fails, the log is left intact so the next
+    drain run picks up the same entries rather than losing the audit
+    trail (the log is already capped at 1000 entries elsewhere, so
+    leaving it undrained indefinitely is bounded, not unbounded growth).
+
+    Returns the formatted changelog text, or "" if there was nothing to
+    report.
+    """
+    amendments_path = Path(LEARNED_PATH).parent / "amendments_log.json"
+    with _FileLock(amendments_path):
+        amendments = load_json_list(amendments_path)
+        if not amendments:
+            return ""
+        lines = ["**Query changelog:**"]
+        for entry in amendments:
+            emoji = _AMENDMENT_EMOJI.get(entry.get("action"), "•")
+            name = entry.get("name", "?")
+            desc = entry.get("description", "")
+            lines.append(f"{emoji} `{name}` — {desc}")
+        text = "\n".join(lines)
+        if _post_discord_alert(text):
+            save_json_list(amendments_path, [])
+        return text
+
+
 def run_worker_pass(auto_queue=False, max_jobs=3, check_drift=False):
     """One headless pass for cron/systemd: detect new sources, optionally
     queue them, then drain up to max_jobs pending discovery jobs. Prints a
-    summary to stdout. Returns an exit code: 1 if any drained job ended
+    summary to stdout, and -- if BERSERK_DISCORD_ALERT_SECRET is
+    configured -- posts a job summary and a query changelog to the
+    Discord alert bridge. Returns an exit code: 1 if any drained job ended
     needs_human, else 0. No loop, no daemon -- the caller (cron) owns the
     schedule.
     """
@@ -1789,11 +1874,22 @@ def run_worker_pass(auto_queue=False, max_jobs=3, check_drift=False):
     print(detect_summary)
 
     outcomes, any_needs_human = _drain_pending_jobs(max_jobs)
+    summary_lines = [detect_summary]
     if outcomes is None:
         print("No pending discovery jobs.")
-        return 0
-    for line in outcomes:
-        print(line)
+    else:
+        for line in outcomes:
+            print(line)
+        summary_lines.extend(outcomes)
+
+    # Only alert when there's something noteworthy -- a bare "No new
+    # sources." with nothing drained would be daily noise for an operator
+    # who wired up the Discord bridge.
+    if outcomes or not detect_summary.startswith("No new sources"):
+        _post_discord_alert("\n".join(summary_lines))
+
+    _drain_amendments_changelog()
+
     return 1 if any_needs_human else 0
 
 

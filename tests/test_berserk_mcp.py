@@ -547,6 +547,198 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertNotIn("q0", [it["name"] for it in items])
         self.assertIn("one_more", [it["name"] for it in items])
 
+    # ---- Discord alert bridge (--worker cron path) ----
+    def _with_discord_config(self, url=None, secret=None):
+        orig_url, orig_secret = bm.DISCORD_ALERT_URL, bm.DISCORD_ALERT_SECRET
+        bm.DISCORD_ALERT_URL = url if url is not None else orig_url
+        bm.DISCORD_ALERT_SECRET = secret if secret is not None else ""
+        return orig_url, orig_secret
+
+    def test_post_discord_alert_noops_when_unconfigured(self):
+        orig_url, orig_secret = self._with_discord_config(secret="")
+        try:
+            self.assertFalse(bm._post_discord_alert("hello"))
+        finally:
+            bm.DISCORD_ALERT_URL, bm.DISCORD_ALERT_SECRET = orig_url, orig_secret
+
+    def test_post_discord_alert_noops_on_empty_text(self):
+        orig_url, orig_secret = self._with_discord_config(secret="s3cr3t")
+        try:
+            self.assertFalse(bm._post_discord_alert(""))
+            self.assertFalse(bm._post_discord_alert("   "))
+        finally:
+            bm.DISCORD_ALERT_URL, bm.DISCORD_ALERT_SECRET = orig_url, orig_secret
+
+    def test_post_discord_alert_sends_correct_shape_and_succeeds(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        received = []
+
+        class AlertHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length)
+                received.append({
+                    "auth": self.headers.get("X-Auth-Token"),
+                    "content_type": self.headers.get("Content-Type"),
+                    "body": json.loads(body.decode("utf-8")),
+                })
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), AlertHandler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        orig_url, orig_secret = self._with_discord_config(
+            url=f"http://127.0.0.1:{port}/alert", secret="s3cr3t-token")
+        try:
+            ok = bm._post_discord_alert("job summary text")
+            self.assertTrue(ok)
+            self.assertEqual(len(received), 1)
+            self.assertEqual(received[0]["auth"], "s3cr3t-token")
+            self.assertEqual(received[0]["body"], {"text": "job summary text"})
+        finally:
+            bm.DISCORD_ALERT_URL, bm.DISCORD_ALERT_SECRET = orig_url, orig_secret
+            server.shutdown()
+            server.server_close()
+
+    def test_post_discord_alert_truncates_oversized_text(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        received = []
+
+        class AlertHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                received.append(body["text"])
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), AlertHandler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        orig_url, orig_secret = self._with_discord_config(
+            url=f"http://127.0.0.1:{port}/alert", secret="s3cr3t")
+        try:
+            huge = "x" * (bm.DISCORD_ALERT_MAX_CHARS + 500)
+            bm._post_discord_alert(huge)
+            self.assertLessEqual(len(received[0]), bm.DISCORD_ALERT_MAX_CHARS)
+        finally:
+            bm.DISCORD_ALERT_URL, bm.DISCORD_ALERT_SECRET = orig_url, orig_secret
+            server.shutdown()
+            server.server_close()
+
+    def test_post_discord_alert_returns_false_on_bridge_error_never_raises(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class FailHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(b"internal error")
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), FailHandler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        orig_url, orig_secret = self._with_discord_config(
+            url=f"http://127.0.0.1:{port}/alert", secret="s3cr3t")
+        try:
+            ok = bm._post_discord_alert("hello")
+            self.assertFalse(ok)
+        finally:
+            bm.DISCORD_ALERT_URL, bm.DISCORD_ALERT_SECRET = orig_url, orig_secret
+            server.shutdown()
+            server.server_close()
+
+    def test_post_discord_alert_rejects_non_loopback_without_optin(self):
+        orig_url, orig_secret = self._with_discord_config(
+            url="http://198.51.100.1:8765/alert", secret="s3cr3t")
+        orig_optin = os.environ.pop("BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE", None)
+        try:
+            ok = bm._post_discord_alert("hello")
+            self.assertFalse(ok)
+        finally:
+            bm.DISCORD_ALERT_URL, bm.DISCORD_ALERT_SECRET = orig_url, orig_secret
+            if orig_optin is not None:
+                os.environ["BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE"] = orig_optin
+
+    def test_drain_amendments_changelog_clears_log_on_successful_post(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        received = []
+
+        class AlertHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                received.append(json.loads(self.rfile.read(length).decode("utf-8"))["text"])
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), AlertHandler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        orig_url, orig_secret = self._with_discord_config(
+            url=f"http://127.0.0.1:{port}/alert", secret="s3cr3t")
+        try:
+            amendments_path = Path(bm.LEARNED_PATH).parent / "amendments_log.json"
+            bm.save_json_list(amendments_path, [
+                {"name": "q1", "description": "d1", "action": "created"},
+                {"name": "q2", "description": "d2", "action": "updated"},
+                {"name": "q3", "description": "d3", "action": "generated"},
+            ])
+            text = bm._drain_amendments_changelog()
+            self.assertIn("✨", text)
+            self.assertIn("✏️", text)
+            self.assertIn("\U0001F916", text)
+            self.assertEqual(len(received), 1)
+            self.assertEqual(bm.load_json_list(amendments_path), [])
+        finally:
+            bm.DISCORD_ALERT_URL, bm.DISCORD_ALERT_SECRET = orig_url, orig_secret
+            server.shutdown()
+            server.server_close()
+
+    def test_drain_amendments_changelog_keeps_log_when_post_fails(self):
+        orig_url, orig_secret = self._with_discord_config(secret="")  # unconfigured -> post fails
+        try:
+            amendments_path = Path(bm.LEARNED_PATH).parent / "amendments_log.json"
+            bm.save_json_list(amendments_path, [
+                {"name": "q1", "description": "d1", "action": "created"},
+            ])
+            bm._drain_amendments_changelog()
+            self.assertEqual(len(bm.load_json_list(amendments_path)), 1)
+        finally:
+            bm.DISCORD_ALERT_URL, bm.DISCORD_ALERT_SECRET = orig_url, orig_secret
+
+    def test_drain_amendments_changelog_empty_log_is_noop(self):
+        orig_url, orig_secret = self._with_discord_config(secret="s3cr3t")
+        try:
+            amendments_path = Path(bm.LEARNED_PATH).parent / "amendments_log.json"
+            bm.save_json_list(amendments_path, [])
+            text = bm._drain_amendments_changelog()
+            self.assertEqual(text, "")
+        finally:
+            bm.DISCORD_ALERT_URL, bm.DISCORD_ALERT_SECRET = orig_url, orig_secret
+
     # ---- F-007: concurrency-safe store writes ----
     def test_file_lock_provides_mutual_exclusion(self):
         """Two threads racing for the same lock must never both be

@@ -87,7 +87,7 @@ replace any of it — it sits next to it and adds the agent-facing surface. Conc
 | **Custom-query persistence** as named, reusable tools | UI has a Query Library, but Berserk documents no API or CLI verb to create, list, or share a saved query programmatically | ✅ `save_query` (verify-before-persist) → `run_saved`, agent-readable |
 | **Automated source onboarding** | — | ✅ `request_discovery` → worker → saved query, no KQL authoring needed |
 | **LLM parser factory** — detect a new source, auto-author + verify a KQL query pack | — | ✅ `detect_new_sources` · `generate_parser` · `run_discovery_worker` · `review_generated` (ASIM-agent-style; see [below](#parser-factory-llm-generated-query-packs)) |
-| **Query changelog / amendments log** | — | ✅ every `save_query` write tracked; worker posts Discord diff |
+| **Query changelog / amendments log** | — | ✅ every `save_query` write tracked; `--worker` posts a Discord diff if [alerting is configured](#configuring-discord-alerts) |
 | **Two-lane cost model** (cheap default · on-demand `@deep`) | — | ✅ tool descriptions + annotations make this safe |
 | **KQL-injection guards** on free-text inputs | n/a (humans) | ✅ service-name allowlist · `claude_search` reject-list |
 | **Trace/span analysis** — find slow/failed traces, reconstruct a span tree with correlated logs | — | ✅ `trace_find_slow` · `trace_find_errors` · `trace_analyze` (v1.14.0; see [Trace tools](#trace-tools-all-lanes)) |
@@ -482,24 +482,46 @@ REUSE    run_saved("sre_haproxy_service")        →  cheap model, free, forever
 (or `list_metrics`) to confirm the source is actually visible in Berserk. An unknown
 source is rejected with a clear error, so the queue never fills with phantom jobs.
 
-The **discover-worker** (`discover-worker.py`, runs as a daily cron) drains the queue:
+The **discover-worker** (`berserk-mcp --worker`, invoked from a daily cron entry — there is no separate `discover-worker.py` file) drains the queue:
 
 - Chooses the right KQL template per role (`sre` gets a health summary, `soc` gets an incident timeline, `claude` gets a health rollup, `metric` kind gets a drilldown aggregation)
 - Calls `save_query` to verify and persist the result
 - Updates `known_sources.json` so the same source is never re-queued
-- Posts a Discord summary of completed and failed jobs
+- If `BERSERK_DISCORD_ALERT_SECRET` is configured (see below), posts a summary of completed and failed jobs to Discord — skipped when there's nothing noteworthy (no new sources found and no jobs drained), so a quiet day doesn't generate a daily ping
 
 ### Stage 2: @deep amendments and improvements
 
 When a capable model (`@deep`, a scheduled agent, or an operator) improves or corrects
-an existing query via `save_query`, the server:
+an existing query via `save_query`, or the generation pipeline saves a new one, the server:
 
-1. Detects whether the query name already existed (`action=updated`) or is new (`action=created`)
+1. Tags the entry `action=generated` (pipeline-authored), `action=updated` (a human save to an existing name), or `action=created` (a human save to a new name)
 2. Appends a timestamped entry to `amendments_log.json` with the name, description, KQL preview, role, and action
-3. The worker reads and clears this log on the next drain run, posting a Discord changelog: `✏️` for updates, `✨` for new entries
+3. If Discord alerting is configured, the next `--worker` run reads and formats a changelog (🤖 generated, ✏️ updated, ✨ created) and clears the log **only if the post is confirmed** — a transient Discord outage leaves the entries intact for the next run rather than losing them
 
 This means **the query store is auditable** — every improvement made by an autonomous
-agent is surfaced in the team channel automatically, without any operator action.
+agent can be surfaced in a Discord channel automatically, without any operator action,
+once Discord alerting is configured.
+
+#### Configuring Discord alerts
+
+berserk-mcp doesn't talk to Discord's API directly — no bot token or webhook
+secret lives in this process. Instead it posts to a small local HTTP bridge
+(loopback by default) that already knows how to reach your Discord channel:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BERSERK_DISCORD_ALERT_URL` | `http://127.0.0.1:8765/alert` | The bridge's alert endpoint. |
+| `BERSERK_DISCORD_ALERT_SECRET` | unset | Shared secret sent as `X-Auth-Token`. **Alerting is entirely off unless this is set** — no default secret, no silent posting. |
+
+The bridge must accept `POST <url>` with header `X-Auth-Token: <secret>` and
+JSON body `{"text": "..."}`, returning 2xx on success. If the bridge runs on
+a different host than berserk-mcp's `--worker` cron job, the same
+loopback-only-by-default policy as the LLM endpoint applies — set
+`BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE=1` to allow a non-loopback `http://` URL,
+or point at an `https://` bridge instead. Alerts are only sent from the
+headless `--worker` CLI path — interactive MCP tool calls (e.g.
+`run_discovery_worker`) already surface their result directly to the caller
+and never post to Discord, avoiding duplicate/noisy notifications.
 
 The intended division of labour (cost-efficient):
 
