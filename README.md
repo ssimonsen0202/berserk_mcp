@@ -281,28 +281,15 @@ Version 1.14.0 adds distributed-trace analysis, ported from a separate
 TypeScript MCP prototype (`ssn-bzrk`) that explored the same problem space.
 The field names were originally a guess by analogy with this table's
 `<signal>_name` convention (`metric_name` for metrics, `body`/`severity_text`
-for logs), written while the Berserk query gateway happened to be unreachable
-from every vantage point available.
+for logs).
 
-**That outage turned out to be real, not a network fluke**: the Docker-Compose
-Berserk deployment being tested against had been fully down for ~25 hours.
-`nursery`'s container memory limit was too tight for its real working set,
-several OOM-kills crash-looped it, and the whole stack was stopped shortly
-after and never restarted. Root-caused via `docker inspect`/kernel OOM log
-entries, fixed by roughly doubling the memory limit to match observed usage,
-and the stack was brought back up clean. If your own self-hosted Berserk goes
-quiet, `docker inspect <container> --format '{{.State.OOMKilled}}'` plus
-`journalctl -k | grep -i oom` is the fast way to tell an OOM crash-loop apart
-from a network/auth issue.
-
-**With the cluster back, these three tools were live-verified the same way
-every SRE/SOC tool below was** (see
-[Live-verified, not just unit-tested](#live-verified-not-just-unit-tested)).
-All six guessed field names were confirmed correct on the first try — this
-cluster does ingest real trace/span data (Berserk's own internal services are
-self-instrumented; `service=query`, `service=gateway`, `service=ingest` spans
-are what's actually flowing). Two real bugs surfaced by the live run, both
-fixed in the current release:
+These tools were then live-verified the same way every SRE/SOC tool below was
+(see [Live-verified, not just unit-tested](#live-verified-not-just-unit-tested))
+against a real Berserk cluster whose own internal services are
+self-instrumented — `service=query`, `service=gateway`, `service=ingest`
+spans are real trace/span data, not synthetic test fixtures. All six guessed
+field names were confirmed correct on the first try. Two real bugs surfaced
+by the live run, both fixed in the current release:
 
 1. **`duration` is a *dynamic*-typed column** — Berserk's KQL engine rejects
    `sort by duration` directly ("Cannot sort by a dynamic value"). Fixed with
@@ -1057,8 +1044,7 @@ deployment — and that process caught two real bugs unit tests alone couldn't s
 The `trace_*` tools (v1.14.0) went through the same process and caught two
 more real bugs — a `sort by` on a dynamic-typed column, and a wrong sort key
 giving child-before-parent span ordering. See [Trace tools](#trace-tools-all-lanes)
-above for the full writeup, including the stack outage that was blocking
-verification when these tools were first written.
+above for the full writeup.
 
 The `claude_token_burn`/`claude_loop_check`/`claude_model_fit` trio (v1.14.1)
 turned up an even bigger one: a JSON-shape mismatch meant all three had been
