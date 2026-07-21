@@ -195,7 +195,31 @@ def _safe_resource_keys(raw_lines_text):
 # services, so an empty/partial baseline against a large cluster can never flood
 # the queue. Internal metrics are never auto-queued at all (they are infra the
 # assistant does not query per-metric). Override via env for a bulk backfill.
-MAX_AUTOQUEUE_PER_RUN = int(os.environ.get("BERSERK_MAX_AUTOQUEUE", "5"))
+#
+# The value bounds a list slice (`to_queue[:MAX_AUTOQUEUE_PER_RUN]`) further
+# down in detect_new_sources. A negative value doesn't error there -- Python
+# slicing silently reinterprets list[:-N] as "all but the last N", which
+# queues NEARLY EVERYTHING instead of capping it, defeating the whole point
+# of this flood-control constant. An absurdly large value has the same
+# effect from the other direction (the slice just returns everything).
+# Clamped here so out-of-range input can't silently invert the safety net:
+# negative -> 0 (queue nothing, the safe extreme), unparseable -> the
+# documented default, huge -> capped at a hard ceiling.
+_MAX_AUTOQUEUE_CEILING = 500
+
+
+def _parse_max_autoqueue():
+    raw = os.environ.get("BERSERK_MAX_AUTOQUEUE", "5")
+    try:
+        value = int(raw)
+    except ValueError:
+        return 5
+    if value < 0:
+        return 0
+    return min(value, _MAX_AUTOQUEUE_CEILING)
+
+
+MAX_AUTOQUEUE_PER_RUN = _parse_max_autoqueue()
 
 
 # ---------- dict-store helpers (mirror berserk_mcp's list-store helpers) ----------
@@ -997,6 +1021,15 @@ def _count_result_is_zero(text):
 
 
 def _parse_generated_reply(text, source):
+    if not isinstance(text, str):
+        # A provider whose response shape doesn't put plain text at
+        # choices[0].message.content / content[0].text (e.g. a tool-call-only
+        # reply, or content: null) would otherwise crash _strip_fences's
+        # unconditional .strip() with an unhandled AttributeError -- which
+        # propagates uncaught through generate_parser_for and can terminate
+        # the whole worker loop instead of producing one controlled failure
+        # for this job.
+        return None, f"provider returned non-string content ({type(text).__name__})"
     stripped = _strip_fences(text)
     try:
         data = json.loads(stripped)
@@ -1081,6 +1114,17 @@ def validate_generated_query(q):
         return False, f"invalid KQL: must start with '{_table} | ...'", None
 
     stripped = _strip_kql_literals(kql)
+
+    # Lower-severity finding: whether Berserk's backend actually executes
+    # semicolon-separated multi-statement KQL can't be verified without an
+    # authenticated live check. Reject unconditionally -- including inside
+    # a quoted string literal -- rather than assume any placement is safe.
+    # Checked against the RAW kql (not the literal-stripped text used for
+    # the take-clause check below): the whole point is "no semicolons,
+    # full stop," not just "no semicolon acting as a statement separator."
+    if ";" in kql:
+        return False, "semicolons are not allowed in generated KQL", None
+
     take_match = _TAKE_RE.search(stripped)
     if not take_match:
         return False, "generated query must end with '| take N' (1..50)", None

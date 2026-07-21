@@ -564,6 +564,39 @@ class DetectNewSourcesTest(ParserFactoryTestBase):
             active_role=kw.pop("active_role", "all"),
         )
 
+    # ---- lower-severity: BERSERK_MAX_AUTOQUEUE clamping ----
+    def _with_max_autoqueue_env(self, value):
+        orig = os.environ.get("BERSERK_MAX_AUTOQUEUE")
+        if value is None:
+            os.environ.pop("BERSERK_MAX_AUTOQUEUE", None)
+        else:
+            os.environ["BERSERK_MAX_AUTOQUEUE"] = value
+        try:
+            return pf._parse_max_autoqueue()
+        finally:
+            if orig is None:
+                os.environ.pop("BERSERK_MAX_AUTOQUEUE", None)
+            else:
+                os.environ["BERSERK_MAX_AUTOQUEUE"] = orig
+
+    def test_negative_autoqueue_clamps_to_zero_not_inverted_slice(self):
+        """A negative cap must never reach list[:N] -- Python reinterprets
+        list[:-1] as 'all but the last one', which would queue nearly
+        everything instead of nothing, inverting the flood-control
+        invariant this constant exists to enforce."""
+        self.assertEqual(self._with_max_autoqueue_env("-1"), 0)
+        self.assertEqual(self._with_max_autoqueue_env("-500"), 0)
+
+    def test_huge_autoqueue_clamps_to_ceiling(self):
+        self.assertEqual(self._with_max_autoqueue_env("999999999"), pf._MAX_AUTOQUEUE_CEILING)
+
+    def test_unparseable_autoqueue_falls_back_to_documented_default(self):
+        self.assertEqual(self._with_max_autoqueue_env("not-a-number"), 5)
+
+    def test_valid_autoqueue_value_passes_through_unchanged(self):
+        self.assertEqual(self._with_max_autoqueue_env("10"), 10)
+        self.assertEqual(self._with_max_autoqueue_env(None), 5)  # documented default
+
     def test_first_run_initializes_baseline_no_queue(self):
         self.responses["by service=tostring(resource['service.name'])"] = (
             "service total\nsvcA 5\nsvcB 3\n", False)
@@ -868,6 +901,36 @@ class GenerationPipelineTest(ParserFactoryTestBase):
         ok, err, _ = pf.validate_generated_query(q)
         self.assertTrue(ok, err)
 
+    # ---- lower-severity: semicolons rejected unconditionally ----
+    def test_semicolon_in_query_is_rejected(self):
+        q = {"name": "n", "description": "d",
+             "kql": f"{bm.TABLE} | take 1; {bm.TABLE} | take 999",
+             "since": "1h ago"}
+        ok, err, _ = pf.validate_generated_query(q)
+        self.assertFalse(ok)
+        self.assertIn("semicolon", err.lower())
+
+    def test_semicolon_inside_quoted_string_is_still_rejected(self):
+        """Even a 'legitimate' semicolon inside a string literal is
+        rejected -- the policy is unconditional, not just for bare
+        statement-separator semicolons, since Berserk's real handling of
+        the character can't be verified without a live authenticated
+        check."""
+        q = {"name": "n", "description": "d",
+             "kql": f"{bm.TABLE} | where body contains 'a;b' | take 1",
+             "since": "1h ago"}
+        ok, err, _ = pf.validate_generated_query(q)
+        self.assertFalse(ok)
+        self.assertIn("semicolon", err.lower())
+
+    def test_query_without_semicolon_is_unaffected(self):
+        self.default_response = ("row\nval", False)
+        q = {"name": "n", "description": "d",
+             "kql": f"{bm.TABLE} | take 1",
+             "since": "1h ago"}
+        ok, err, _ = pf.validate_generated_query(q)
+        self.assertTrue(ok, err)
+
     def test_fenced_reply_parses(self):
         os.environ["BERSERK_LLM_LADDER"] = "hermes"
         os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
@@ -881,6 +944,31 @@ class GenerationPipelineTest(ParserFactoryTestBase):
 
         report, ok = pf.generate_parser_for({"source": "x", "kind": "service", "role_hint": ""})
         self.assertTrue(ok, report)
+
+    # ---- lower-severity: non-string provider content must not crash ----
+    def test_non_string_content_produces_controlled_error_not_a_crash(self):
+        """A provider can legitimately return content: null for a tool-
+        call-only reply (no exception raised inside llm_complete -- the
+        key exists, its value just isn't text). _parse_generated_reply
+        previously called _strip_fences(None), an unhandled AttributeError
+        that would propagate uncaught through generate_parser_for."""
+        os.environ["BERSERK_LLM_LADDER"] = "hermes"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        self._stub_profile_responses()
+        self.llm_responses = [
+            ({"choices": [{"message": {"content": None}}]}, None)
+            for _ in range(pf.MAX_TOTAL_ATTEMPTS)
+        ]
+        report, ok = pf.generate_parser_for({"source": "x", "kind": "service", "role_hint": ""})
+        self.assertFalse(ok)
+        self.assertEqual(report["status"], "needs_human")
+
+    def test_parse_generated_reply_rejects_every_non_string_type_directly(self):
+        for bad in (None, 42, 3.14, [], {}, True):
+            queries, err = pf._parse_generated_reply(bad, "x")
+            self.assertIsNone(queries)
+            self.assertIn("non-string content", err)
+            self.assertIn(type(bad).__name__, err)
 
     # ---- F-005: one total-attempt budget across the WHOLE ladder ----
     def test_total_attempt_budget_across_ladder_is_capped(self):
