@@ -55,3 +55,4 @@ docs/claude-precommit-checklist-2026-07.md
 # Scanner scratch output and in-flight review notes
 scratchpad_out/
 fix-review-primer.md
+static_analysis_semgrep_1/
