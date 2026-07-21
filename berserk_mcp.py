@@ -181,7 +181,12 @@ _BASE_INSTRUCTIONS = (
     "per-container metrics (top_cpu, top_memory) are different — pick by what's asked. "
     "Every query tool takes an optional `since` like '15m ago' or '2h ago'. For a "
     "recurring custom question, get it working with `search`, then `save_query` so it "
-    "can be re-run deterministically with `run_saved`."
+    "can be re-run deterministically with `run_saved`. If you do use `search`: fields "
+    "are nested resource/log attributes, not flat columns — resource['service.name'], "
+    "resource['host.name'], attributes['systemd.unit'], etc. A bare column name like "
+    "service_name is not an error, it just silently matches zero rows — if a query you "
+    "expect to match returns nothing, suspect the field access before assuming no data "
+    "exists, and call discover_schema to check the real shape rather than guessing again."
 )
 _ROLE_PREFIX = {
     "sre": "You are in the SRE lane; focus on reliability, headroom, saturation, error rates, and rollback signals. ",
@@ -1006,7 +1011,7 @@ TOOLS = [
     {"name": "list_metrics", "description": "List every metric name currently being ingested, with sample counts + last-seen. Use to DISCOVER what telemetry exists before writing a `search` query.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "bzrk_query_perf", "description": "Berserk query engine latency percentiles: p50, p95, p99 in µs. Use for 'how fast is Berserk?', 'query latency', or 'p50/p95/p99 execution time'. Uses otel_histogram_percentile($raw, N) — the native Berserk histogram aggregate.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "discover_schema", "description": "Discover the shape of a data source: returns (1) every key present under `resource` with row counts, AND (2) a small sample of real rows so you can read the actual values. Use to learn an unknown or newly-ingested source before querying it. Optional `service` filter. Pair with list_services / list_metrics. Once you work out a query with `search`, persist it with save_query so it becomes reusable.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "optional: limit to one service.name"}}, **_since())}},
-    {"name": "search", "description": "Run an arbitrary Kusto/KQL query against the Berserk table. Use when the other tools do not fit; once it works, persist it with save_query.", "inputSchema": {"type": "object", "properties": dict({"kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'"}}, **_since()), "required": ["kql"]}},
+    {"name": "search", "description": "Run an arbitrary Kusto/KQL query against the Berserk table. Use when the other tools do not fit; once it works, persist it with save_query. Fields are nested OTLP resource/log attributes, NOT flat columns — access as resource['service.name'], resource['host.name'], attributes['systemd.unit'], etc. (bare service_name/host_name do not exist and silently match zero rows instead of erroring). If you don't already know the exact field names for this source, call discover_schema first instead of guessing.", "inputSchema": {"type": "object", "properties": dict({"kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'. Field access is resource['key'] / attributes['key'], never a bare column name."}}, **_since()), "required": ["kql"]}},
     # --- Trace tools (span-level latency/error triage; UNVERIFIED field names — see the
     # comment above Q_TRACE_FIND_SLOW. Descriptions below flag this to the model too.) ---
     {"name": "trace_find_slow", "description": "Find the highest-duration root spans in the time window. Use for 'what's slow', 'find the slowest requests', or as the entry point before trace_analyze.", "inputSchema": {"type": "object", "properties": _since()}},

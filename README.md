@@ -262,7 +262,7 @@ expected to route from the tool descriptions directly.
 | `list_metrics` | Every metric name being ingested, with counts (discovery). |
 | `discover_schema` | Sample rows to learn an unknown source's `resource`/`attributes` shape. |
 | `bzrk_query_perf` | Berserk query engine latency percentiles (p50/p95/p99 in µs). |
-| `search` | Run arbitrary KQL (escape hatch; `save_query` the result once it works). |
+| `search` | Run arbitrary KQL (escape hatch; `save_query` the result once it works). Fields are nested `resource`/`attributes`, not flat columns — e.g. `resource['service.name']`, not `service_name`. Call `discover_schema` first if you don't already know the field names for a source; a wrong field name matches zero rows instead of erroring. |
 
 Every query tool takes an optional `since` argument (`"15m ago"`, `"1h ago"`,
 `"2d ago"`, …) with a sensible per-tool default.
@@ -705,13 +705,13 @@ Is api-gateway healthy? What's the error rate and when was it last seen?
 > log/metric split, and last-seen timestamp in one round trip. If error count is high,
 > the primer's threshold guidance nudges the model to follow up with `sre_top_error_messages`.
 
-### SOC investigation: "what happened on journal-forwarder?" (SOC lane)
+### SOC investigation: "what happened on otel-collector?" (SOC lane)
 
 ```
-Reconstruct what happened with journal-forwarder over the last 2 hours.
+Reconstruct what happened with otel-collector over the last 2 hours.
 ```
 
-> Calls `soc_timeline(service="journal-forwarder", since="2h ago")`. Returns timestamped
+> Calls `soc_timeline(service="otel-collector", since="2h ago")`. Returns timestamped
 > events with severity, metric names, and message snippets ordered newest-first —
 > a ready-made incident narrative without any KQL authoring.
 
@@ -863,7 +863,7 @@ Parser-factory (LLM parser generation) has its own env vars — see
 ## Connect it to a client
 
 **Compatibility.** berserk-mcp implements MCP protocol version `2025-06-18`
-as a stdio server (newline-delimited JSON-RPC 2.0). All 47 registered
+as a stdio server (newline-delimited JSON-RPC 2.0). All 50 registered
 tools appear in the `tools/list` handshake and can be invoked via
 `tools/call`. The stdio handshake path — including all required
 lifecycle methods (`initialize`, `notifications/initialized`, `ping`,
@@ -929,6 +929,19 @@ BERSERK_MCP_ROLE=sre claude mcp add berserk-q -- berserk-mcp
 
 Launch `berserk-mcp` (or `python berserk_mcp.py`) as a stdio MCP server. It speaks
 newline-delimited JSON-RPC 2.0 over stdio, MCP protocol version 2025-06-18.
+
+### Auditing tool calls from an agent-framework client
+
+Some MCP hosts — e.g. an agent framework named "Hermes" (unrelated to this
+repo's own `BERSERK_LLM_HERMES_URL`/`HERMES_API_KEY` provider settings above,
+which is *berserk-mcp's own* upstream chat-completions client for generation,
+not an MCP host) — keep a full per-run session transcript
+on disk, including every tool call's arguments and result. `scripts/hermes_tool_call_log.py`
+walks that transcript store and emits one full-fidelity JSON line per tool call
+(model, arguments, result — untruncated), filterable by MCP server name. Useful
+for confirming which model actually drove a tool call, or piping into `jq` for
+ad-hoc auditing, without needing berserk-mcp itself to know the caller's model
+identity (which MCP's stdio transport doesn't expose to the server).
 
 ## Choosing a model
 
