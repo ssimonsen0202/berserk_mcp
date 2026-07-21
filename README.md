@@ -126,6 +126,37 @@ defense/air-gapped environments:
   redacted excerpts) — never raw values — and the endpoint URL is
   scheme-allowlisted and operator-controlled.
 
+#### Bridging Berserk's two use cases: AI Ops without leaving the sovereign boundary
+
+Berserk's own positioning splits into [AI Ops](https://www.bzrk.dev/use-cases/ai-ops/)
+("any MCP-aware agent can query your telemetry directly") and
+[Defence](https://www.bzrk.dev/use-cases/defense/) ("nothing leaves the trust
+boundary you control"). Taken separately, those pull in opposite directions —
+the AI Ops pitch assumes a capable model authoring KQL and reasoning over raw
+results, and a frontier model is itself an egress dependency the Defence pitch
+rules out. Berserk-the-engine solves this for the *data* (self-hosted, WORM
+storage, no foreign jurisdiction); it doesn't solve it for the *reasoning
+layer* on top of it.
+
+That's the gap this server closes. Because the model only ever picks a tool
+and a time window — it never authors KQL or sees raw values — a small,
+locally hosted open-weight model can drive the whole interaction reliably.
+The result is the AI Ops experience ("agents ask questions instead of humans
+reading dashboards") with the entire agent loop, not just the telemetry
+store, inside the sovereign boundary.
+
+This isn't hypothetical: a real deployment (a Discord-facing agent, "Hermes",
+answering on-call questions against a homelab Berserk instance) logs every
+tool call *and* every full prompt/reply back into Berserk itself — model
+name, redacted arguments, redacted results, session ID — as structured,
+queryable records. That's the same durable, back-testable "what did the
+agent actually do" record Berserk's AI Ops page highlights in its Ethira
+governance case study, running end-to-end against this MCP server rather
+than a bespoke integration. The `claude_*` tool family (`claude_cost_report`,
+`claude_token_burn`, `claude_workflow_insights`, …) is the same
+token-usage/BI story from that page, already implemented and already
+answering real queries.
+
 The target operating model is **two-tier local**: a small open-weight model
 handles the everyday calls (goal: ≥ 80% of interactions), escalating to a
 larger locally hosted open-weight model only for `@deep` work — parser
