@@ -44,6 +44,13 @@ _persist_learned_query = None  # callable(entry, action_source) -> log_entry dic
 _sanitize_name = None    # callable(name) -> str
 _redact = None  # mandatory callable(str) -> str; set by configure()
 
+# Schema is table-wide and changes much less often than source discovery runs.
+# Cache it briefly so profiling several sources in one worker pass does not
+# pay the same round trip repeatedly. Include the store directory so isolated
+# test fixtures and separately configured MCP instances do not share results.
+_schema_cache = {}
+SCHEMA_CACHE_TTL_SECONDS = 60
+
 KQL_IDIOMS = ""  # set by configure() once TABLE is known
 
 
@@ -75,6 +82,7 @@ def configure(bzrk_search, table, get_store_dir, ensure_private_dir, now_iso, lo
     _persist_learned_query = persist_learned_query
     _sanitize_name = sanitize_name
     _redact = redact
+    _schema_cache.clear()
     KQL_IDIOMS = _build_kql_idioms()
 
 
@@ -191,6 +199,34 @@ def _safe_resource_keys(raw_lines_text):
         if len(keys) >= MAX_RESOURCE_KEYS:
             break
     return keys
+
+
+def _sample_resource_keys(raw_text):
+    """Extract safe resource-key arrays from structural sample output.
+
+    Berserk's table renderer represents ``bag_keys(resource)`` as a compact
+    bracketed list. When it is visible, the separate keys/count query is
+    unnecessary; renderers that omit it still use the compatibility fallback.
+    """
+    keys = []
+    for bracketed in re.findall(r"\[([^\]]*)\]", str(raw_text or "")):
+        for token in re.findall(r"['\"]([^'\"]+)['\"]", bracketed):
+            if _RESOURCE_KEY_RE.match(token) and token not in keys:
+                keys.append(token)
+            if len(keys) >= MAX_RESOURCE_KEYS:
+                return keys
+    return keys
+
+
+def _cached_getschema(since):
+    cache_key = (str(_get_store_dir()), str(_table))
+    cached = _schema_cache.get(cache_key)
+    if cached and cached[1] > time.monotonic():
+        return cached[0], False
+    out, err = _bzrk_search(f"{_table} | getschema", since)
+    if not err:
+        _schema_cache[cache_key] = (out, time.monotonic() + SCHEMA_CACHE_TTL_SECONDS)
+    return out, err
 # Fail-safe: a single detect_new_sources pass auto-queues at most this many new
 # services, so an empty/partial baseline against a large cluster can never flood
 # the queue. Internal metrics are never auto-queued at all (they are infra the
@@ -690,6 +726,29 @@ def _q_discover_keys(source):
     )
 
 
+def _q_discover_keys_batch():
+    """Return all resource keys grouped by service in one scan."""
+    return (
+        f"{_table} | where isnotnull(resource) "
+        f"| project service=tostring(resource['service.name']), k=bag_keys(resource) "
+        f"| mv-expand k | summarize n=count() by service, key=tostring(k) "
+        f"| sort by service asc, key asc"
+    )
+
+
+def _parse_batch_resource_keys(raw_text):
+    """Parse plain table output from ``_q_discover_keys_batch``."""
+    grouped = {}
+    for line in str(raw_text or "").splitlines():
+        fields = line.strip().split()
+        if len(fields) < 3 or fields[0] in {"service", "key", "n"}:
+            continue
+        service, key = fields[0], fields[1]
+        if re.match(r"^[A-Za-z0-9._-]+$", service) and _RESOURCE_KEY_RE.match(key):
+            grouped.setdefault(service, set()).add(key)
+    return grouped
+
+
 def _q_discover_sample(source):
     return (
         f"{_table} | where resource['service.name'] == '{source}' | take 6 "
@@ -722,16 +781,13 @@ def build_source_profile(source, kind, since):
     errors = []
 
     if kind == "service":
-        keys_out, keys_err = _bzrk_search(_q_discover_keys(source), since)
-        if keys_err:
-            errors.append(f"keys: {_safe_diag_text(keys_out)}")
-        else:
-            parts["resource_keys_raw"] = keys_out
-
         sample_out, sample_err = _bzrk_search(_q_discover_sample(source), since)
         if sample_err:
             errors.append(f"sample: {_safe_diag_text(sample_out)}")
         else:
+            sample_keys = _sample_resource_keys(sample_out)
+            if sample_keys:
+                parts["resource_keys"] = sample_keys
             # SEC-001: this is real telemetry row content -- the one field
             # in this profile most likely to carry an actual credential or
             # PII, since discover_sample projects raw resource/attributes/
@@ -741,6 +797,16 @@ def build_source_profile(source, kind, since):
                 parts["sample_excerpt"] = _safe_excerpt(sample_out, SAMPLE_EXCERPT_CAP)
             except (RuntimeError, TypeError) as exc:
                 return None, f"redaction failed for sample: {type(exc).__name__}"
+
+        # Older/alternate renderers may not display the bag-key array. Keep
+        # the compact keys query as a compatibility fallback, but do not pay
+        # for it when the structural sample already answered the question.
+        if "resource_keys" not in parts:
+            keys_out, keys_err = _bzrk_search(_q_discover_keys(source), since)
+            if keys_err:
+                errors.append(f"keys: {_safe_diag_text(keys_out)}")
+            else:
+                parts["resource_keys_raw"] = keys_out
     else:
         sample_out, sample_err = _bzrk_search(_q_metric_sample(source), since)
         if sample_err:
@@ -751,7 +817,7 @@ def build_source_profile(source, kind, since):
             except (RuntimeError, TypeError) as exc:
                 return None, f"redaction failed for sample: {type(exc).__name__}"
 
-    schema_out, schema_err = _bzrk_search(f"{_table} | getschema", since)
+    schema_out, schema_err = _cached_getschema(since)
     if schema_err:
         errors.append(f"getschema: {_safe_diag_text(schema_out)}")
     else:
@@ -763,7 +829,9 @@ def build_source_profile(source, kind, since):
     if not parts:
         return None, "; ".join(errors) or "profiling failed: no data returned"
 
-    resource_keys = _safe_resource_keys(parts.get("resource_keys_raw", ""))
+    resource_keys = parts.get("resource_keys") or _safe_resource_keys(
+        parts.get("resource_keys_raw", "")
+    )
 
     profile = {
         "kind": kind,
@@ -897,21 +965,23 @@ def detect_new_sources(since="24h ago", auto_queue=False, check_drift=False,
         drifted_services = []
 
         if check_drift and not is_first_run and live_services is not None:
-            for svc in sorted(live_services & known_services):
-                keys_out, keys_err = _bzrk_search(_q_discover_keys(svc), since)
-                if keys_err:
-                    continue
-                keys = []
-                for line in keys_out.strip().splitlines():
-                    tokens = line.strip().split()
-                    if tokens and tokens[0] != "key":
-                        keys.append(tokens[0])
-                new_hash = _hash_keys(keys)
-                old_hash = baseline.get("services", {}).get(svc, {}).get("keys_hash")
-                if old_hash and old_hash != new_hash:
-                    drifted_services.append(svc)
-                if svc in baseline.get("services", {}):
-                    baseline["services"][svc]["keys_hash"] = new_hash
+            # One grouped scan replaces one round trip per known service.
+            keys_out, keys_err = _bzrk_search(_q_discover_keys_batch(), since)
+            if not keys_err:
+                grouped_keys = _parse_batch_resource_keys(keys_out)
+                # Compatibility with an older renderer/test double that
+                # returns the ungrouped `key n` shape even for the batch
+                # request. Apply that one key set to each live service rather
+                # than silently discarding drift information.
+                legacy_keys = _safe_resource_keys(keys_out) if not grouped_keys else []
+                for svc in sorted(live_services & known_services):
+                    keys = grouped_keys.get(svc, legacy_keys)
+                    new_hash = _hash_keys(keys)
+                    old_hash = baseline.get("services", {}).get(svc, {}).get("keys_hash")
+                    if old_hash and old_hash != new_hash:
+                        drifted_services.append(svc)
+                    if svc in baseline.get("services", {}):
+                        baseline["services"][svc]["keys_hash"] = new_hash
 
         baseline.setdefault("services", {})
         baseline.setdefault("metrics", {})
@@ -1000,7 +1070,7 @@ def _enqueue_job(queue, target, kind, requested_by, active_role):
 GEN_SYSTEM = (
     "You write Kusto (KQL) queries for the Berserk observability store. You will\n"
     "be given the store's dialect notes, a profile of one data source (its keys,\n"
-    "schema, and sample rows), and a target role. Respond with ONLY a JSON object,\n"
+    "schema, and structural sample), and a target role. Respond with ONLY a JSON object,\n"
     "no markdown fences, no commentary:\n\n"
     '{"queries": [{"name": "<snake_case, prefixed with the source name>",\n'
     '              "description": "<what it answers>",\n'

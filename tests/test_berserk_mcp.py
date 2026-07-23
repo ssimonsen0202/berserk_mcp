@@ -117,6 +117,17 @@ class BerserkMcpTest(unittest.TestCase):
             "| sort by timestamp desc | take 20",
         )
 
+    def test_detail_queries_bound_body_and_use_structural_discovery(self):
+        logs_query = bm.q_logs("nginx")
+        self.assertIn("body=substring(tostring(body), 0, 500)", logs_query)
+        self.assertIn("| tail 50", logs_query)
+        self.assertNotIn("| project timestamp, severity_text, body |", logs_query)
+
+        discovery_query = bm.q_discover_sample("nginx")
+        self.assertIn("bag_keys(resource)", discovery_query)
+        self.assertIn("has_body", discovery_query)
+        self.assertNotIn("| project resource, attributes", discovery_query)
+
     def test_container_hosts_callable(self):
         text, err = bm.handle_call("container_hosts", {})
         self.assertFalse(err)

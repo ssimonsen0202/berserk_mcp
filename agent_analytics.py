@@ -66,7 +66,7 @@ def _events_query():
         f"tools=tostring(attributes['claude.tool_names']), "
         f"err=tostring(attributes['claude.error']), "
         f"body=substring(tostring(body), 0, 80) "
-        f"| sort by session asc, ts asc | take 2000"
+        f"| take 2000"
     )
 
 
@@ -77,10 +77,13 @@ def _burn_events_query():
         f"ts=timestamp, typ=tostring(attributes['claude.type']), "
         f"model=tostring(attributes['claude.message_model']), "
         f"tools=tostring(attributes['claude.tool_names']), "
-        f"err=tostring(attributes['claude.error']), body=tostring(body) "
+        f"file_targets=tostring(attributes['claude.file_targets']), "
+        f"err=tostring(attributes['claude.error']), "
+        f"body=substring(tostring(body), 0, 240), "
+        f"body_chars=strlen(tostring(body)) "
         f", tokens_in=tostring(attributes['{_TOKENS_IN_ATTR}']) "
         f", tokens_out=tostring(attributes['{_TOKENS_OUT_ATTR}']) "
-        f"| sort by session asc, ts asc | take 2000"
+        f"| take 2000"
     )
 
 
@@ -145,7 +148,7 @@ def _parse_rows(text):
     header = re.split(r"\s{2,}|\t+", lines[0].strip())
     if len(header) < 2:
         header = lines[0].split()
-    wanted = {"session", "ts", "typ", "model", "tools", "err", "body"}
+    wanted = {"session", "ts", "typ", "model", "tools", "file_targets", "err", "body"}
     if not set(header) & wanted:
         return rows
     for ln in lines[1:]:
@@ -166,8 +169,10 @@ def _normalize_row(obj):
         "typ": str(obj.get("typ") or obj.get("type") or ""),
         "model": str(obj.get("model") or ""),
         "tools": str(obj.get("tools") or obj.get("tool_names") or ""),
+        "file_targets": str(obj.get("file_targets") or ""),
         "err": str(obj.get("err") or obj.get("error") or "").lower(),
         "body": str(obj.get("body") or ""),
+        "body_chars": _nonnegative_int(obj.get("body_chars")) or len(str(obj.get("body") or "")),
         "tokens_in": _nonnegative_int(tokens_in),
         "tokens_out": _nonnegative_int(tokens_out),
         "has_token_usage": _valid_token_value(tokens_in) or _valid_token_value(tokens_out),
@@ -347,7 +352,12 @@ def analyze_model_fit_events(events):
         loop_report = loop_by_session.get(session)
         if not loop_report:
             continue
-        models = [ev.get("model", "") for ev in session_events if ev.get("model")]
+        # _events_query uses an unordered bounded take; preserve the prior
+        # "latest observed model" behavior explicitly at the consumer.
+        ordered_events = sorted(
+            session_events, key=lambda ev: str(ev.get("ts", ""))
+        )
+        models = [ev.get("model", "") for ev in ordered_events if ev.get("model")]
         model = models[-1] if models else ""
         tier = _model_tier(model)
         bucket = _complexity_bucket(loop_report, session_events)
@@ -400,6 +410,13 @@ _FILE_TOOLS = {"edit", "glob", "grep", "read", "write"}
 def _file_targets(events):
     targets = set()
     for ev in events:
+        file_targets = str(ev.get("file_targets") or "")
+        if file_targets:
+            for target in file_targets.split(","):
+                target = target.strip()
+                if target:
+                    targets.add(target)
+            continue
         body = _target(ev.get("body"))
         for tool in _tool_names(ev.get("tools")):
             if tool.lower() in _FILE_TOOLS and body != "-":
@@ -428,7 +445,10 @@ def analyze_token_burn_events(events):
 
     reports = []
     for session, session_events in sorted(by_session.items()):
-        body_chars = sum(len(str(ev.get("body") or "")) for ev in session_events)
+        body_chars = sum(
+            _nonnegative_int(ev.get("body_chars")) or len(str(ev.get("body") or ""))
+            for ev in session_events
+        )
         has_exact_usage = any(ev.get("has_token_usage") for ev in session_events)
         exact_tokens = sum(
             _nonnegative_int(ev.get("tokens_in")) + _nonnegative_int(ev.get("tokens_out"))
@@ -650,12 +670,14 @@ _GAP_SECONDS = 300
 def _session_events_query(session_id):
     return (
         f"{_table} | where resource['service.name'] == 'claude-code' "
-        f"| where tostring(attributes['claude.session_id']) == '{session_id}' "
+        f"| where attributes['claude.session_id'] == '{session_id}' "
         f"| project session=tostring(attributes['claude.session_id']), "
         f"ts=timestamp, typ=tostring(attributes['claude.type']), "
         f"model=tostring(attributes['claude.message_model']), "
         f"tools=tostring(attributes['claude.tool_names']), "
-        f"err=tostring(attributes['claude.error']), body=tostring(body) "
+        f"err=tostring(attributes['claude.error']), "
+        f"body=substring(tostring(body), 0, 240), "
+        f"body_chars=strlen(tostring(body)) "
         f", tokens_in=tostring(attributes['{_TOKENS_IN_ATTR}']) "
         f", tokens_out=tostring(attributes['{_TOKENS_OUT_ATTR}']) "
         f"| sort by ts asc | take 2000"
@@ -691,7 +713,10 @@ def analyze_session_events(events):
     if exact > 0:
         burn = {"tokens": exact, "source": "exact"}
     else:
-        burn = {"tokens": sum(len(ev.get("body", "")) for ev in events) // 4,
+        burn = {"tokens": sum(
+                    _nonnegative_int(ev.get("body_chars")) or len(ev.get("body", ""))
+                    for ev in events
+                ) // 4,
                 "source": "estimated"}
     loops = analyze_loop_events(events)
     loop_verdict = loops[0]["verdict"] if loops else "no-tool-calls"
@@ -728,6 +753,15 @@ def analyze_workflow_events(events):
 
     seq_counts = {}
     for sess_events in by_session.values():
+        # The query intentionally uses an unordered `take` so Berserk can
+        # stop early. Restore chronological order before adjacency analysis.
+        stamps = [str(ev.get("ts", "")) for ev in sess_events]
+        # Equal timestamps have no meaningful ordering; preserve the source
+        # order for ties (some forwarders batch several events at one stamp).
+        if len(set(stamps)) == len(stamps) and any(
+            left > right for left, right in zip(stamps, stamps[1:])
+        ):
+            sess_events = sorted(sess_events, key=lambda ev: str(ev.get("ts", "")))
         tools = []
         for ev in sess_events:
             tools.extend(_tool_names(ev.get("tools")))
@@ -753,8 +787,10 @@ def analyze_workflow_events(events):
     for session, sess_events in by_session.items():
         exact = sum(_nonnegative_int(ev.get("tokens_in")) + _nonnegative_int(ev.get("tokens_out"))
                     for ev in sess_events if ev.get("has_token_usage"))
-        tokens = exact if exact > 0 else \
-            sum(len(ev.get("body", "")) for ev in sess_events) // 4
+        tokens = exact if exact > 0 else sum(
+            _nonnegative_int(ev.get("body_chars")) or len(ev.get("body", ""))
+            for ev in sess_events
+        ) // 4
         targets = max(1, len(_file_targets(sess_events)))
         burn_rank.append({"session": session,
                           "tokens_per_target": tokens // targets})

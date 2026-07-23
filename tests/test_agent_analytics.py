@@ -83,6 +83,14 @@ class AgentAnalyticsPureTest(unittest.TestCase):
         self.assertTrue(reports["haiku-loop"]["verdict"].startswith("underpowered"))
         self.assertEqual(reports["sonnet-ok"]["verdict"], "ok")
 
+    def test_model_fit_restores_latest_model_after_unordered_take(self):
+        events = [
+            row("s1", "2026-07-14T10:01:00Z", "Read", "a", model="claude-opus-4-8"),
+            row("s1", "2026-07-14T10:00:00Z", "Read", "a", model="claude-haiku"),
+        ]
+        report = aa.analyze_model_fit_events(events)[0]
+        self.assertEqual(report["model"], "claude-opus-4-8")
+
     def test_token_burn_estimate_flags_high_burn_loop(self):
         events = [
             row("high", f"2026-07-12T10:0{i}:00Z", "Read", "src/app.py " + ("x" * 1000))
@@ -385,10 +393,18 @@ class AgentAnalyticsMcpTest(unittest.TestCase):
         self.assertFalse(err)
         self.assertIn("body-length fallback", text)
         self.assertIn("0 exact sessions, 1 estimated sessions", text)
-        self.assertIn("body=tostring(body)", self.calls[-1][3])
+        self.assertIn("body=substring(tostring(body), 0, 240)", self.calls[-1][3])
+        self.assertIn("body_chars=strlen(tostring(body))", self.calls[-1][3])
         self.assertIn("claude.tokens_input", self.calls[-1][3])
         self.assertIn("claude.tokens_output", self.calls[-1][3])
         self.assertNotIn("substring(tostring(body), 0, 80)", self.calls[-1][3])
+
+    def test_burn_query_is_bounded_and_unordered(self):
+        query = self.calls[-1][3] if self.calls else aa._burn_events_query()
+        self.assertIn("body=substring(tostring(body), 0, 240)", query)
+        self.assertIn("body_chars=strlen(tostring(body))", query)
+        self.assertIn("| take 2000", query)
+        self.assertNotIn("| sort by session", query)
 
     def test_invalid_since_rejected_before_shelling_out(self):
         text, err = bm.handle_call("claude_loop_check", {"since": "bad; nope"})
@@ -468,6 +484,23 @@ class CostReportToolTest(_RewiredAnalytics):
         self.assertIn("proj-a", text)
         self.assertIn("proj-b", text)
         self.assertIn("most recent", text)  # event-cap labeled
+
+    def test_cost_report_project_grouping_prefers_file_targets_attribute(self):
+        events = [row("s1", "2026-07-14T10:00:00Z", "Edit", "assistant turn summary")]
+        events[0]["file_targets"] = "myproject/src/handler.py"
+        self.rewire(lambda q, s: (jsonl(events), False))
+        text, err = aa.claude_cost_report(group_by="project")
+        self.assertFalse(err)
+        self.assertIn("myproject", text)
+        self.assertNotIn("(unattributed)", text)
+
+    def test_cost_report_project_grouping_falls_back_to_body_target(self):
+        events = [row("s1", "2026-07-14T10:00:00Z", "Edit", "/h/legacyproj/src/a.py")]
+        self.rewire(lambda q, s: (jsonl(events), False))
+        text, err = aa.claude_cost_report(group_by="project")
+        self.assertFalse(err)
+        self.assertIn("legacyproj", text)
+        self.assertNotIn("(unattributed)", text)
 
     def test_cost_report_invalid_group_by_rejected(self):
         self.rewire(lambda q, s: ("", False))
@@ -583,6 +616,18 @@ class SessionDeepDiveTest(_RewiredAnalytics):
 
 
 class WorkflowInsightsTest(_RewiredAnalytics):
+    def test_unordered_input_is_sorted_for_unique_timestamps(self):
+        events = [
+            row("s1", "2026-07-14T10:02:00Z", "Bash", "c"),
+            row("s1", "2026-07-14T10:00:00Z", "Read", "a"),
+            row("s1", "2026-07-14T10:01:00Z", "Edit", "b"),
+            row("s1", "2026-07-14T10:05:00Z", "Bash", "f"),
+            row("s1", "2026-07-14T10:03:00Z", "Read", "d"),
+            row("s1", "2026-07-14T10:04:00Z", "Edit", "e"),
+        ]
+        rep = aa.analyze_workflow_events(events)
+        self.assertIn({"pattern": "Read→Edit", "count": 2}, rep["sequences"])
+
     def test_bigram_sequences_counted(self):
         events = []
         for i in range(3):

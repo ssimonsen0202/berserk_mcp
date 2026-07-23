@@ -322,7 +322,7 @@ primer. These roles route from the tool descriptions directly.
 | `logs_for_service` | Recent log lines for one service. |
 | `schema` | Live tables + column schema introspection. |
 | `list_metrics` | Every metric name being ingested, with counts (discovery). |
-| `discover_schema` | Sample rows to learn an unknown source's `resource`/`attributes` shape. |
+| `discover_schema` | Resource/attribute keys plus structural presence flags to learn an unknown source without exporting raw telemetry. |
 | `bzrk_query_perf` | Berserk query engine latency percentiles (p50/p95/p99 in µs). |
 | `search` | Run arbitrary KQL (escape hatch). Save the result with `save_query` once it works. Fields are nested `resource`/`attributes`, not flat columns — for example `resource['service.name']`, not `service_name`. Call `discover_schema` first if you don't know the field names for a source. A wrong field name matches zero rows; it does not raise an error. |
 
@@ -1111,6 +1111,10 @@ The whole point of berserk-mcp is fixed, verified queries. Adding a tool is
 a small, mechanical ritual. Aim to keep the routing surface small (about 20
 core tools), and let the long tail accumulate behind `save_query`/`run_saved`
 via the learning loop.
+
+Before writing KQL, read the [Berserk KQL performance guide](docs/kql-performance-guide.md).
+It covers index-friendly predicates, `tail` for recency, narrow projections,
+explicit limits, live verification, and the shared-cluster fleet rules.
 
 **1. Find the KQL on a live instance.** Iterate with `bzrk` until the query
 returns clean rows — names, units, sort order. *Do not ship a query you have

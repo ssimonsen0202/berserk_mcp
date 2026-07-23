@@ -216,7 +216,7 @@ def _audit_query():
     return (
         f"{_table} | where isnotnull(body) "
         f"| project service=tostring(resource['service.name']), ts=timestamp, body=tostring(body) "
-        f"| sort by ts desc | take 2000"
+        f"| tail 2000"
     )
 
 

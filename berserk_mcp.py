@@ -55,7 +55,7 @@ import ingestion_advisor
 import parser_factory
 import secret_scan
 
-__version__ = "1.15.0"
+__version__ = "1.16.0"
 
 
 def log(msg):
@@ -607,12 +607,14 @@ def q_discover_keys(service=None):
 
 
 def q_discover_sample(service=None):
-    """Sample real rows (optionally for one service) so a model can read the
-    nested resource + attributes values, not just key names."""
+    """Sample structural fields without exporting raw telemetry values."""
     filt = f"| where resource['service.name'] == '{service}' " if service else ""
     return (
         f"{T} {filt}| take 6 "
-        f"| project resource, attributes, metric_name, severity_text, body"
+        f"| project resource_keys=bag_keys(resource), "
+        f"attribute_keys=bag_keys(attributes), metric_name, "
+        f"has_body=isnotempty(tostring(body)), "
+        f"has_metric=isnotnull(metric_name), has_severity=isnotnull(severity_text)"
     )
 Q_CC_RECENT = (
     f"{CC} | project ts=timestamp, typ=tostring(attributes['claude.type']), "
@@ -644,7 +646,8 @@ Q_CC_ERRORS = (
 def q_logs(svc: str) -> str:
     return (
         f"{T} | where isnotnull(body) | where resource['service.name'] == '{svc}' "
-        f"| project timestamp, severity_text, body | sort by timestamp desc | take 50"
+        f"| project timestamp, severity_text, body=substring(tostring(body), 0, 500) "
+        f"| tail 50"
     )
 
 
@@ -1029,7 +1032,7 @@ TOOLS = [
     {"name": "schema", "description": "Show Berserk tables + column schema (live introspection).", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "list_metrics", "description": "List every metric name currently being ingested, with sample counts + last-seen. Use to DISCOVER what telemetry exists before writing a `search` query.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "bzrk_query_perf", "description": "Berserk query engine latency percentiles: p50, p95, p99 in µs. Use for 'how fast is Berserk?', 'query latency', or 'p50/p95/p99 execution time'. Uses otel_histogram_percentile($raw, N) — the native Berserk histogram aggregate.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "discover_schema", "description": "Discover the shape of a data source: returns (1) every key present under `resource` with row counts, AND (2) a small sample of real rows so you can read the actual values. Use to learn an unknown or newly-ingested source before querying it. Optional `service` filter. Pair with list_services / list_metrics. Once you work out a query with `search`, persist it with save_query so it becomes reusable.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "optional: limit to one service.name"}}, **_since())}},
+    {"name": "discover_schema", "description": "Discover the shape of a data source: returns (1) every key present under `resource` with row counts, AND (2) a small structural sample with resource/attribute keys and body/metric presence flags. It never exports raw resource, attributes, or body values. Use to learn an unknown or newly-ingested source before querying it. Optional `service` filter. Pair with list_services / list_metrics. Once you work out a query with `search`, persist it with save_query so it becomes reusable.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "optional: limit to one service.name"}}, **_since())}},
     {"name": "search", "description": "Run an arbitrary Kusto/KQL query against the Berserk table. Use when the other tools do not fit; once it works, persist it with save_query. Fields are nested OTLP resource/log attributes, NOT flat columns — access as resource['service.name'], resource['host.name'], attributes['systemd.unit'], etc. (bare service_name/host_name do not exist and silently match zero rows instead of erroring). If you don't already know the exact field names for this source, call discover_schema first instead of guessing.", "inputSchema": {"type": "object", "properties": dict({"kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'. Field access is resource['key'] / attributes['key'], never a bare column name."}}, **_since()), "required": ["kql"]}},
     # --- Trace tools (span-level latency/error triage; UNVERIFIED field names — see the
     # comment above Q_TRACE_FIND_SLOW. Descriptions below flag this to the model too.) ---

@@ -64,32 +64,67 @@ your homelab wrapper.
 
 ## Why the windows are bounded
 
-In Berserk's `default` table, only `timestamp` is indexed, and `claude-code`
-records share the table with the rest of your telemetry. Bounded-window queries
-(≤ ~6h) stay fast; multi-day dynamic aggregations can time out. That's why every
-`claude_*` tool defaults to a short window — widen it explicitly with `since`
-when you need to, knowing it costs a wider scan.
+In Berserk's `default` table, `timestamp` has range pruning and common
+dimensions such as `resource['service.name']` and `metric_name` have shard/bloom
+indexes. `claude-code` records still share the table with the rest of your
+telemetry, so bounded-window queries (≤ ~6h) remain the safe default; widen it
+explicitly with `since` when you need to, knowing it costs a wider scan. See the
+[KQL performance guide](kql-performance-guide.md) for the live verification
+details and query-author checklist.
 
-## Phase J live-verification checklist (pending `bzrk login`)
+## Phase J live-verification checklist (live-verified 2026-07-22)
 
 `claude_cost_report`, `claude_session_deep_dive`, and
-`claude_workflow_insights` (added 2026-07-20) are unit-tested against
-stubbed telemetry but not yet live-verified. After authenticating, run
-the J0 probe and record findings here:
+`claude_workflow_insights` (added 2026-07-20) were unit-tested against
+stubbed telemetry and have now been run against the live `homelab`
+Berserk instance. Findings:
 
-1. Presence rates over 7d for: `claude.session_id`,
-   `claude.tokens_input` / `claude.tokens_output` (or the configured
-   attr names), `claude.tool_names`, `claude.message_model`,
-   `claude.type`, and any file-target attribute (candidates:
-   `claude.tool_input.file_path`, `claude.file_target`, tool-input
-   payloads inside `body`).
-2. Run each tool against real telemetry; confirm the output shape and
-   record the date + one example row here (per the v1.14 trace-tools
-   precedent).
-3. `claude_cost_report` gating: per-project attribution stays labeled
-   `(unattributed)`-only unless the probe finds a usable file-path
-   signal; note the outcome either way.
-4. The daily aggregation in `claude_cost_report` uses
-   `bin(timestamp, 1d)` with `summarize` over a 7d default window —
-   verify it completes within the CLI timeout given the bounded-window
-   caveat above; if it times out, narrow the default and note it.
+1. **Attribute presence, 7d window** (11,134 `claude-code` events):
+   `claude.session_id` 11,130/11,134 (99.96%), `claude.type` 11,134/11,134
+   (100%), `claude.tokens_input`/`claude.tokens_output` 5,313/11,134 each
+   (47.7% — the rest fall back to the body-length estimate, exactly as
+   designed), `claude.tool_names` 2,611/11,134 (23.4%, only present on
+   assistant turns that called a tool, as expected). **File-target
+   attributes are absent entirely**: `claude.tool_input.file_path` and
+   `claude.file_target` were both 0/1,779 in a 24h sample — this
+   forwarder does not currently emit either candidate.
+2. **Per-tool live run** (2026-07-22, `homelab` endpoint):
+   - `claude_cost_report(since="7d ago", group_by="day")` — **76.8s**,
+     real output: `verdict=burn-growing (slope +26.1%/day)`, 8 daily
+     buckets with exact/estimated token labels, event and error counts
+     per day.
+   - `claude_cost_report(since="24h ago", group_by="project")` —
+     29.9s, output: `(unattributed): ~3721269 tokens across 1793
+     events` — see finding 3.
+   - `claude_session_deep_dive("1775e12f-d0ea-4edd-a690-0578e90d5efe",
+     since="7d ago")` — 14.4s, output:
+     `loop=healthy, ~315 tokens (estimated)` with one contiguous
+     no-tool phase example.
+   - `claude_workflow_insights(since="24h ago")` — 110.0s (real tool
+     sequences, e.g. `Bash→Bash x102`; `Error hotspots: none`;
+     top-decile burn target identified). **`since="7d ago"` (this
+     tool's registered default) timed out at 120s and did not
+     complete** — see finding 4.
+3. **Per-project attribution gating: confirmed correct.** With zero
+   file-target signal present (finding 1), `claude_cost_report
+   group_by=project` correctly stays `(unattributed)`-only rather than
+   guessing — the gating logic behaves exactly as designed on this
+   deployment's real (attribute-sparse) data.
+4. **Timeout finding — action needed.** `claude_cost_report`'s 7d
+   `bin(timestamp, 1d)` aggregation completes in ~77s, comfortably
+   under the 120s default `BZRK_TIMEOUT` — no change needed there.
+   **`claude_workflow_insights` is a different story: its own
+   registered default window (7d) reliably times out at 120s on this
+   real deployment.** Narrower windows are not uniformly faster,
+   either — `24h ago` (1,778 events, no cap hit) took 110.0s, while
+   `2d ago` and `3d ago` (both capped at the same 2,000-event ceiling)
+   took only 25.8s and 52.7s. This suggests the most recent ~24h of
+   data sits in a less-optimized "hot" partition that scans slower
+   per-row than the older, settled data the wider windows mostly read
+   from before hitting the event cap. **Recommended follow-up:**
+   narrow `claude_workflow_insights`'s default `since` from `7d ago` to
+   something in the `2d ago`–`3d ago` range (both returned complete,
+   meaningful tool-sequence and burn data well within budget), or
+   raise `BZRK_TIMEOUT` specifically for this tool. Not yet changed in
+   code — flagging here per the checklist's own instructions pending a
+   decision on which fix to take.

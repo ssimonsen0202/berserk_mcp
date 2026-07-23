@@ -394,6 +394,24 @@ class LlmClientTest(ParserFactoryTestBase):
 
 # ---------- P2: source profiling and schema knowledge store ----------
 class SourceProfileTest(ParserFactoryTestBase):
+    def test_profile_uses_structural_sample_keys_and_schema_cache(self):
+        self.responses["take 6"] = (
+            'resource_keys attribute_keys\n["service.name", "host.name"] []\n', False)
+        self.responses[f"{bm.TABLE} | getschema"] = ("col1 string\n", False)
+
+        profile, err = pf.build_source_profile("mysvc", "service", "24h ago")
+        self.assertIsNone(err)
+        self.assertEqual(profile["resource_keys"], ["service.name", "host.name"])
+        first_call_count = len(self.calls)
+
+        profile2, err2 = pf.build_source_profile("mysvc2", "service", "24h ago")
+        self.assertIsNone(err2)
+        self.assertEqual(profile2["resource_keys"], ["service.name", "host.name"])
+        # Each profile needs one sample query; getschema is reused and the
+        # redundant per-source keys query is never issued.
+        self.assertEqual(len(self.calls) - first_call_count, 1)
+        self.assertNotIn("project k=bag_keys(resource)", "\n".join(c[3] for c in self.calls))
+
     def test_build_source_profile_truncates_and_persists_private_files(self):
         self.responses["bag_keys(resource)"] = ("key n\nservice.name 5\nhost.name 3\n", False)
         self.responses["take 6"] = ("x" * 10000, False)
@@ -638,6 +656,26 @@ class DetectNewSourcesTest(ParserFactoryTestBase):
         summary = self._detect(auto_queue=False, check_drift=True)
         self.assertIn("drifted_services", summary)
         self.assertIn("svcA", summary)
+
+    def test_drift_check_batches_known_services_into_one_query(self):
+        self.responses["by service=tostring(resource['service.name'])"] = (
+            "service total\nsvcA 5\nsvcB 3\n", False)
+        self.responses["summarize samples=count() by metric_name"] = (
+            "metric_name samples\n", False)
+        self._detect(auto_queue=False)
+
+        self.responses["by service=tostring(resource['service.name'])"] = (
+            "service total\nsvcA 5\nsvcB 3\n", False)
+        self.responses["by service, key=tostring(k)"] = (
+            "service key n\nsvcA service.name 5\nsvcA host.name 5\n"
+            "svcB service.name 5\n", False)
+        before = len(self.calls)
+        self._detect(auto_queue=False, check_drift=True)
+        drift_calls = self.calls[before:]
+        self.assertEqual(len(drift_calls), 3)  # services, metrics, one grouped drift scan
+        self.assertEqual(
+            sum("service['service.name'] == 'svc" in c[3] for c in drift_calls), 0
+        )
 
     def test_malformed_rows_dont_crash(self):
         self.responses["by service=tostring(resource['service.name'])"] = (
