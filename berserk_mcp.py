@@ -60,7 +60,7 @@ import ingestion_advisor
 import parser_factory
 import secret_scan
 
-__version__ = "1.18.2"
+__version__ = "1.19.0"
 
 
 def log(msg):

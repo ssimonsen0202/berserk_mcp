@@ -39,14 +39,14 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.18.2**. This is a bullet-point overview, most recent
+Current version: **1.19.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
-- **v1.18.2** (2026-07-23) — The v1.18.0 interactive tool budget was a flat
-  10s regardless of window size; a real 72h query needing ~13s got rejected
-  outright. Budget now scales with the requested window. See
-  [details](docs/releases/v1.18.2.md).
+- **v1.19.0** (2026-07-23) — Bugfix: the v1.18.0 interactive tool budget was
+  a flat 10s regardless of window size; a real 72h query needing ~13s got
+  rejected outright. Budget now scales with the requested window. See
+  [details](docs/releases/v1.19.0.md).
 - **v1.18.1** (2026-07-23) — Fixes a `windows-latest`/Python 3.11+ CI failure:
   `_FileLock` didn't catch a transient `PermissionError` Windows can raise
   instead of `FileExistsError` under lock contention. See
@@ -989,7 +989,7 @@ All configuration is via environment variables. All are optional:
 | `BZRK_TIMEOUT` | `120` | Per-query timeout, seconds (worker and generation paths). |
 | `BERSERK_WORKER_JITTER_SECONDS` | `7200` | Maximum random startup delay for `--worker`; set `0` to disable. Interactive MCP calls are never jittered. Derived from the 100-worker collision sweep. |
 | `BERSERK_MCP_TOOL_BUDGET_SECONDS` | `10` (clamped to `BZRK_TIMEOUT`) | Base per-query budget for interactive `tools/call`, for short windows; derived from the five-repeat homelab p95 sweep. Scales up for wider `since` windows — see `BERSERK_MCP_BUDGET_PER_HOUR_SECONDS`. Timeout errors advise a narrower window or raising these values. |
-| `BERSERK_MCP_BUDGET_PER_HOUR_SECONDS` | `0.5` | Added to the base budget per hour of the query's `since` window (capped at `BZRK_TIMEOUT`) — a 72h query gets ~46s, not the 10s base. Set `0` to restore a flat budget regardless of window size (v1.18.2; see [release notes](docs/releases/v1.18.2.md)). |
+| `BERSERK_MCP_BUDGET_PER_HOUR_SECONDS` | `0.5` | Added to the base budget per hour of the query's `since` window (capped at `BZRK_TIMEOUT`) — a 72h query gets ~46s, not the 10s base. Set `0` to restore a flat budget regardless of window size (v1.19.0; see [release notes](docs/releases/v1.19.0.md)). |
 | `BERSERK_MCP_FAIL_COOLDOWN_SECONDS` | `30` | Suppress identical timeout retries within one MCP process; `0` disables. |
 | `BERSERK_MCP_CACHE_TTL_SECONDS` | `120` | TTL for allowlisted read-only rollup results; derived from the synthetic trace replay; `0` disables. |
 | `BERSERK_TABLE` | `default` | The Berserk table to query. |
