@@ -129,6 +129,13 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertNotIn("| project resource, attributes", discovery_query)
         self.assertIn("fieldstats resource", bm.q_discover_fieldstats("nginx"))
 
+    def test_phase1_native_queries_are_zero_filled_and_prunable(self):
+        self.assertIn("make-series", bm.Q_SRE_ERROR_RATE)
+        self.assertIn("default=0", bm.Q_SRE_ERROR_RATE)
+        self.assertIn("make-series", bm.Q_SOC_LOG_SPIKE)
+        self.assertIn("default=0", bm.Q_SOC_LOG_SPIKE)
+        self.assertIn("attributes['state'] == 'used'", bm.Q_HOST_MEM)
+
     def test_container_hosts_callable(self):
         text, err = bm.handle_call("container_hosts", {})
         self.assertFalse(err)
@@ -216,6 +223,7 @@ class BerserkMcpTest(unittest.TestCase):
         text, err = bm.handle_call("does_not_exist", {})
         self.assertTrue(err)
         self.assertIn("unknown tool", text)
+
 
     # ---- learning loop ----
     def test_save_then_list_then_run(self):
@@ -1667,6 +1675,52 @@ class ParserFactoryToolsTest(unittest.TestCase):
     def test_detect_new_sources_dispatches(self):
         text, err = bm.handle_call("detect_new_sources", {})
         self.assertFalse(err)
+
+
+class FleetControlsTest(unittest.TestCase):
+    def setUp(self):
+        self.orig_run = bm.run_bzrk
+        self.orig_budget = bm.TOOL_BUDGET_SECONDS
+        self.orig_cache = bm.CACHE_TTL_SECONDS
+        self.orig_cooldown = bm.FAIL_COOLDOWN_SECONDS
+        self.calls = []
+        bm._reset_fleet_state()
+
+    def tearDown(self):
+        bm.run_bzrk = self.orig_run
+        bm.TOOL_BUDGET_SECONDS = self.orig_budget
+        bm.CACHE_TTL_SECONDS = self.orig_cache
+        bm.FAIL_COOLDOWN_SECONDS = self.orig_cooldown
+        bm._reset_fleet_state()
+
+    def test_successful_allowlisted_result_is_cached_with_marker(self):
+        def fake(args, timeout=bm.DEFAULT_TIMEOUT):
+            self.calls.append((args, timeout))
+            return "result", False
+        bm.run_bzrk = fake
+        bm.CACHE_TTL_SECONDS = 30
+        first, err1 = bm.handle_call("sre_error_rate", {})
+        second, err2 = bm.handle_call("sre_error_rate", {})
+        self.assertFalse(err1 or err2)
+        self.assertEqual(first, "result")
+        self.assertIn("cached", second)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_timeout_budget_and_identical_retry_cooldown(self):
+        def fake(args, timeout=bm.DEFAULT_TIMEOUT):
+            self.calls.append((args, timeout))
+            return f"bzrk timed out after {timeout}s", True
+        bm.run_bzrk = fake
+        bm.TOOL_BUDGET_SECONDS = 7
+        bm.CACHE_TTL_SECONDS = 0
+        bm.FAIL_COOLDOWN_SECONDS = 30
+        first, err1 = bm.handle_call("sre_error_rate", {})
+        second, err2 = bm.handle_call("sre_error_rate", {})
+        self.assertTrue(err1 and err2)
+        self.assertIn("narrower", first)
+        self.assertIn("fail-cooldown", second)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0][1], 7)
 
 
 if __name__ == "__main__":

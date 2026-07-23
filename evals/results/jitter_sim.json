@@ -1,0 +1,174 @@
+{
+  "rows": [
+    {
+      "workers": 10,
+      "jitter_seconds": 0,
+      "trials": 1000,
+      "expected_peak": 10,
+      "p95_peak": 10,
+      "probability_peak_over_3": 1.0
+    },
+    {
+      "workers": 10,
+      "jitter_seconds": 60,
+      "trials": 1000,
+      "expected_peak": 4.161,
+      "p95_peak": 6,
+      "probability_peak_over_3": 0.775
+    },
+    {
+      "workers": 10,
+      "jitter_seconds": 300,
+      "trials": 1000,
+      "expected_peak": 2.3,
+      "p95_peak": 3,
+      "probability_peak_over_3": 0.028
+    },
+    {
+      "workers": 10,
+      "jitter_seconds": 600,
+      "trials": 1000,
+      "expected_peak": 1.881,
+      "p95_peak": 3,
+      "probability_peak_over_3": 0.005
+    },
+    {
+      "workers": 10,
+      "jitter_seconds": 1800,
+      "trials": 1000,
+      "expected_peak": 1.4,
+      "p95_peak": 2,
+      "probability_peak_over_3": 0.0
+    },
+    {
+      "workers": 10,
+      "jitter_seconds": 3600,
+      "trials": 1000,
+      "expected_peak": 1.242,
+      "p95_peak": 2,
+      "probability_peak_over_3": 0.0
+    },
+    {
+      "workers": 10,
+      "jitter_seconds": 7200,
+      "trials": 1000,
+      "expected_peak": 1.121,
+      "p95_peak": 2,
+      "probability_peak_over_3": 0.0
+    },
+    {
+      "workers": 100,
+      "jitter_seconds": 0,
+      "trials": 1000,
+      "expected_peak": 100,
+      "p95_peak": 100,
+      "probability_peak_over_3": 1.0
+    },
+    {
+      "workers": 100,
+      "jitter_seconds": 60,
+      "trials": 1000,
+      "expected_peak": 24.741,
+      "p95_peak": 29,
+      "probability_peak_over_3": 1.0
+    },
+    {
+      "workers": 100,
+      "jitter_seconds": 300,
+      "trials": 1000,
+      "expected_peak": 8.937,
+      "p95_peak": 11,
+      "probability_peak_over_3": 1.0
+    },
+    {
+      "workers": 100,
+      "jitter_seconds": 600,
+      "trials": 1000,
+      "expected_peak": 6.291,
+      "p95_peak": 8,
+      "probability_peak_over_3": 1.0
+    },
+    {
+      "workers": 100,
+      "jitter_seconds": 1800,
+      "trials": 1000,
+      "expected_peak": 3.983,
+      "p95_peak": 5,
+      "probability_peak_over_3": 0.788
+    },
+    {
+      "workers": 100,
+      "jitter_seconds": 3600,
+      "trials": 1000,
+      "expected_peak": 3.221,
+      "p95_peak": 4,
+      "probability_peak_over_3": 0.242
+    },
+    {
+      "workers": 100,
+      "jitter_seconds": 7200,
+      "trials": 1000,
+      "expected_peak": 2.582,
+      "p95_peak": 3,
+      "probability_peak_over_3": 0.04
+    },
+    {
+      "workers": 500,
+      "jitter_seconds": 0,
+      "trials": 1000,
+      "expected_peak": 500,
+      "p95_peak": 500,
+      "probability_peak_over_3": 1.0
+    },
+    {
+      "workers": 500,
+      "jitter_seconds": 60,
+      "trials": 1000,
+      "expected_peak": 101.544,
+      "p95_peak": 109,
+      "probability_peak_over_3": 1.0
+    },
+    {
+      "workers": 500,
+      "jitter_seconds": 300,
+      "trials": 1000,
+      "expected_peak": 28.656,
+      "p95_peak": 32,
+      "probability_peak_over_3": 1.0
+    },
+    {
+      "workers": 500,
+      "jitter_seconds": 600,
+      "trials": 1000,
+      "expected_peak": 17.962,
+      "p95_peak": 21,
+      "probability_peak_over_3": 1.0
+    },
+    {
+      "workers": 500,
+      "jitter_seconds": 1800,
+      "trials": 1000,
+      "expected_peak": 9.512,
+      "p95_peak": 11,
+      "probability_peak_over_3": 1.0
+    },
+    {
+      "workers": 500,
+      "jitter_seconds": 3600,
+      "trials": 1000,
+      "expected_peak": 6.825,
+      "p95_peak": 8,
+      "probability_peak_over_3": 1.0
+    },
+    {
+      "workers": 500,
+      "jitter_seconds": 7200,
+      "trials": 1000,
+      "expected_peak": 5.148,
+      "p95_peak": 6,
+      "probability_peak_over_3": 1.0
+    }
+  ],
+  "recommendation_seconds": 7200,
+  "rule": "smallest J with P(peak > 3 in 10s) < 5% at F=100"
+}

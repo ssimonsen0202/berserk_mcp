@@ -37,6 +37,45 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 > in this repository. For questions about Berserk itself: contact the Berserk
 > project, not this repository.
 
+## Release history
+
+Current version: **1.18.0**. This is a bullet-point overview, most recent
+first — full detail for each notable release lives in
+[`docs/releases/`](docs/releases/).
+
+- **v1.18.0** (2026-07-23) — Adds fleet-friendly worker jitter, interactive
+  query budgets, timeout cooldowns, short-TTL read-only caching, and three
+  guarded SRE/SOC tools: `detect_anomalies`, `forecast_capacity`, and
+  `find_similar`. See [details](docs/releases/v1.18.0.md).
+- **v1.17.0** (2026-07-23) — Adopts native Berserk functions (`make-series`,
+  `series_fit_line`, `fieldstats`, `tail`, `extract_log_template`, …) across
+  the query builders. See [details](docs/releases/v1.17.0.md).
+- **v1.16.0** (2026-07-23) — Berserk-native query optimization pass; adds
+  the `claude.file_targets`-based cost-attribution fix and the KQL
+  performance guide. See [details](docs/releases/v1.16.0.md).
+- **v1.15.0** (2026-07-20) — Phase J deep analytics (`claude_cost_report`,
+  `claude_session_deep_dive`, `claude_workflow_insights`), a 9-finding
+  security hardening pass, and the Discord alert integration. See
+  [details](docs/releases/v1.15.0.md).
+- **v1.14.1** (2026-07-18) — Fixed a silent-failure bug in the agent-analytics
+  tools' `bzrk --json` parsing. See [details](docs/releases/v1.14.1.md).
+- **v1.14.0** (2026-07-17) — Distributed-trace analysis tools
+  (`trace_find_slow`, `trace_find_errors`, `trace_analyze`), shipped
+  unverified then live-verified against a real cluster outage. See
+  [details](docs/releases/v1.14.0.md).
+- **v1.12.0** (2026-07-15) — Agent-log analytics (`claude_loop_check`,
+  `claude_model_fit`, `claude_token_burn`), secret detection/redaction, and
+  the ingestion advisor (`suggest_ingestion`). See
+  [details](docs/releases/v1.12.0.md).
+- **v1.7.1** — Runaway fail-safes for source auto-detection.
+- **v1.7.0** — LLM-driven parser factory for new Berserk sources.
+- **v1.6.2** — Security review findings from the 2026-07-05 pass.
+- **v1.6.0–1.6.1** — Role profiles (SRE/SOC/Claude/Ops), role primers,
+  amendments logging, and early hardening fixes.
+- **v1.2.0–1.5.0** — Initial release through discovery tools, dual-perspective
+  `discover_schema`, and `bzrk_query_perf`. See `git log` for individual
+  commits.
+
 ## Why this exists
 
 **Berserk** is a self-hosted, OTEL-native, schemaless observability engine. It
@@ -340,6 +379,8 @@ Every query tool takes an optional `since` argument (`"15m ago"`, `"1h ago"`,
 | `sre_ingest_health` | Berserk ingest lag and dropped data — "is observability lagging?" |
 | `sre_service_health` | Full health summary for one named service: event volume, error count, log/metric split, last seen. |
 | `sre_top_error_messages` | Most-repeated error messages by service — "what error should I investigate first?" |
+| `detect_anomalies` | Statistical service-volume anomaly detection using zero-filled series. |
+| `forecast_capacity` | Native trend fit for an allowlisted host gauge; refuses weak forecasts. |
 
 ### SOC tools (`soc` lane only)
 
@@ -350,6 +391,8 @@ Every query tool takes an optional `since` argument (`"15m ago"`, `"1h ago"`,
 | `soc_new_services` | Recently first-seen services and sources — "what is new?" |
 | `soc_repeated_errors` | Error messages that repeat persistently — probes, loops, stuck processes. |
 | `soc_timeline` | Full incident timeline for one named service: timestamps, severity, metric names, message snippets. |
+| `detect_anomalies` | Statistical service-volume anomaly detection using zero-filled series. |
+| `find_similar` | Meaning-based log search when semantic indexing is enabled. |
 | `scan_secrets` | Aggregate potential-secret counts by service/type with first-seen timestamps. Values are never returned. |
 
 ### Claude Code tools (`claude` lane only)
@@ -373,7 +416,8 @@ tools mine that data. See [docs/claude-code.md](docs/claude-code.md) for the pip
 
 ### Agent-log intelligence
 
-Version 1.8.1 adds a read-only analytics layer for the `claude` lane:
+A read-only analytics layer for the `claude` lane (v1.12.0; see
+[release notes](docs/releases/v1.12.0.md)):
 
 - `claude_loop_check` groups tool calls by session. It reports the repetition ratio, the top repeated call, the error-retry count, and a verdict: `healthy`, `some-repetition`, or `likely-looping`.
 - `claude_model_fit` maps model names to a coarse tier (`frontier`, `mid`, `cheap`). It compares that tier to a complexity proxy built from tool count, errors, duration, and loop signals.
@@ -384,33 +428,27 @@ Version 1.8.1 adds a read-only analytics layer for the `claude` lane:
 berserk-mcp --agent-report --since "6h ago"
 ```
 
-**Phase J deep analytics:** `claude_cost_report`, `claude_session_deep_dive`,
-and `claude_workflow_insights` extend this layer. They add multi-day cost
-trends, per-session timeline drilldowns, and cross-session workflow
-patterns. They are unit-tested against stubbed telemetry. Live verification
-against real Berserk output is pending `bzrk` auth (see the
-live-verification checklist in `docs/claude-code.md`). Per-project cost
+**Phase J deep analytics (v1.15.0; see [release notes](docs/releases/v1.15.0.md)):**
+`claude_cost_report`, `claude_session_deep_dive`, and `claude_workflow_insights`
+extend this layer with multi-day cost trends, per-session timeline
+drilldowns, and cross-session workflow patterns. Per-project cost
 attribution infers a project name from file-target paths: it uses the
 directory before the first marker segment (`src`, `tests`, `lib`, `pkg`).
 Override this with `BERSERK_MCP_PROJECT_MARKERS`.
 
-`claude_token_burn`, `claude_loop_check`, and `claude_model_fit` (v1.14.1)
-parse real `bzrk --json` output directly. `_json_records()` unwraps
-`Tables[0].rows` against `Tables[0].schema.columns`, matching each row's
-positional array to its column order. `claude.tokens_input` and
-`claude.tokens_output` are the real attribute names used for exact token
-counts.
-
-A representative seven-day query against live data surfaces 5 sessions with
-exact token counts — including sessions with large individual turns rather
-than repetitive loops (`claude_loop_check` reports `healthy`), for example
-one 1,592-event, Opus-heavy session that alone accounted for 73% of the
-week's token spend.
+`claude_token_burn`, `claude_loop_check`, and `claude_model_fit` parse real
+`bzrk --json` output directly — `_json_records()` unwraps `Tables[0].rows`
+against `Tables[0].schema.columns`, matching each row's positional array to
+its column order. `claude.tokens_input` and `claude.tokens_output` are the
+real attribute names used for exact token counts. See
+[the v1.14.1 release notes](docs/releases/v1.14.1.md) for the silent-failure
+bug this fixed and the live-verification story behind it.
 
 ### Secret detection and output redaction
 
-Version 1.9.0 adds a stdlib-only secret scanner at the MCP output boundary.
-`BERSERK_MCP_REDACT` controls how every `tools/call` result is handled:
+A stdlib-only secret scanner at the MCP output boundary (v1.12.0; see
+[release notes](docs/releases/v1.12.0.md)). `BERSERK_MCP_REDACT` controls
+how every `tools/call` result is handled:
 
 - `redact` (default since F-009, 2026-07-20) replaces detected values with typed placeholders, such as `[REDACTED:aws_key]`.
 - `flag` leaves the result intact and prepends a warning when a secret is detected. This is an explicit opt-in away from the safer default. berserk-mcp logs a startup warning to stderr when you set this.
@@ -438,11 +476,12 @@ rotate any exposed credentials.
 
 ### Ingestion advisor
 
-Version 1.12.0 adds `suggest_ingestion`, an all-lane read-only tool. It is
-backed by the editable `ingestion_catalog.json` knowledge base. The tool
-recommends concrete sources, explains why each source matters, names an
-ingestion mechanism, and labels its maturity: `turnkey`,
-`collector-receiver`, `bridge-required`, or `manual`.
+`suggest_ingestion` is an all-lane read-only tool (v1.12.0; see
+[release notes](docs/releases/v1.12.0.md)), backed by the editable
+`ingestion_catalog.json` knowledge base. The tool recommends concrete
+sources, explains why each source matters, names an ingestion mechanism,
+and labels its maturity: `turnkey`, `collector-receiver`,
+`bridge-required`, or `manual`.
 
 Seeded use cases:
 
@@ -482,7 +521,8 @@ bridge. The advisor does not claim a native SCOM OTel receiver exists.
 | `trace_find_errors` | Spans whose status indicates an error — "which requests failed?" Entry point before `trace_analyze`. |
 | `trace_analyze` | Full breakdown of one trace by `trace_id`: every span in time order, plus correlated log lines sharing the same `trace_id`. |
 
-Version 1.14.0 adds distributed-trace analysis, following this table's
+Distributed-trace analysis (v1.14.0; see
+[release notes](docs/releases/v1.14.0.md)), following this table's
 `<signal>_name` field convention (`metric_name` for metrics, `body` and
 `severity_text` for logs). This feature was ported from a separate
 TypeScript MCP prototype (`ssn-bzrk`) that explored the same problem space.
@@ -495,6 +535,23 @@ Two design points worth knowing:
 
 1. **`duration` is a *dynamic*-typed column.** Berserk's KQL engine rejects `sort by duration` directly. `trace_find_slow` casts it with `toint(duration)` before sorting.
 2. **Not every row sharing a `trace_id` is a span.** Other correlated telemetry — for example a log row — can carry the same `trace_id`/`span_id` with a null `span_name`. `trace_analyze` filters to `isnotnull(span_name)`, and sorts by `start_time` so parent spans order correctly before their children.
+
+(Both were live bugs found while verifying this feature against a real
+cluster outage — see the release notes for the full story.)
+
+### Native analytics and graceful degradation
+
+`detect_anomalies` and `forecast_capacity` (v1.18.0; see
+[release notes](docs/releases/v1.18.0.md)) use Berserk's native series
+functions, returning compact arrays instead of exporting raw event windows.
+Forecast responses include R² and slope; trends with R² below 0.6 or a
+non-positive slope are explicitly reported as not forecastable rather than
+inventing a ceiling date.
+
+`find_similar` depends on semantic indexing and the `similarto` parser
+feature. On clusters where that feature is unavailable, the tool does not
+fail open or pretend exact matching is semantic — it explains the
+limitation and directs the caller to `search` with an exact `has` term.
 
 ---
 
@@ -687,8 +744,12 @@ pending jobs, and exits 0 (or 1 if any job needed human review). Example cron
 line:
 
 ```
-*/30 * * * * cd /path/to/berserk-mcp && python3 berserk_mcp.py --worker --auto-queue --max-jobs 2 >> ~/.local/state/berserk-worker.log 2>&1
+* * * * * cd /path/to/berserk-mcp && python3 berserk_mcp.py --worker --auto-queue --max-jobs 2 >> ~/.local/state/berserk-worker.log 2>&1
 ```
+
+The worker applies up to `BERSERK_WORKER_JITTER_SECONDS` of random startup
+jitter, so the cron entry can run every minute without synchronizing many
+tenants on a fixed minute.
 
 **Configuration** (all optional; a provider with no key configured is
 skipped):
@@ -888,6 +949,27 @@ out of scope for this README. See the official Berserk CLI docs at
 search "..."` succeeds, from the same shell environment berserk-mcp will
 run in.
 
+## Fleet-friendly operation
+
+When many MCP instances share one Berserk cluster, berserk-mcp limits the
+load each instance contributes (v1.18.0; see
+[release notes](docs/releases/v1.18.0.md)):
+
+- Worker mode adds randomized startup jitter, preventing synchronized cron
+  bursts.
+- Interactive calls use a separate per-tool budget and return an actionable
+  narrower-window message when the budget is exceeded.
+- Identical timeout retries are suppressed briefly to prevent retry storms.
+- Allowlisted read-only rollups use a short in-process cache. Cached
+  results are marked `(cached, <age>s old)`; mutation, discovery,
+  generation, and arbitrary-search tools are never cached.
+
+These controls are per-process and can be disabled or tuned with the
+environment variables in the configuration table below. Each default is a
+measured value, not an arbitrary guess — see
+[the v1.18.0 release notes](docs/releases/v1.18.0.md) for the evaluation
+evidence behind each number.
+
 ## Configure
 
 All configuration is via environment variables. All are optional:
@@ -896,7 +978,11 @@ All configuration is via environment variables. All are optional:
 |---|---|---|
 | `BZRK_BIN` | `bzrk` | Path/name of the Berserk CLI binary. |
 | `BZRK_PROFILE` | `local` | The `bzrk` profile to query. |
-| `BZRK_TIMEOUT` | `120` | Per-query timeout, seconds. |
+| `BZRK_TIMEOUT` | `120` | Per-query timeout, seconds (worker and generation paths). |
+| `BERSERK_WORKER_JITTER_SECONDS` | `7200` | Maximum random startup delay for `--worker`; set `0` to disable. Interactive MCP calls are never jittered. Derived from the 100-worker collision sweep. |
+| `BERSERK_MCP_TOOL_BUDGET_SECONDS` | `10` (clamped to `BZRK_TIMEOUT`) | Per-query budget for interactive `tools/call`; derived from the five-repeat homelab p95 sweep; timeout errors advise a narrower window. |
+| `BERSERK_MCP_FAIL_COOLDOWN_SECONDS` | `30` | Suppress identical timeout retries within one MCP process; `0` disables. |
+| `BERSERK_MCP_CACHE_TTL_SECONDS` | `120` | TTL for allowlisted read-only rollup results; derived from the synthetic trace replay; `0` disables. |
 | `BERSERK_TABLE` | `default` | The Berserk table to query. |
 | `BERSERK_MCP_LEARNED_PATH` | platform config dir | Where saved queries persist (`~/.config/berserk-mcp/learned.json` on Linux). |
 | `BERSERK_MCP_ROLE` | `all` | Active role lane: `sre`, `soc`, `claude`, `ops`, or `all`. Controls tool visibility and primer injection. |

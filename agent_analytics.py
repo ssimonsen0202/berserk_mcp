@@ -298,11 +298,12 @@ def _fetch_events(since):
     return _bzrk_search(_events_query(), since)
 
 
-def claude_loop_check(since="6h ago"):
-    text, is_err = _fetch_events(since)
+def claude_loop_check(since="6h ago", _events=None):
+    text, is_err = (None, False) if _events is not None else _fetch_events(since)
     if is_err:
         return text, True
-    reports = analyze_loop_events(_parse_rows(text))
+    events = _events if _events is not None else _parse_rows(text)
+    reports = analyze_loop_events(events)
     if not reports:
         return "No Claude Code tool-call events found in this window.", False
     lines = ["Claude Code loop check:"]
@@ -383,11 +384,12 @@ def analyze_model_fit_events(events):
     return reports
 
 
-def claude_model_fit(since="6h ago"):
-    text, is_err = _fetch_events(since)
+def claude_model_fit(since="6h ago", _events=None):
+    text, is_err = (None, False) if _events is not None else _fetch_events(since)
     if is_err:
         return text, True
-    reports = analyze_model_fit_events(_parse_rows(text))
+    events = _events if _events is not None else _parse_rows(text)
+    reports = analyze_model_fit_events(events)
     if not reports:
         return "No Claude Code model events found in this window.", False
     over = sum(1 for r in reports if r["verdict"].startswith("overpowered"))
@@ -606,11 +608,15 @@ def analyze_cost_daily(rows):
             "r2": None}
 
 
-def claude_token_burn(since="6h ago"):
-    text, is_err = _bzrk_search(_burn_events_query(), since)
+def claude_token_burn(since="6h ago", _events=None):
+    if _events is None:
+        text, is_err = _bzrk_search(_burn_events_query(), since)
+    else:
+        text, is_err = None, False
     if is_err:
         return text, True
-    reports = analyze_token_burn_events(_parse_rows(text))
+    events = _events if _events is not None else _parse_rows(text)
+    reports = analyze_token_burn_events(events)
     if not reports:
         return "No Claude Code events found for token-burn analysis.", False
     exact = sum(1 for r in reports if r["token_source"] == "exact")
@@ -891,9 +897,13 @@ def claude_workflow_insights(since="7d ago"):
 
 
 def agent_report(since="6h ago"):
-    loop_text, loop_err = claude_loop_check(since)
-    fit_text, fit_err = claude_model_fit(since)
-    burn_text, burn_err = claude_token_burn(since)
+    text, fetch_err = _fetch_events(since)
+    if fetch_err:
+        return text, True
+    events = _parse_rows(text)
+    loop_text, loop_err = claude_loop_check(since, _events=events)
+    fit_text, fit_err = claude_model_fit(since, _events=events)
+    burn_text, burn_err = claude_token_burn(since, _events=events)
     text = loop_text + "\n\n" + fit_text + "\n\n" + burn_text
     # Alert only on absolute-threshold verdicts. "high-burn" is a *relative*
     # top-decile ranking — analyze_token_burn_events always marks at least one

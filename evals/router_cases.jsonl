@@ -20,3 +20,12 @@
 {"id": "ambiguous_hot_container", "prompt": "Find the single hottest container by processor usage.", "expect_tool": "top_cpu"}
 {"id": "list_saved", "prompt": "What custom queries have I saved so far?", "expect_tool": "list_saved"}
 {"id": "save_query", "prompt": "Save this as a query named daily_errors: default | where severity_text=='ERROR' | count", "expect_tool": "save_query"}
+{"id": "detect_anomalies_volume", "prompt": "Is anything behaving abnormally in service volume over the last six hours?", "expect_tool": "detect_anomalies"}
+{"id": "detect_anomalies_service", "prompt": "Statistically check whether the checkout service has an event-volume anomaly.", "expect_tool": "detect_anomalies", "expect_args": {"service": "checkout"}}
+{"id": "detect_anomalies_nearmiss", "prompt": "Show the exact log lines from the abnormal checkout service.", "expect_tool": "logs_for_service", "expect_args": {"service": "checkout"}}
+{"id": "forecast_capacity_memory", "prompt": "At the current trend, when will host memory reach its ceiling?", "expect_tool": "forecast_capacity", "expect_args": {"metric": "system.memory.usage"}}
+{"id": "forecast_capacity_host", "prompt": "Forecast when system.memory.usage on host nuc-1 will fill up.", "expect_tool": "forecast_capacity", "expect_args": {"metric": "system.memory.usage", "host": "nuc-1"}}
+{"id": "forecast_capacity_nearmiss", "prompt": "What is the current memory usage on each host?", "expect_tool": "host_memory"}
+{"id": "find_similar_timeout", "prompt": "Find logs by meaning for database connection timeouts.", "expect_tool": "find_similar", "expect_args": {"description": "database connection timeouts"}}
+{"id": "find_similar_service", "prompt": "Find authentication failure messages by meaning in the api service.", "expect_tool": "find_similar", "expect_args": {"description": "authentication failure", "service": "api"}}
+{"id": "find_similar_nearmiss", "prompt": "Search the logs for the exact phrase database timeout.", "expect_tool": "search"}

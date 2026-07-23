@@ -133,6 +133,16 @@ def call_mock(user, tools):
     host = any(w in p for w in ("host", "vm", "machine", "node"))
 
     def pick():
+        if "exact phrase" in p or "exact log" in p or "exact term" in p:
+            return "search"
+        if "show" in p and "log" in p and "service" in p:
+            return "logs_for_service"
+        if "forecast" in p or ("capacity" in p and "trend" in p):
+            return "forecast_capacity"
+        if "similar" in p or "meaning" in p:
+            return "find_similar"
+        if "anomal" in p or "abnormal" in p:
+            return "detect_anomalies"
         if "saved" in p and ("list" in p or "what" in p):
             return "list_saved"
         if "save" in p:

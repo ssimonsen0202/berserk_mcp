@@ -17,6 +17,10 @@ Configuration (all optional, via environment):
   BZRK_BIN                 path/name of the bzrk binary           (default: "bzrk")
   BZRK_PROFILE             bzrk profile to query                  (default: "local")
   BZRK_TIMEOUT             per-query timeout in seconds           (default: "120")
+  BERSERK_WORKER_JITTER_SECONDS  max random startup delay for --worker (default: "7200")
+  BERSERK_MCP_TOOL_BUDGET_SECONDS interactive tools/call budget (default: "10")
+  BERSERK_MCP_FAIL_COOLDOWN_SECONDS identical timeout suppression (default: "30")
+  BERSERK_MCP_CACHE_TTL_SECONDS read-only result cache TTL (default: "120")
   BERSERK_TABLE            the Berserk table to query             (default: "default")
   BERSERK_MCP_LEARNED_PATH where saved queries persist  (default: per-user config dir)
 
@@ -47,6 +51,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import random
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -55,7 +60,7 @@ import ingestion_advisor
 import parser_factory
 import secret_scan
 
-__version__ = "1.17.0"
+__version__ = "1.18.0"
 
 
 def log(msg):
@@ -68,6 +73,40 @@ PROFILE = os.environ.get("BZRK_PROFILE", "local")
 TABLE = os.environ.get("BERSERK_TABLE", "default")
 DEFAULT_TIMEOUT = int(os.environ.get("BZRK_TIMEOUT", "120"))
 ACTIVE_ROLE = os.environ.get("BERSERK_MCP_ROLE", "all").strip().lower() or "all"
+
+
+def _nonnegative_float_env(name, default):
+    try:
+        return max(0.0, float(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+WORKER_JITTER_SECONDS = _nonnegative_float_env("BERSERK_WORKER_JITTER_SECONDS", 7200)
+TOOL_BUDGET_SECONDS = min(
+    _nonnegative_float_env("BERSERK_MCP_TOOL_BUDGET_SECONDS", 10),
+    max(0.0, float(DEFAULT_TIMEOUT)),
+)
+FAIL_COOLDOWN_SECONDS = _nonnegative_float_env("BERSERK_MCP_FAIL_COOLDOWN_SECONDS", 30)
+CACHE_TTL_SECONDS = _nonnegative_float_env("BERSERK_MCP_CACHE_TTL_SECONDS", 120)
+
+# Fleet controls are deliberately in-process. An MCP stdio server is one
+# agent session, so suppressing repeated work here addresses the retry storm
+# without pretending that separate tenants share state.
+_FLEET_LOCK = threading.RLock()
+_RESULT_CACHE = {}
+_FAIL_COOLDOWN = {}
+_FLEET_CONTEXT = None
+_FLEET_BACKEND_ID = None
+
+
+def _reset_fleet_state():
+    """Clear in-process fleet state (used by tests and controlled reloads)."""
+    global _FLEET_BACKEND_ID
+    with _FLEET_LOCK:
+        _RESULT_CACHE.clear()
+        _FAIL_COOLDOWN.clear()
+        _FLEET_BACKEND_ID = None
 
 # F-009: default to the safest output mode. An invalid mode string fails
 # CLOSED to 'redact' (the strictest setting), not to the weaker 'flag'
@@ -675,6 +714,76 @@ def q_cc_search(term: str) -> str:
     )
 
 
+_SERVICE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_TEXT_GUARD_RE = re.compile(r"['\"|\\`]")
+_FORECAST_METRICS = frozenset({
+    "system.memory.usage", "system.filesystem.usage", "system.disk.io",
+})
+
+
+def q_detect_anomalies(service=None):
+    filt = ""
+    if service:
+        filt = f"| where resource['service.name'] == '{service}' "
+    return (
+        f"{T} {filt}| make-series events=count() default=0 on timestamp step 5m "
+        f"by service=tostring(resource['service.name']) "
+        f"| extend (anomalies, score, baseline)=series_decompose_anomalies(events) "
+        f"| take 20"
+    )
+
+
+def q_forecast_capacity(metric, host=None):
+    filt = f"| where resource['host.name'] == '{host}' " if host else ""
+    state = "| where attributes['state'] == 'used' " if metric == "system.memory.usage" else ""
+    return (
+        f"{T} | where metric_name == '{metric}' {state}{filt}"
+        f"| make-series value=avg(value) default=0 on timestamp step 1h "
+        f"by host=tostring(resource['host.name']) "
+        f"| extend fit=series_fit_line(value) | take 20"
+    )
+
+
+def q_find_similar(description, service=None, k=10):
+    filt = f"| where resource['service.name'] == '{service}' " if service else ""
+    return (
+        f"{T} {filt}| where isnotnull(body) "
+        f"| top {k} by body similarto \"{description}\""
+    )
+
+
+def _forecast_fit_rows(text):
+    """Extract native ``series_fit_line`` coefficients from bzrk JSON.
+
+    Berserk returns the fit as a dynamic array whose first two values are
+    R² and slope (the same shape consumed by :mod:`agent_analytics`).  Keep
+    this parser deliberately conservative: an unrecognised renderer is not
+    treated as a reliable forecast.
+    """
+    whole = str(text or "").strip()
+    if not whole or whole == "(no rows)" or whole[0] not in "[{":
+        return []
+    try:
+        records = agent_analytics._json_records(json.loads(whole))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not records:
+        return []
+    parsed = []
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        fit = row.get("fit")
+        if not isinstance(fit, list) or len(fit) < 2:
+            continue
+        try:
+            r2, slope = float(fit[0]), float(fit[1])
+        except (TypeError, ValueError):
+            continue
+        parsed.append({"host": str(row.get("host") or "(all hosts)"), "r2": r2, "slope": slope})
+    return parsed
+
+
 # ---------- bzrk invocation ----------
 # bzrk has been observed to print an authentication failure (e.g. "Refresh
 # token rejected...") to stderr while still exiting 0 -- a real 2026-07-10
@@ -771,6 +880,9 @@ def valid_since(s):
 _KQL_PREFIX_RE = re.compile(r"^\s*" + re.escape(TABLE) + r"\b")
 
 
+_BZRK_TIMEOUT_TEXT_RE = re.compile(r"^bzrk timed out after ", re.IGNORECASE)
+
+
 def bzrk_search(kql, since, extra=None):
     """Run a KQL search on the configured profile and time window. `extra` adds
     trailing CLI flags (e.g. ['--json']) without duplicating the guards."""
@@ -784,7 +896,27 @@ def bzrk_search(kql, since, extra=None):
             f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
             f"'2d ago', or 'now'."
         ), True
-    return run_bzrk(["-P", PROFILE, "search", kql, "--since", since] + list(extra or []))
+    timeout = None
+    tool_name = None
+    if _FLEET_CONTEXT is not None:
+        timeout = _FLEET_CONTEXT.get("budget")
+        tool_name = _FLEET_CONTEXT.get("tool")
+    if timeout is None:
+        out, is_err = run_bzrk(
+            ["-P", PROFILE, "search", kql, "--since", since] + list(extra or [])
+        )
+    else:
+        out, is_err = run_bzrk(
+            ["-P", PROFILE, "search", kql, "--since", since] + list(extra or []),
+            timeout=timeout,
+        )
+    if is_err and _BZRK_TIMEOUT_TEXT_RE.match(str(out or "")) and tool_name:
+        return (
+            f"{tool_name} exceeded its {timeout:g}s query budget for window {since!r}. "
+            "Retry with a narrower 'since' window.",
+            True,
+        )
+    return out, is_err
 
 
 # bzrk builds that don't support --json reject it with an argument-parse error;
@@ -1048,6 +1180,8 @@ TOOLS = [
     {"name": "bzrk_query_perf", "description": "Berserk query engine latency percentiles: p50, p95, p99 in µs. Use for 'how fast is Berserk?', 'query latency', or 'p50/p95/p99 execution time'. Uses otel_histogram_percentile($raw, N) — the native Berserk histogram aggregate.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "discover_schema", "description": "Discover the shape of a data source: returns (1) every key present under `resource` with row counts, AND (2) a small structural sample with resource/attribute keys and body/metric presence flags. It never exports raw resource, attributes, or body values. Use to learn an unknown or newly-ingested source before querying it. Optional `service` filter. Pair with list_services / list_metrics. Once you work out a query with `search`, persist it with save_query so it becomes reusable.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "optional: limit to one service.name"}}, **_since())}},
     {"name": "search", "description": "Run an arbitrary Kusto/KQL query against the Berserk table. Use when the other tools do not fit; once it works, persist it with save_query. Fields are nested OTLP resource/log attributes, NOT flat columns — access as resource['service.name'], resource['host.name'], attributes['systemd.unit'], etc. (bare service_name/host_name do not exist and silently match zero rows instead of erroring). If you don't already know the exact field names for this source, call discover_schema first instead of guessing.", "inputSchema": {"type": "object", "properties": dict({"kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'. Field access is resource['key'] / attributes['key'], never a bare column name."}}, **_since()), "required": ["kql"]}},
+    {"name": "detect_anomalies", "roles": ["sre", "soc"], "description": "Statistical anomaly detection for service event volume over time. Uses zero-filled make-series and series_decompose_anomalies; use for 'is anything behaving abnormally?' rather than guessing a threshold. Optional service filter.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "optional service.name filter"}}, **_since())}},
+    {"name": "find_similar", "roles": ["sre", "soc"], "description": "Find log messages by meaning rather than exact text, for example 'database timeouts' or 'authentication failures'. Semantic indexing must be enabled on the Berserk cluster; use search with has for exact terms. Optional service filter and k (1-50).", "inputSchema": {"type": "object", "properties": dict({"description": {"type": "string", "maxLength": 500, "description": "natural-language description; quotes, pipes, backslashes, and backticks are rejected"}, "service": {"type": "string", "description": "optional service.name filter"}, "k": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10}}, **_since()), "required": ["description"]}},
     # --- Trace tools (span-level latency/error triage; UNVERIFIED field names — see the
     # comment above Q_TRACE_FIND_SLOW. Descriptions below flag this to the model too.) ---
     {"name": "trace_find_slow", "description": "Find the highest-duration root spans in the time window. Use for 'what's slow', 'find the slowest requests', or as the entry point before trace_analyze.", "inputSchema": {"type": "object", "properties": _since()}},
@@ -1055,6 +1189,7 @@ TOOLS = [
     {"name": "trace_analyze", "description": "Full breakdown of one trace by trace_id — every span in time order plus correlated log lines from the same trace_id. Use after trace_find_slow/trace_find_errors surface a trace_id worth investigating.", "inputSchema": {"type": "object", "properties": {"trace_id": {"type": "string", "description": "trace_id from trace_find_slow/trace_find_errors/search"}}, "required": ["trace_id"]}},
     # --- SRE role tools (reliability, headroom, saturation, error rates, rollback signals) ---
     {"name": "sre_error_rate", "roles": ["sre"], "description": "SRE view of ERROR log events grouped by service and minute. Use for 'is the error rate climbing', 'which service is burning error budget', or 'what should we rollback first'.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "forecast_capacity", "roles": ["sre"], "description": "Forecast when an allowlisted host gauge may reach its ceiling using a native series fit. Use for 'when will memory fill?' or 'at this trend when does capacity run out?'. Refuses unreliable trends instead of inventing a date.", "inputSchema": {"type": "object", "properties": dict({"metric": {"type": "string", "enum": sorted(_FORECAST_METRICS)}, "host": {"type": "string", "description": "optional host.name filter"}}, **_since()), "required": ["metric"]}},
     {"name": "sre_host_headroom", "roles": ["sre"], "description": "SRE view of host CPU load and memory used side-by-side. Use for 'which host is hottest', 'where is headroom lowest', or 'which VM is nearest saturation'.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "sre_ingest_health", "roles": ["sre"], "description": "SRE view of Berserk ingest lag and dropped-data signals per host. Use for 'is ingest healthy', 'are we dropping telemetry', or 'is observability lagging'.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "sre_service_health", "roles": ["sre"], "description": "SRE health rollup for one service: total events, error count, logs, metrics, last seen. Use for 'is service X healthy' or 'rollback signal for X'.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "service.name value"}}, **_since()), "required": ["service"]}},
@@ -1145,6 +1280,9 @@ TITLES = {
     "soc_timeline": "SOC: Incident Timeline",
     "discover_schema": "Discover Schema",
     "search": "Run KQL",
+    "detect_anomalies": "Detect Anomalies",
+    "forecast_capacity": "Forecast Capacity",
+    "find_similar": "Find Similar Logs",
     "trace_find_slow": "Trace: Find Slowest",
     "trace_find_errors": "Trace: Find Errors",
     "trace_analyze": "Trace: Analyze",
@@ -1241,7 +1379,7 @@ def _drain_pending_jobs(max_jobs):
     return outcomes, any_needs_human
 
 
-def handle_call(name, arguments):
+def _handle_call_uncached(name, arguments):
     """Dispatch a tools/call. Returns (text, is_error)."""
     # --- learning-loop management tools ---
     if name == "list_saved":
@@ -1400,6 +1538,88 @@ def handle_call(name, arguments):
                 f"[{gb.get('provider','?')}/{gb.get('model','?')} @ {gb.get('ts','?')}]"
             )
         return "Generated queries:\n" + "\n".join(lines), False
+
+    if name == "detect_anomalies":
+        service = str(arguments.get("service") or "").strip()
+        if service and not _SERVICE_RE.match(service):
+            return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
+        since = arguments.get("since") or "6h ago"
+        out, err = bzrk_search(q_detect_anomalies(service or None), since)
+        if err:
+            return out, True
+        if not out or out.strip() == "(no rows)":
+            return f"No anomalies detected (window {since}).", False
+        return f"Anomaly decomposition for window {since}; non-zero anomaly markers indicate spikes:\n{out}", False
+
+    if name == "forecast_capacity":
+        metric = str(arguments.get("metric") or "").strip()
+        if metric not in _FORECAST_METRICS:
+            return "metric is not allowlisted; use system.memory.usage, system.filesystem.usage, or system.disk.io", True
+        host = str(arguments.get("host") or "").strip()
+        if host and not _SERVICE_RE.match(host):
+            return "invalid host name (allowed: letters, digits, '.', '_', '-')", True
+        since = arguments.get("since") or "7d ago"
+        out, err = bzrk_search_json(q_forecast_capacity(metric, host or None), since)
+        if err:
+            return out, True
+        if not out or out.strip() == "(no rows)":
+            return f"No {metric} data found for forecast window {since}.", False
+        fits = _forecast_fit_rows(out)
+        if fits:
+            lines = []
+            for fit in fits:
+                if fit["r2"] < 0.6 or fit["slope"] <= 0:
+                    lines.append(
+                        f"{fit['host']}: no reliable trend — not forecastable "
+                        f"(R²={fit['r2']:.3f}, slope={fit['slope']:.3g})."
+                    )
+                else:
+                    lines.append(
+                        f"{fit['host']}: reliable upward trend "
+                        f"(R²={fit['r2']:.3f}, slope={fit['slope']:.3g}); "
+                        "native fit array returned, but no ceiling/date is inferred."
+                    )
+            return (
+                f"Capacity trend for {metric} (window {since}):\n" + "\n".join(lines)
+            ), False
+        return (
+            f"Capacity trend for {metric} (window {since}). Native fit arrays include "
+            "R² and slope; unable to parse coefficients from this renderer, so no "
+            "forecast date is inferred:\n" + out
+        ), False
+
+    if name == "find_similar":
+        description = str(arguments.get("description") or "").strip()
+        if not description:
+            return "missing required 'description'", True
+        if len(description) > 500:
+            return "description is too long (maximum 500 characters)", True
+        if _TEXT_GUARD_RE.search(description):
+            return "description may not contain quotes, pipe, backslash, or backtick", True
+        service = str(arguments.get("service") or "").strip()
+        if service and not _SERVICE_RE.match(service):
+            return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
+        try:
+            k = max(1, min(50, int(arguments.get("k", 10))))
+        except (TypeError, ValueError):
+            return "k must be an integer between 1 and 50", True
+        since = arguments.get("since") or "6h ago"
+        out, err = bzrk_search(q_find_similar(description, service or None, k), since)
+        if err:
+            if "similarto" in str(out).lower() or "semantic" in str(out).lower():
+                return (
+                    "Semantic indexing is not enabled on this Berserk cluster — "
+                    "falling back is not possible for meaning-based search; use "
+                    "search with has '<term>' for exact terms.", False
+                )
+            return out, True
+        if "_score" in out and not re.search(r"_score\s+(-?[1-9]\d*(?:\.\d+)?|0?\.\d*[1-9]\d*)", out):
+            return (
+                "Semantic indexing is not enabled on this Berserk cluster — falling "
+                "back is not possible for meaning-based search; use search with "
+                "has '<term>' for exact terms.", False
+            )
+        return out, False
 
     # --- simple fixed-query tools ---
     if name in SIMPLE:
@@ -1586,6 +1806,94 @@ def handle_call(name, arguments):
         )
 
     return "unknown tool: " + str(name), True
+
+
+_CACHEABLE_TOOLS = frozenset(set(SIMPLE) | {
+    "sre_service_health", "soc_timeline",
+    "claude_loop_check", "claude_model_fit", "claude_token_burn",
+    "claude_cost_report", "claude_session_deep_dive", "claude_workflow_insights",
+})
+
+
+def _fleet_args_key(name, arguments):
+    try:
+        encoded = json.dumps(arguments or {}, sort_keys=True, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        encoded = repr(arguments)
+    # The function identity prevents test doubles (and a reconfigured process)
+    # from inheriting another backend's cached response.
+    # Keep the callable itself in the key.  Using only ``id()`` can collide
+    # when short-lived test doubles (or a hot-reloaded backend) are collected
+    # and Python reuses their address.
+    try:
+        hash(run_bzrk)
+        backend = run_bzrk
+    except TypeError:
+        backend = (type(run_bzrk), id(run_bzrk))
+    return (backend, str(name), encoded)
+
+
+def _fleet_backend_fingerprint():
+    try:
+        hash(run_bzrk)
+        return run_bzrk
+    except TypeError:
+        return (type(run_bzrk), id(run_bzrk))
+
+
+def _cache_marker(text, age):
+    return f"{text}\n(cached, {age:.1f}s old)"
+
+
+def handle_call(name, arguments):
+    """Dispatch one tool call with fleet-friendly budget/cache controls."""
+    global _FLEET_CONTEXT, _FLEET_BACKEND_ID
+    args = arguments if isinstance(arguments, dict) else {}
+    backend_id = _fleet_backend_fingerprint()
+    with _FLEET_LOCK:
+        if _FLEET_BACKEND_ID != backend_id:
+            _RESULT_CACHE.clear()
+            _FAIL_COOLDOWN.clear()
+            _FLEET_BACKEND_ID = backend_id
+    key = _fleet_args_key(name, args)
+    now = time.monotonic()
+
+    with _FLEET_LOCK:
+        if FAIL_COOLDOWN_SECONDS > 0:
+            failed = _FAIL_COOLDOWN.get(key)
+            if failed and now - failed[2] < FAIL_COOLDOWN_SECONDS:
+                return (
+                    f"{failed[0]}\n(fail-cooldown, {now - failed[2]:.1f}s old; "
+                    "identical retry suppressed)",
+                    True,
+                )
+            if failed:
+                _FAIL_COOLDOWN.pop(key, None)
+        if name in _CACHEABLE_TOOLS and CACHE_TTL_SECONDS > 0:
+            cached = _RESULT_CACHE.get(key)
+            if cached and now - cached[2] < CACHE_TTL_SECONDS:
+                return _cache_marker(cached[0], now - cached[2]), cached[1]
+            if cached:
+                _RESULT_CACHE.pop(key, None)
+
+    previous_context = _FLEET_CONTEXT
+    _FLEET_CONTEXT = {
+        "tool": str(name),
+        "budget": TOOL_BUDGET_SECONDS if TOOL_BUDGET_SECONDS > 0 else None,
+    }
+    try:
+        text, is_err = _handle_call_uncached(name, args)
+    finally:
+        _FLEET_CONTEXT = previous_context
+
+    text = str(text)
+    timed_out = is_err and text.startswith(f"{name} exceeded its ")
+    with _FLEET_LOCK:
+        if timed_out and FAIL_COOLDOWN_SECONDS > 0:
+            _FAIL_COOLDOWN[key] = (text, True, time.monotonic())
+        elif name in _CACHEABLE_TOOLS and not is_err and CACHE_TTL_SECONDS > 0:
+            _RESULT_CACHE[key] = (text, False, time.monotonic())
+    return text, is_err
 
 
 # ---------- JSON-RPC plumbing ----------
@@ -1819,6 +2127,7 @@ def main():
             auto_queue=ns.auto_queue,
             max_jobs=max(1, min(ns.max_jobs, 5)),
             check_drift=ns.check_drift,
+            apply_jitter=True,
         ))
     if ns.agent_report:
         sys.exit(run_agent_report(since=ns.since))
@@ -1896,7 +2205,7 @@ def _drain_amendments_changelog():
         return text
 
 
-def run_worker_pass(auto_queue=False, max_jobs=3, check_drift=False):
+def run_worker_pass(auto_queue=False, max_jobs=3, check_drift=False, apply_jitter=False):
     """One headless pass for cron/systemd: detect new sources, optionally
     queue them, then drain up to max_jobs pending discovery jobs. Prints a
     summary to stdout, and -- if BERSERK_DISCORD_ALERT_SECRET is
@@ -1905,6 +2214,11 @@ def run_worker_pass(auto_queue=False, max_jobs=3, check_drift=False):
     needs_human, else 0. No loop, no daemon -- the caller (cron) owns the
     schedule.
     """
+    if apply_jitter and WORKER_JITTER_SECONDS > 0:
+        delay = random.uniform(0, WORKER_JITTER_SECONDS)
+        log(f"worker startup jitter: sleeping {delay:.1f}s (max {WORKER_JITTER_SECONDS:g}s)")
+        time.sleep(delay)
+
     detect_summary = parser_factory.detect_new_sources(
         since="24h ago", auto_queue=auto_queue, check_drift=check_drift,
         load_json_list=load_json_list, save_json_list=save_json_list,

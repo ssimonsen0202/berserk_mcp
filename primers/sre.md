@@ -11,6 +11,9 @@ signals, and give operators the data they need to decide whether to page, roll b
 | Which host is under pressure? | `sre_host_headroom` |
 | Is Berserk itself healthy? | `sre_ingest_health` |
 | What's the worst recurring error message? | `sre_top_error_messages` |
+| Is anything behaving abnormally? | `detect_anomalies` |
+| When will an allowlisted gauge reach capacity? | `forecast_capacity` |
+| Find failures by meaning (not exact text) | `find_similar` |
 | How is service X doing overall? | `sre_service_health service=<name>` |
 | What services exist? | `list_services` |
 | Recent logs for a service | `logs_for_service service=<name>` |

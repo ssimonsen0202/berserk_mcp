@@ -1,0 +1,36 @@
+{
+  "rows": [
+    {
+      "cooldown": 0,
+      "calls": 7,
+      "storm_calls_absorbed": 0,
+      "legitimate_retry_delay": 0
+    },
+    {
+      "cooldown": 10,
+      "calls": 7,
+      "storm_calls_absorbed": 4,
+      "legitimate_retry_delay": 0
+    },
+    {
+      "cooldown": 30,
+      "calls": 7,
+      "storm_calls_absorbed": 5,
+      "legitimate_retry_delay": 0
+    },
+    {
+      "cooldown": 60,
+      "calls": 7,
+      "storm_calls_absorbed": 5,
+      "legitimate_retry_delay": 0
+    },
+    {
+      "cooldown": 120,
+      "calls": 7,
+      "storm_calls_absorbed": 5,
+      "legitimate_retry_delay": 0
+    }
+  ],
+  "recommendation_seconds": 30,
+  "rule": "smallest cooldown absorbing >=90% of identical-retry storm calls"
+}

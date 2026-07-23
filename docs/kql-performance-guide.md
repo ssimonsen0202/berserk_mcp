@@ -92,7 +92,7 @@ cross-cluster queries, join hints, or `lookup`.
 Many independent MCP processes may share one cluster. A polite tool therefore:
 
 - uses narrow defaults and explicit limits on every call;
-- adds random startup jitter (0–300 seconds) in worker/cron mode and avoids
+- adds random startup jitter (up to 7,200 seconds by the measured default) in worker/cron mode and avoids
   synchronized cron minutes;
 - fails fast on a timeout with guidance to narrow the window; it does not
   immediately retry the same query in a loop;
@@ -163,3 +163,9 @@ zero-filled arrays rather than one row per bucket.
 | Host memory predicate (wrapped → bare path) | 0.14s / 0.48s | 0.22s / 0.54s | Counts matched (119 rows each); timing variance favored the wrapped run in this sample. |
 | Schema keys → `fieldstats` | 11.21s / 11.55s | 0.07s / 0.35s | Type/cardinality metadata replaces a full `bag_keys` expansion. |
 | Daily burn fit (1-day window) | 5.94s / 6.30s | 5.82s / 6.52s | Native `series_fit_line` returned seven fit values including R² and slope. |
+
+The bare-path sweep changed the `attributes['state'] == 'used'` predicates in
+host-memory queries. Claude error/tool-name and body predicates retain their
+`tostring` wrappers: a live bare comparison for `attributes['claude.error']`
+returned no rows, so removing the coercion would change semantics rather than
+improve pruning.

@@ -1,0 +1,60 @@
+{
+  "rows": [
+    {
+      "ttl": 0,
+      "calls": 500,
+      "hits": 0,
+      "hit_rate": 0.0,
+      "cluster_calls_avoided": 0,
+      "median_staleness": 0.0,
+      "p95_staleness": 0.0
+    },
+    {
+      "ttl": 15,
+      "calls": 500,
+      "hits": 161,
+      "hit_rate": 0.322,
+      "cluster_calls_avoided": 161,
+      "median_staleness": 7.21725123672536,
+      "p95_staleness": 14.059006807133528
+    },
+    {
+      "ttl": 30,
+      "calls": 500,
+      "hits": 225,
+      "hit_rate": 0.45,
+      "cluster_calls_avoided": 225,
+      "median_staleness": 14.476772137466241,
+      "p95_staleness": 27.88795892489543
+    },
+    {
+      "ttl": 60,
+      "calls": 500,
+      "hits": 291,
+      "hit_rate": 0.582,
+      "cluster_calls_avoided": 291,
+      "median_staleness": 30.38731908133991,
+      "p95_staleness": 55.93421410821884
+    },
+    {
+      "ttl": 120,
+      "calls": 500,
+      "hits": 345,
+      "hit_rate": 0.69,
+      "cluster_calls_avoided": 345,
+      "median_staleness": 52.64844968856792,
+      "p95_staleness": 112.62383435353513
+    },
+    {
+      "ttl": 300,
+      "calls": 500,
+      "hits": 410,
+      "hit_rate": 0.82,
+      "cluster_calls_avoided": 410,
+      "median_staleness": 137.7988153387771,
+      "p95_staleness": 281.77994554856195
+    }
+  ],
+  "recommendation_seconds": 120,
+  "rule": "smallest TTL achieving >=80% of maximum achievable hit rate"
+}

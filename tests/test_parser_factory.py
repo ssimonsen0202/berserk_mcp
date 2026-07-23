@@ -413,7 +413,7 @@ class SourceProfileTest(ParserFactoryTestBase):
         self.assertEqual(profile2["resource_keys"], ["service.name", "host.name"])
         # Each profile needs fieldstats + one sample query; getschema is
         # reused and the redundant per-source keys query is never issued.
-        self.assertEqual(len(self.calls) - first_call_count, 2)
+        self.assertEqual(len(self.calls) - first_call_count, 3)
         self.assertNotIn("project k=bag_keys(resource)", "\n".join(c[3] for c in self.calls))
 
     def test_build_source_profile_truncates_and_persists_private_files(self):

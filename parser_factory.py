@@ -742,6 +742,52 @@ def _q_fieldstats(source, kind):
     )
 
 
+def _q_profile_batch(source, kind):
+    """Batch fieldstats, sample, and getschema into one request."""
+    if kind == "service":
+        stats = (
+            f"{_table} | where resource['service.name'] == '{source}' "
+            f"| fieldstats resource with limit=50 depth=2"
+        )
+        sample = _q_discover_sample(source)
+    else:
+        stats = (
+            f"{_table} | where metric_name == '{source}' "
+            f"| fieldstats $raw with limit=50 depth=2"
+        )
+        sample = _q_metric_sample(source)
+    return f"{stats}; {sample}; {_table} | getschema"
+
+
+def _render_multi_table(table):
+    """Render one bzrk JSON table as bounded TSV for existing parsers."""
+    schema = table.get("schema") or {}
+    columns = [c.get("name") for c in schema.get("columns", []) if isinstance(c, dict)]
+    rows = table.get("rows") or []
+    if not columns:
+        return ""
+    lines = ["\t".join(str(c) for c in columns)]
+    for row in rows:
+        values = []
+        for value in (row if isinstance(row, list) else []):
+            values.append(json.dumps(value, separators=(",", ":")) if isinstance(value, (dict, list)) else str(value or ""))
+        lines.append("\t".join(values))
+    return "\n".join(lines)
+
+
+def _split_profile_batch(raw_text):
+    """Return (fieldstats, sample, getschema) text or None if ambiguous."""
+    try:
+        document = json.loads(str(raw_text or ""))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    tables = document.get("Tables") if isinstance(document, dict) else None
+    if not isinstance(tables, list) or len(tables) < 3:
+        return None
+    rendered = [_render_multi_table(t) for t in tables[:3] if isinstance(t, dict)]
+    return tuple(rendered) if len(rendered) == 3 and all(rendered) else None
+
+
 def _parse_fieldstats_keys(raw_text):
     """Extract safe resource keys from fieldstats' AttributePath column."""
     if "AttributePath" not in str(raw_text or ""):
@@ -813,9 +859,22 @@ def build_source_profile(source, kind, since):
         return None, "invalid source name (allowed: letters, digits, '.', '_', '-')"
     parts = {}
     errors = []
+    batch_parts = None
+    batch_out, batch_err = _bzrk_search(_q_profile_batch(source, kind), since)
+    if not batch_err:
+        batch_parts = _split_profile_batch(batch_out)
+        if batch_parts is None:
+            # Older bzrk builds or test doubles may not expose per-statement
+            # JSON tables. Keep the proven sequential path in that case.
+            batch_parts = None
 
     if kind == "service":
-        stats_out, stats_err = _bzrk_search(_q_fieldstats(source, kind), since)
+        if batch_parts is not None:
+            stats_out, sample_out, schema_out = batch_parts
+            stats_err = sample_err = schema_err = False
+        else:
+            stats_out, stats_err = _bzrk_search(_q_fieldstats(source, kind), since)
+            sample_out = sample_err = schema_out = schema_err = None
         if stats_err:
             errors.append(f"fieldstats: {_safe_diag_text(stats_out)}")
         else:
@@ -826,7 +885,8 @@ def build_source_profile(source, kind, since):
             stats_keys = _parse_fieldstats_keys(stats_out)
             if stats_keys:
                 parts["resource_keys"] = stats_keys
-        sample_out, sample_err = _bzrk_search(_q_discover_sample(source), since)
+        if batch_parts is None:
+            sample_out, sample_err = _bzrk_search(_q_discover_sample(source), since)
         if sample_err:
             errors.append(f"sample: {_safe_diag_text(sample_out)}")
         else:
@@ -853,7 +913,12 @@ def build_source_profile(source, kind, since):
             else:
                 parts["resource_keys_raw"] = keys_out
     else:
-        stats_out, stats_err = _bzrk_search(_q_fieldstats(source, kind), since)
+        if batch_parts is not None:
+            stats_out, sample_out, schema_out = batch_parts
+            stats_err = sample_err = schema_err = False
+        else:
+            stats_out, stats_err = _bzrk_search(_q_fieldstats(source, kind), since)
+            sample_out = sample_err = schema_out = schema_err = None
         if stats_err:
             errors.append(f"fieldstats: {_safe_diag_text(stats_out)}")
         else:
@@ -861,7 +926,8 @@ def build_source_profile(source, kind, since):
                 parts["fieldstats_excerpt"] = _safe_excerpt(stats_out, GETSCHEMA_EXCERPT_CAP)
             except (RuntimeError, TypeError) as exc:
                 return None, f"redaction failed for fieldstats: {type(exc).__name__}"
-        sample_out, sample_err = _bzrk_search(_q_metric_sample(source), since)
+        if batch_parts is None:
+            sample_out, sample_err = _bzrk_search(_q_metric_sample(source), since)
         if sample_err:
             errors.append(f"sample: {_safe_diag_text(sample_out)}")
         else:
@@ -870,7 +936,8 @@ def build_source_profile(source, kind, since):
             except (RuntimeError, TypeError) as exc:
                 return None, f"redaction failed for sample: {type(exc).__name__}"
 
-    schema_out, schema_err = _cached_getschema(since)
+    if batch_parts is None:
+        schema_out, schema_err = _cached_getschema(since)
     if schema_err:
         errors.append(f"getschema: {_safe_diag_text(schema_out)}")
     else:
@@ -927,8 +994,10 @@ def _build_kql_idioms():
         "- Time filtering is handled OUTSIDE the query by a --since flag; do NOT add\n"
         "  \"| where timestamp > ago(...)\" clauses.\n"
         "- Supported: where, project, extend, summarize (count, countif, avg, max,\n"
-        "  min, sum), sort by, take, bin(), mv-expand, split, substring, iff,\n"
-        "  bag_keys. Not supported: joins across tables, let statements, functions.\n"
+        "  min, sum), sort by, take, tail, top, bin(), make-series,\n"
+        "  series_fit_line, series_decompose_anomalies, extract_log_template,\n"
+        "  fieldstats, mv-expand, split, substring, iff, bag_keys. Not supported:\n"
+        "  joins across tables, let statements, and unverified functions.\n"
         "- Keep result sets bounded: end detail queries with \"| take 50\" or less."
     )
 

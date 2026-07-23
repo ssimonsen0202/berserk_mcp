@@ -11,6 +11,8 @@ an incident. Focus on first-seen services, log spikes, repeated failures, and hi
 | Which services are logging the most? Spikes? | `soc_log_spike` |
 | Any new services I haven't seen before? | `soc_new_services` |
 | What errors keep repeating (> 5 times)? | `soc_repeated_errors` |
+| Is anything behaving abnormally? | `detect_anomalies` |
+| Find logs by meaning (not exact text) | `find_similar` |
 | Walk me through service X's recent activity | `soc_timeline service=<name>` |
 | What services exist? | `list_services` |
 | Recent logs for a specific service | `logs_for_service service=<name>` |
