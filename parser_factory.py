@@ -188,8 +188,11 @@ def _safe_resource_keys(raw_lines_text):
     Non-conforming tokens (control chars, oversized, instruction-shaped, or
     any character outside [A-Za-z0-9._-]) are dropped, not sanitized-in-
     place -- a key list has no use for a "redacted" placeholder token."""
+    lines = str(raw_lines_text or "").splitlines()
+    if not any(line.strip().lower().startswith("key") for line in lines):
+        return []
     keys = []
-    for line in str(raw_lines_text or "").splitlines():
+    for line in lines:
         tokens = line.strip().split()
         if not tokens or tokens[0] in ("key", "n"):
             continue
@@ -726,6 +729,37 @@ def _q_discover_keys(source):
     )
 
 
+def _q_fieldstats(source, kind):
+    """Return native field metadata for a bounded source slice."""
+    if kind == "service":
+        return (
+            f"{_table} | where resource['service.name'] == '{source}' "
+            f"| fieldstats resource with limit=50 depth=2"
+        )
+    return (
+        f"{_table} | where metric_name == '{source}' "
+        f"| fieldstats $raw with limit=50 depth=2"
+    )
+
+
+def _parse_fieldstats_keys(raw_text):
+    """Extract safe resource keys from fieldstats' AttributePath column."""
+    if "AttributePath" not in str(raw_text or ""):
+        return []
+    keys = []
+    for line in str(raw_text or "").splitlines():
+        fields = line.strip().split()
+        if not fields or fields[0] in {"AttributePath", "Type"}:
+            continue
+        key = fields[0]
+        match = re.fullmatch(r"resource\[['\"]([^'\"]+)['\"]\]", key)
+        if match:
+            key = match.group(1)
+        if _RESOURCE_KEY_RE.match(key):
+            keys.append(key)
+    return sorted(set(keys))[:MAX_RESOURCE_KEYS]
+
+
 def _q_discover_keys_batch():
     """Return all resource keys grouped by service in one scan."""
     return (
@@ -751,7 +785,7 @@ def _parse_batch_resource_keys(raw_text):
 
 def _q_discover_sample(source):
     return (
-        f"{_table} | where resource['service.name'] == '{source}' | take 6 "
+        f"{_table} | where resource['service.name'] == '{source}' | take 3 "
         f"| project resource_keys=bag_keys(resource), "
         f"attribute_keys=bag_keys(attributes), "
         f"has_body=isnotempty(tostring(body)), "
@@ -762,7 +796,7 @@ def _q_discover_sample(source):
 
 def _q_metric_sample(source):
     return (
-        f"{_table} | where metric_name == '{source}' | take 6 "
+        f"{_table} | where metric_name == '{source}' | take 3 "
         f"| project resource_keys=bag_keys(resource), "
         f"attribute_keys=bag_keys(attributes), "
         f"has_value=isnotnull(value)"
@@ -781,6 +815,17 @@ def build_source_profile(source, kind, since):
     errors = []
 
     if kind == "service":
+        stats_out, stats_err = _bzrk_search(_q_fieldstats(source, kind), since)
+        if stats_err:
+            errors.append(f"fieldstats: {_safe_diag_text(stats_out)}")
+        else:
+            try:
+                parts["fieldstats_excerpt"] = _safe_excerpt(stats_out, GETSCHEMA_EXCERPT_CAP)
+            except (RuntimeError, TypeError) as exc:
+                return None, f"redaction failed for fieldstats: {type(exc).__name__}"
+            stats_keys = _parse_fieldstats_keys(stats_out)
+            if stats_keys:
+                parts["resource_keys"] = stats_keys
         sample_out, sample_err = _bzrk_search(_q_discover_sample(source), since)
         if sample_err:
             errors.append(f"sample: {_safe_diag_text(sample_out)}")
@@ -808,6 +853,14 @@ def build_source_profile(source, kind, since):
             else:
                 parts["resource_keys_raw"] = keys_out
     else:
+        stats_out, stats_err = _bzrk_search(_q_fieldstats(source, kind), since)
+        if stats_err:
+            errors.append(f"fieldstats: {_safe_diag_text(stats_out)}")
+        else:
+            try:
+                parts["fieldstats_excerpt"] = _safe_excerpt(stats_out, GETSCHEMA_EXCERPT_CAP)
+            except (RuntimeError, TypeError) as exc:
+                return None, f"redaction failed for fieldstats: {type(exc).__name__}"
         sample_out, sample_err = _bzrk_search(_q_metric_sample(source), since)
         if sample_err:
             errors.append(f"sample: {_safe_diag_text(sample_out)}")
@@ -838,6 +891,7 @@ def build_source_profile(source, kind, since):
         "first_profiled": _now_iso(),
         "resource_keys": resource_keys,
         "sample_excerpt": parts.get("sample_excerpt", ""),
+        "fieldstats_excerpt": parts.get("fieldstats_excerpt", ""),
         "getschema_excerpt": parts.get("getschema_excerpt", ""),
         "verified_queries": [],
     }
@@ -1270,6 +1324,7 @@ def generate_parser_for(job):
         f"Source: {source} (kind={kind})\n"
         f"Target role: {role_hint or 'none specified'}\n"
         f"Resource keys: {', '.join(profile['resource_keys']) or '(none discovered)'}\n"
+        f"fieldstats excerpt:\n{profile.get('fieldstats_excerpt', '')}\n\n"
         f"getschema excerpt:\n{profile['getschema_excerpt']}\n\n"
         f"<sample-data>\n{profile['sample_excerpt']}\n</sample-data>\n"
     )

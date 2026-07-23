@@ -322,7 +322,7 @@ primer. These roles route from the tool descriptions directly.
 | `logs_for_service` | Recent log lines for one service. |
 | `schema` | Live tables + column schema introspection. |
 | `list_metrics` | Every metric name being ingested, with counts (discovery). |
-| `discover_schema` | Resource/attribute keys plus structural presence flags to learn an unknown source without exporting raw telemetry. |
+| `discover_schema` | Field metadata (type, cardinality, representative values) via Berserk's native `fieldstats`, plus a structural presence sample, to learn an unknown source without exporting raw telemetry (v1.17.0; previously `bag_keys`-based). |
 | `bzrk_query_perf` | Berserk query engine latency percentiles (p50/p95/p99 in µs). |
 | `search` | Run arbitrary KQL (escape hatch). Save the result with `save_query` once it works. Fields are nested `resource`/`attributes`, not flat columns — for example `resource['service.name']`, not `service_name`. Call `discover_schema` first if you don't know the field names for a source. A wrong field name matches zero rows; it does not raise an error. |
 
@@ -367,7 +367,7 @@ tools mine that data. See [docs/claude-code.md](docs/claude-code.md) for the pip
 | `claude_loop_check` | Flags sessions that repeat the same tool/target, retry the same error, or oscillate between calls. |
 | `claude_model_fit` | Heuristic model-tier fit: frontier model on trivial work, or cheap model on complex/repetitive work. Not a billing statement. |
 | `claude_token_burn` | Token burn per session and progress unit, using exact usage attributes when present and a labeled estimate otherwise. |
-| `claude_cost_report` | Multi-day cost report: per-day burn with exact/estimated labels, per-model split, optional per-project attribution from file paths, and a burn-growing/flat/declining trend verdict. |
+| `claude_cost_report` | Multi-day cost report: per-day burn with exact/estimated labels, per-model split, optional per-project attribution from file paths, and a burn-growing/flat/declining trend verdict backed by Berserk's native `series_fit_line` (reports R², v1.17.0). |
 | `claude_session_deep_dive` | One session's timeline: contiguous tool phases with error counts, activity gaps over 5 minutes, cumulative burn, and a loop verdict. |
 | `claude_workflow_insights` | Cross-session patterns: most common tool sequences, error hotspots by tool+target, top-decile burn-per-target sessions. |
 
@@ -1111,7 +1111,12 @@ via the learning loop.
 
 Before writing KQL, read the [Berserk KQL performance guide](docs/kql-performance-guide.md).
 It covers index-friendly predicates, `tail` for recency, narrow projections,
-explicit limits, live verification, and the shared-cluster fleet rules.
+explicit limits, live verification, and the shared-cluster fleet rules. As of
+v1.17.0, the guide's "Verified function availability" table also confirms
+`make-series`, `series_fit_line`, `series_decompose_anomalies`, `series_fir`,
+`rate`, `deriv`, `bin_auto`, `extract_log_template`, and `fieldstats` all work
+against the live cluster — every core query builder now prefers these native
+forms over hand-rolled `bin()`/`sort`/`bag_keys` equivalents where one exists.
 
 **1. Find the KQL on a live instance.** Iterate with `bzrk` until the query
 returns clean rows — names, units, sort order. *Do not ship a query you have

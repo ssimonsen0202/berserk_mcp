@@ -92,7 +92,7 @@ class ParserFactoryTestBase(unittest.TestCase):
     # convenience for the profiling responses every generation test needs
     def _stub_profile_responses(self):
         self.responses["bag_keys(resource)"] = ("key n\nservice.name 5\n", False)
-        self.responses["take 6"] = ("resource attributes metric_name severity_text body\n", False)
+        self.responses["take 3"] = ("resource attributes metric_name severity_text body\n", False)
         self.responses[f"{bm.TABLE} | getschema"] = ("col1 string\n", False)
 
 
@@ -394,8 +394,12 @@ class LlmClientTest(ParserFactoryTestBase):
 
 # ---------- P2: source profiling and schema knowledge store ----------
 class SourceProfileTest(ParserFactoryTestBase):
+    def test_fieldstats_resource_paths_are_normalized(self):
+        raw = "AttributePath Type Cardinality\nresource['service.name'] string 1\n"
+        self.assertEqual(pf._parse_fieldstats_keys(raw), ["service.name"])
+
     def test_profile_uses_structural_sample_keys_and_schema_cache(self):
-        self.responses["take 6"] = (
+        self.responses["take 3"] = (
             'resource_keys attribute_keys\n["service.name", "host.name"] []\n', False)
         self.responses[f"{bm.TABLE} | getschema"] = ("col1 string\n", False)
 
@@ -407,14 +411,14 @@ class SourceProfileTest(ParserFactoryTestBase):
         profile2, err2 = pf.build_source_profile("mysvc2", "service", "24h ago")
         self.assertIsNone(err2)
         self.assertEqual(profile2["resource_keys"], ["service.name", "host.name"])
-        # Each profile needs one sample query; getschema is reused and the
-        # redundant per-source keys query is never issued.
-        self.assertEqual(len(self.calls) - first_call_count, 1)
+        # Each profile needs fieldstats + one sample query; getschema is
+        # reused and the redundant per-source keys query is never issued.
+        self.assertEqual(len(self.calls) - first_call_count, 2)
         self.assertNotIn("project k=bag_keys(resource)", "\n".join(c[3] for c in self.calls))
 
     def test_build_source_profile_truncates_and_persists_private_files(self):
         self.responses["bag_keys(resource)"] = ("key n\nservice.name 5\nhost.name 3\n", False)
-        self.responses["take 6"] = ("x" * 10000, False)
+        self.responses["take 3"] = ("x" * 10000, False)
         self.responses[f"{bm.TABLE} | getschema"] = ("y" * 5000, False)
 
         profile, err = pf.build_source_profile("mysvc", "service", "24h ago")
@@ -502,7 +506,7 @@ class SourceProfileTest(ParserFactoryTestBase):
     def test_instruction_shaped_resource_key_is_dropped(self):
         self.responses["bag_keys(resource)"] = (
             "key n\nservice.name 5\npassword=dummy-resource-key-secret 1\n", False)
-        self.responses["take 6"] = ("x" * 100, False)
+        self.responses["take 3"] = ("x" * 100, False)
         self.responses[f"{bm.TABLE} | getschema"] = ("y" * 100, False)
         profile, err = pf.build_source_profile("mysvc", "service", "24h ago")
         self.assertIsNone(err)
@@ -515,7 +519,7 @@ class SourceProfileTest(ParserFactoryTestBase):
         # rejection, not accidental whitespace tokenization.
         self.responses["bag_keys(resource)"] = (
             "key n\nservice.name 5\nweird\x07key 1\n", False)
-        self.responses["take 6"] = ("x" * 100, False)
+        self.responses["take 3"] = ("x" * 100, False)
         self.responses[f"{bm.TABLE} | getschema"] = ("y" * 100, False)
         profile, err = pf.build_source_profile("mysvc", "service", "24h ago")
         self.assertIsNone(err)
@@ -525,7 +529,7 @@ class SourceProfileTest(ParserFactoryTestBase):
         huge = "a" * 200
         self.responses["bag_keys(resource)"] = (
             f"key n\nservice.name 5\n{huge} 1\n", False)
-        self.responses["take 6"] = ("x" * 100, False)
+        self.responses["take 3"] = ("x" * 100, False)
         self.responses[f"{bm.TABLE} | getschema"] = ("y" * 100, False)
         profile, err = pf.build_source_profile("mysvc", "service", "24h ago")
         self.assertIsNone(err)
@@ -534,7 +538,7 @@ class SourceProfileTest(ParserFactoryTestBase):
     def test_resource_key_count_is_capped(self):
         lines = "\n".join(f"k{i}.attr {i}" for i in range(pf.MAX_RESOURCE_KEYS + 20))
         self.responses["bag_keys(resource)"] = (f"key n\n{lines}\n", False)
-        self.responses["take 6"] = ("x" * 100, False)
+        self.responses["take 3"] = ("x" * 100, False)
         self.responses[f"{bm.TABLE} | getschema"] = ("y" * 100, False)
         profile, err = pf.build_source_profile("mysvc", "service", "24h ago")
         self.assertIsNone(err)
@@ -548,7 +552,7 @@ class SourceProfileTest(ParserFactoryTestBase):
         os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
         self.responses["bag_keys(resource)"] = (
             "key n\nservice.name 5\npassword=dummy-resource-key-secret 1\n", False)
-        self.responses["take 6"] = ("x" * 100, False)
+        self.responses["take 3"] = ("x" * 100, False)
         self.responses[f"{bm.TABLE} | getschema"] = ("y" * 100, False)
         captured_prompts = []
         orig_llm_complete = pf.llm_complete
@@ -1216,7 +1220,7 @@ class SecurityTest(ParserFactoryTestBase):
         ]
         sensitive_body = " ".join(sensitive_values)
         self._stub_profile_responses()
-        self.responses["take 6"] = (sensitive_body, False)
+        self.responses["take 3"] = (sensitive_body, False)
         os.environ["BERSERK_LLM_LADDER"] = "openai"
         os.environ["OPENAI_API_KEY"] = "test-key"
         self.llm_responses = [(None, "HTTP 401")]
@@ -1257,7 +1261,7 @@ class SecurityTest(ParserFactoryTestBase):
         try:
             pf._redact = lambda text: 42
             self._stub_profile_responses()
-            self.responses["take 6"] = ("some sample data", False)
+            self.responses["take 3"] = ("some sample data", False)
             profile, err = pf.build_source_profile("badsvc", "service", "24h ago")
             self.assertIsNone(profile)
             self.assertIn("redaction failed", err)

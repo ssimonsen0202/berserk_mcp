@@ -114,7 +114,7 @@ class BerserkMcpTest(unittest.TestCase):
             "default | where isnotnull(trace_id) | where status_code == 'ERROR' "
             "| project trace_id, span_name, timestamp, "
             "service=tostring(resource['service.name']) "
-            "| sort by timestamp desc | take 20",
+            "| tail 20",
         )
 
     def test_detail_queries_bound_body_and_use_structural_discovery(self):
@@ -127,6 +127,7 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertIn("bag_keys(resource)", discovery_query)
         self.assertIn("has_body", discovery_query)
         self.assertNotIn("| project resource, attributes", discovery_query)
+        self.assertIn("fieldstats resource", bm.q_discover_fieldstats("nginx"))
 
     def test_container_hosts_callable(self):
         text, err = bm.handle_call("container_hosts", {})
@@ -148,10 +149,10 @@ class BerserkMcpTest(unittest.TestCase):
     def test_discover_schema_no_service(self):
         text, err = bm.handle_call("discover_schema", {})
         self.assertFalse(err)
-        # makes TWO calls: bag_keys then row sample
+        # makes TWO calls: fieldstats then row sample
         self.assertEqual(len(self.calls), 2)
-        self.assertIn("bag_keys(resource)", self.calls[0][3])
-        self.assertIn("take 6", self.calls[1][3])
+        self.assertIn("fieldstats resource", self.calls[0][3])
+        self.assertIn("take 3", self.calls[1][3])
         # neither call filters by service when none given
         for c in self.calls:
             self.assertNotIn("service.name", c[3])
@@ -197,6 +198,7 @@ class BerserkMcpTest(unittest.TestCase):
         text, err = bm.handle_call("claude_search", {"term": "TimeoutError"})
         self.assertFalse(err)
         self.assertIn("contains 'TimeoutError'", self.calls[-1][3])
+        self.assertIn("| tail 40 | project", self.calls[-1][3])
 
     def test_missing_required_args(self):
         for name in ("logs_for_service", "search", "claude_search"):

@@ -124,3 +124,42 @@ rows; the captured engine times were 0.12s and 0.14s respectively. The
 wrapped `tostring(resource['service.name'])` predicate had the same physical
 skip profile as the bare predicate in this deployment. Re-run these checks when
 the cluster's indexing configuration changes.
+
+### Verified function availability (2026-07-23)
+
+These are bounded live probes against the configured `homelab` profile using a
+15-minute event-time window. “Available” means the query parsed and returned a
+result; the semantic-top probe is recorded as unavailable because the parser
+rejected the documented modifier.
+
+| Feature | Result | Probe/evidence |
+|---|---|---|
+| `tail` | Available | `default \| tail 1` returned the newest row. |
+| `make-series` | Available | Five-minute count series returned three buckets. |
+| `series_fit_line` | Available | Returned fit coefficients for the count series. |
+| `series_decompose_anomalies` | Available | Returned anomaly, score, and baseline arrays. |
+| `series_fir` | Available | Returned the filtered count series. |
+| `rate` | Available | `rate($raw.max, timestamp)` returned a numeric aggregate. |
+| `deriv` | Available | `deriv($raw.max, timestamp)` returned a numeric aggregate. |
+| `bin_auto` | Available | `summarize ... by bin_auto(timestamp)` returned a bucket. |
+| `extract_log_template` | Available | `extract_log_template(tostring($raw))` returned a template. |
+| `fieldstats` | Available | `fieldstats $raw with limit=3 depth=1` returned field metadata. |
+| `top ... similarto` | Not available in current parser | `top 1 by metric_name similarto "timeout"` failed with a parse error at `similarto`. |
+| Multi-statement `;` | Available | `default \| count; default \| take 1` returned two result tables. |
+
+### Phase 1 native-query timings (2026-07-23)
+
+Read-only live comparisons use the same `homelab` profile and bounded window;
+the wall-clock column includes CLI and transport overhead, while engine time is
+the `--stats` query-time value. `make-series` intentionally returns compact
+zero-filled arrays rather than one row per bucket.
+
+| Upgrade | Before (engine / wall) | After (engine / wall) | Result |
+|---|---:|---:|---|
+| Error-rate rollup → `make-series` | 0.25s / 0.59s | 0.20s / 0.53s | Same one-service result; zero-filled series shape. |
+| Log-spike rollup → `make-series` | 0.42s / 0.78s | 0.65s / 1.33s | Zero-filled series; modest overhead is the cost of preserving empty buckets. |
+| Error grouping → `extract_log_template` | 0.14s / 0.49s | 0.11s / 0.54s | Variable-bearing messages cluster under one template with an example line. |
+| Recent severity rows → `tail` | 0.09s / 0.40s | 0.10s / 0.39s | Recency preserved; `timestamp` remains available before `tail`. |
+| Host memory predicate (wrapped → bare path) | 0.14s / 0.48s | 0.22s / 0.54s | Counts matched (119 rows each); timing variance favored the wrapped run in this sample. |
+| Schema keys → `fieldstats` | 11.21s / 11.55s | 0.07s / 0.35s | Type/cardinality metadata replaces a full `bag_keys` expansion. |
+| Daily burn fit (1-day window) | 5.94s / 6.30s | 5.82s / 6.52s | Native `series_fit_line` returned seven fit values including R² and slope. |

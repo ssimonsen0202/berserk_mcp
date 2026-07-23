@@ -59,7 +59,7 @@ class SRERoutingEval(RoutingEvalBase):
         text, err = bm.handle_call("sre_error_rate", {})
         self.assertFalse(err)
         self.assertIn("severity_text == 'ERROR'", self._kql())
-        self.assertIn("bin(timestamp, 1m)", self._kql())
+        self.assertIn("make-series", self._kql())
 
     def test_error_rate_with_since(self):
         # "error rate for the last 30 minutes"
@@ -90,6 +90,8 @@ class SRERoutingEval(RoutingEvalBase):
         self.assertFalse(err)
         self.assertIn("hits=count()", self._kql())
         self.assertIn("take 40", self._kql())
+        self.assertIn("extract_log_template", self._kql())
+        self.assertIn("example=", self._kql())
 
     # --- service health (parameterized) ---
     def test_how_is_specific_service_doing(self):
@@ -143,7 +145,7 @@ class SOCRoutingEval(RoutingEvalBase):
         text, err = bm.handle_call("soc_log_spike", {})
         self.assertFalse(err)
         self.assertIn("hits=count()", self._kql())
-        self.assertIn("bin(timestamp, 1m)", self._kql())
+        self.assertIn("make-series", self._kql())
 
     def test_any_new_services(self):
         # "are there any services I haven't seen before"
@@ -156,13 +158,14 @@ class SOCRoutingEval(RoutingEvalBase):
         text, err = bm.handle_call("soc_repeated_errors", {})
         self.assertFalse(err)
         self.assertIn("hits > 5", self._kql())
+        self.assertIn("extract_log_template", self._kql())
 
     def test_incident_timeline_for_service(self):
         # "walk me through what payment-svc did in the last hour"
         text, err = bm.handle_call("soc_timeline", {"service": "payment-svc"})
         self.assertFalse(err)
         self.assertIn("payment-svc", self._kql())
-        self.assertIn("sort by timestamp desc", self._kql())
+        self.assertIn("tail 100", self._kql())
 
 
 class RoleBoundaryEval(RoutingEvalBase):

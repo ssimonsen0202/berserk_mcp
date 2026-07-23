@@ -507,6 +507,47 @@ def _cost_daily_query():
     )
 
 
+def _cost_trend_query():
+    """Build the native daily burn series and least-squares fit.
+
+    The daily rollup remains a separate query because it preserves the
+    exact/estimated labels and per-model split. This companion query moves
+    only the trend calculation into Berserk's series engine.
+    """
+    return (
+        f"{_table} | where resource['service.name'] == 'claude-code' "
+        f"| extend burn=iff(isnotnull(attributes['{_TOKENS_IN_ATTR}']) "
+        f"or isnotnull(attributes['{_TOKENS_OUT_ATTR}']), "
+        f"toint(attributes['{_TOKENS_IN_ATTR}']) + toint(attributes['{_TOKENS_OUT_ATTR}']), "
+        f"strlen(tostring(body)) / 4.0) "
+        f"| make-series burn=sum(burn) default=0 on timestamp step 1d "
+        f"| extend fit=series_fit_line(burn) | take 1"
+    )
+
+
+def _trend_fit(text):
+    """Read ``series_fit_line``'s [R², slope, ..., line] result."""
+    whole = str(text or "").strip()
+    if not whole or whole == "(no rows)":
+        return None
+    # JSON mode is preferred by production wiring; retain a small TSV fallback
+    # for test doubles and older bzrk renderers.
+    records = None
+    if whole[0] in "[{":
+        try:
+            records = _json_records(json.loads(whole))
+        except json.JSONDecodeError:
+            records = None
+    if records:
+        value = records[0].get("fit") if isinstance(records[0], dict) else None
+        if isinstance(value, list) and len(value) >= 2:
+            try:
+                return {"r2": float(value[0]), "slope": float(value[1])}
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 _SLOPE_FLAT_PCT = 10.0  # |slope| below this %/day of mean burn counts as flat
 
 
@@ -542,7 +583,8 @@ def analyze_cost_daily(rows):
     days = sorted(by_day.values(), key=lambda d: d["day"])
     if len(days) < 3:
         return {"days": days, "models": models,
-                "verdict": "insufficient-data", "slope_pct_per_day": 0.0}
+                "verdict": "insufficient-data", "slope_pct_per_day": 0.0,
+                "r2": None}
 
     ys = [d["tokens"] for d in days]
     n = len(ys)
@@ -560,7 +602,8 @@ def analyze_cost_daily(rows):
     else:
         verdict = "burn-flat"
     return {"days": days, "models": models,
-            "verdict": verdict, "slope_pct_per_day": round(slope_pct, 1)}
+            "verdict": verdict, "slope_pct_per_day": round(slope_pct, 1),
+            "r2": None}
 
 
 def claude_token_burn(since="6h ago"):
@@ -651,8 +694,25 @@ def claude_cost_report(since="7d ago", group_by="day"):
     if not rows:
         return "No Claude Code activity found in this window.", False
     rep = analyze_cost_daily(rows)
+    # The daily rollup preserves exact/estimated labels. Use the native series
+    # fit for the verdict when the backend returns it, with the Python fit as a
+    # compatibility fallback for older deployments and test doubles.
+    trend_text, trend_err = _bzrk_search(_cost_trend_query(), since)
+    trend = _trend_fit(trend_text) if not trend_err else None
+    if trend is not None and len(rep["days"]) >= 3:
+        mean_tokens = sum(d["tokens"] for d in rep["days"]) / len(rep["days"])
+        slope_pct = (trend["slope"] / mean_tokens * 100.0) if mean_tokens else 0.0
+        if slope_pct > _SLOPE_FLAT_PCT:
+            rep["verdict"] = "burn-growing"
+        elif slope_pct < -_SLOPE_FLAT_PCT:
+            rep["verdict"] = "burn-declining"
+        else:
+            rep["verdict"] = "burn-flat"
+        rep["slope_pct_per_day"] = round(slope_pct, 1)
+        rep["r2"] = trend["r2"]
+    trend_marker = f", R²={rep['r2']:.2f}" if rep.get("r2") is not None else ""
     lines = [f"Claude Code cost report ({since}): verdict={rep['verdict']} "
-             f"(slope {rep['slope_pct_per_day']:+.1f}%/day)"]
+             f"(slope {rep['slope_pct_per_day']:+.1f}%/day{trend_marker})"]
     if group_by == "model":
         for model in sorted(rep["models"], key=lambda k: -rep["models"][k]):
             lines.append(f"- {model}: ~{rep['models'][model]} tokens")

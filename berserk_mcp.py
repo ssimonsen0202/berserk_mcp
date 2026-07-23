@@ -55,7 +55,7 @@ import ingestion_advisor
 import parser_factory
 import secret_scan
 
-__version__ = "1.16.0"
+__version__ = "1.17.0"
 
 
 def log(msg):
@@ -444,7 +444,7 @@ Q_HOST_CPU = (
 )
 Q_HOST_MEM = (
     f"{T} | where metric_name == 'system.memory.usage' "
-    f"| where tostring(attributes['state']) == 'used' "
+    f"| where attributes['state'] == 'used' "
     f"| summarize used_gb=avg(value)/1073741824 by host=tostring(resource['host.name']) "
     f"| sort by used_gb desc"
 )
@@ -473,14 +473,14 @@ Q_QUERY_PERF = (
 # --- SRE Tier-A queries (verified aggregates: countif/avg/max/min all confirmed in Berserk) ---
 Q_SRE_ERROR_RATE = (
     f"{T} | where isnotnull(body) | where severity_text == 'ERROR' "
-    f"| summarize errors=count() by service=tostring(resource['service.name']), minute=bin(timestamp, 1m) "
-    f"| sort by minute desc, errors desc | take 120"
+    f"| make-series errors=count() default=0 on timestamp step 1m "
+    f"by service=tostring(resource['service.name']) | take 120"
 )
 Q_SRE_HOST_HEADROOM = (
     f"{T} | where metric_name in ('system.cpu.load_average.1m', 'system.memory.usage') "
     f"| extend val = iff(metric_name == 'system.memory.usage', value / 1073741824.0, value), "
     f"unit = iff(metric_name == 'system.memory.usage', 'GB', 'load_avg') "
-    f"| where metric_name == 'system.cpu.load_average.1m' or tostring(attributes['state']) == 'used' "
+    f"| where metric_name == 'system.cpu.load_average.1m' or attributes['state'] == 'used' "
     f"| summarize samples=count(), avg_value=avg(val) "
     f"by host=tostring(resource['host.name']), metric=tostring(metric_name), unit "
     f"| sort by host asc, metric asc"
@@ -493,8 +493,9 @@ Q_SRE_INGEST_HEALTH = (
 )
 Q_SRE_TOP_ERRORS = (
     f"{T} | where isnotnull(body) | where severity_text == 'ERROR' "
-    f"| summarize hits=count(), last_seen=max(timestamp) "
-    f"by service=tostring(resource['service.name']), msg=substring(tostring(body), 0, 160) "
+    f"| summarize hits=count(), last_seen=max(timestamp), "
+    f"example=substring(min(tostring(body)), 0, 240) "
+    f"by service=tostring(resource['service.name']), template=extract_log_template(tostring(body)) "
     f"| sort by hits desc | take 40"
 )
 
@@ -503,12 +504,12 @@ Q_SOC_HIGH_SEV = (
     f"{T} | where isnotnull(body) | where severity_text in ('CRITICAL', 'FATAL', 'ERROR') "
     f"| project timestamp, severity_text, service=tostring(resource['service.name']), "
     f"body=substring(tostring(body), 0, 240) "
-    f"| sort by timestamp desc | take 60"
+    f"| tail 60"
 )
 Q_SOC_LOG_SPIKE = (
     f"{T} | where isnotnull(body) "
-    f"| summarize hits=count() by service=tostring(resource['service.name']), minute=bin(timestamp, 1m) "
-    f"| sort by hits desc, minute desc | take 60"
+    f"| make-series hits=count() default=0 on timestamp step 1m "
+    f"by service=tostring(resource['service.name']) | take 60"
 )
 Q_SOC_NEW_SERVICES = (
     f"{T} | summarize first_seen=min(timestamp), last_seen=max(timestamp), events=count() "
@@ -517,7 +518,9 @@ Q_SOC_NEW_SERVICES = (
 )
 Q_SOC_REPEATED_ERRORS = (
     f"{T} | where isnotnull(body) | where severity_text == 'ERROR' "
-    f"| summarize hits=count(), last_seen=max(timestamp) by msg=substring(tostring(body), 0, 160) "
+    f"| summarize hits=count(), last_seen=max(timestamp), "
+    f"example=substring(min(tostring(body)), 0, 240) "
+    f"by template=extract_log_template(tostring(body)) "
     f"| where hits > 5 | sort by hits desc | take 40"
 )
 
@@ -555,7 +558,7 @@ Q_TRACE_FIND_ERRORS = (
     f"{T} | where isnotnull(trace_id) | where status_code == 'ERROR' "
     f"| project trace_id, span_name, timestamp, "
     f"service=tostring(resource['service.name']) "
-    f"| sort by timestamp desc | take 20"
+    f"| tail 20"
 )
 
 
@@ -591,7 +594,7 @@ def q_soc_timeline(svc: str) -> str:
     return (
         f"{T} | where resource['service.name'] == '{svc}' "
         f"| project timestamp, severity_text, metric_name, body=substring(tostring(body), 0, 200) "
-        f"| sort by timestamp desc | take 100"
+        f"| tail 100"
     )
 
 
@@ -610,18 +613,29 @@ def q_discover_sample(service=None):
     """Sample structural fields without exporting raw telemetry values."""
     filt = f"| where resource['service.name'] == '{service}' " if service else ""
     return (
-        f"{T} {filt}| take 6 "
+        f"{T} {filt}| take 3 "
         f"| project resource_keys=bag_keys(resource), "
         f"attribute_keys=bag_keys(attributes), metric_name, "
         f"has_body=isnotempty(tostring(body)), "
         f"has_metric=isnotnull(metric_name), has_severity=isnotnull(severity_text)"
     )
+
+
+def q_discover_fieldstats(service=None):
+    """Bounded dynamic-field inventory for schema discovery.
+
+    ``fieldstats`` reports field type, cardinality, and representative values
+    without exporting the raw resource bag. Keep the row sample separate so
+    callers can inspect value shape without widening the inventory result.
+    """
+    filt = f"| where resource['service.name'] == '{service}' " if service else ""
+    return f"{T} {filt}| fieldstats resource with limit=50 depth=2"
 Q_CC_RECENT = (
-    f"{CC} | project ts=timestamp, typ=tostring(attributes['claude.type']), "
+    f"{CC} | tail 60 | project ts=timestamp, typ=tostring(attributes['claude.type']), "
     f"role=tostring(attributes['claude.message_role']), "
     f"model=tostring(attributes['claude.message_model']), "
     f"tools=tostring(attributes['claude.tool_names']), "
-    f"err=tostring(attributes['claude.error']) | sort by ts desc | take 60"
+    f"err=tostring(attributes['claude.error'])"
 )
 Q_CC_SESSIONS = (
     f"{CC} | summarize events=count(), first=min(timestamp), last=max(timestamp), "
@@ -637,9 +651,9 @@ Q_CC_TOOLS = (
 )
 Q_CC_ERRORS = (
     f"{CC} | where tostring(attributes['claude.error'])=='true' "
-    f"| project ts=timestamp, typ=tostring(attributes['claude.type']), "
+    f"| tail 40 | project ts=timestamp, typ=tostring(attributes['claude.type']), "
     f"tools=tostring(attributes['claude.tool_names']), "
-    f"body=substring(tostring(body),0,220) | sort by ts desc | take 40"
+    f"body=substring(tostring(body),0,220)"
 )
 
 
@@ -654,10 +668,10 @@ def q_logs(svc: str) -> str:
 def q_cc_search(term: str) -> str:
     return (
         f"{CC} | where tostring(body) contains '{term}' "
-        f"| project ts=timestamp, typ=tostring(attributes['claude.type']), "
+        f"| tail 40 | project ts=timestamp, typ=tostring(attributes['claude.type']), "
         f"model=tostring(attributes['claude.message_model']), "
         f"tools=tostring(attributes['claude.tool_names']), "
-        f"body=substring(tostring(body),0,240) | sort by ts desc | take 40"
+        f"body=substring(tostring(body),0,240)"
     )
 
 
@@ -1425,14 +1439,12 @@ def handle_call(name, arguments):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "1h ago"
         svc_str = str(svc) if svc else None
-        # Two perspectives: keys+counts (compact, sortable) and a row sample (real values).
-        # NOTE: bag_keys() is listed as a "missing function" in Berserk's docs but works
-        # in practice. The row sample uses only documented features (where/take/project),
-        # so we treat the call as a failure ONLY if BOTH halves fail — if bag_keys ever
-        # gets removed, the sample still answers.
-        out1, e1 = bzrk_search(q_discover_keys(svc_str), since)
+        # Two perspectives: fieldstats (type/cardinality/representative values)
+        # and a tiny structural sample. The sample keeps raw values out of the
+        # inventory result while still showing which signal families exist.
+        out1, e1 = bzrk_search(q_discover_fieldstats(svc_str), since)
         out2, e2 = bzrk_search(q_discover_sample(svc_str), since)
-        return f"== resource keys (count) ==\n{out1}\n\n== sample rows ==\n{out2}", (e1 and e2)
+        return f"== resource fieldstats ==\n{out1}\n\n== sample rows ==\n{out2}", (e1 and e2)
     if name == "logs_for_service":
         svc = arguments.get("service")
         if not svc:

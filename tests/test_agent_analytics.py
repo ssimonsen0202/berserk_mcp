@@ -276,6 +276,12 @@ class CostReportPureTest(unittest.TestCase):
         self.assertIn("summarize", q)
         self.assertNotIn("take ", q)
 
+    def test_cost_trend_query_uses_native_series_fit(self):
+        q = aa._cost_trend_query()
+        self.assertIn("make-series", q)
+        self.assertIn("series_fit_line", q)
+        self.assertIn("default=0", q)
+
 
 class ProjectInferenceTest(unittest.TestCase):
     def test_marker_segment_yields_parent_dir(self):
