@@ -1683,6 +1683,8 @@ class FleetControlsTest(unittest.TestCase):
         self.orig_budget = bm.TOOL_BUDGET_SECONDS
         self.orig_cache = bm.CACHE_TTL_SECONDS
         self.orig_cooldown = bm.FAIL_COOLDOWN_SECONDS
+        self.orig_per_hour = bm.BUDGET_PER_HOUR_SECONDS
+        bm.BUDGET_PER_HOUR_SECONDS = 0  # flat budgets unless a test opts in
         self.calls = []
         bm._reset_fleet_state()
 
@@ -1691,6 +1693,7 @@ class FleetControlsTest(unittest.TestCase):
         bm.TOOL_BUDGET_SECONDS = self.orig_budget
         bm.CACHE_TTL_SECONDS = self.orig_cache
         bm.FAIL_COOLDOWN_SECONDS = self.orig_cooldown
+        bm.BUDGET_PER_HOUR_SECONDS = self.orig_per_hour
         bm._reset_fleet_state()
 
     def test_successful_allowlisted_result_is_cached_with_marker(self):
@@ -1721,6 +1724,57 @@ class FleetControlsTest(unittest.TestCase):
         self.assertIn("fail-cooldown", second)
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.calls[0][1], 7)
+
+    def test_budget_scales_with_window_length(self):
+        """A 72h query legitimately costs more than a 15m one on this engine
+        (confirmed live: a 72h make-series took ~12.8s, just over the flat
+        10s budget, while short windows finish in ~1-2s). The budget should
+        scale with the requested window instead of applying a short-window
+        number to every call regardless of size."""
+        def fake(args, timeout=bm.DEFAULT_TIMEOUT):
+            self.calls.append((args, timeout))
+            return "result", False
+        bm.run_bzrk = fake
+        bm.TOOL_BUDGET_SECONDS = 10
+        bm.BUDGET_PER_HOUR_SECONDS = 0.5
+        bm.CACHE_TTL_SECONDS = 0
+
+        bm.handle_call("sre_error_rate", {"since": "15m ago"})
+        bm.handle_call("sre_error_rate", {"since": "72h ago"})
+        bm.handle_call("sre_error_rate", {"since": "7d ago"})
+
+        self.assertEqual(len(self.calls), 3)
+        self.assertAlmostEqual(self.calls[0][1], 10.125, places=2)  # 10 + 0.5*0.25h
+        self.assertAlmostEqual(self.calls[1][1], 46.0, places=2)    # 10 + 0.5*72h
+        self.assertAlmostEqual(self.calls[2][1], 94.0, places=2)    # 10 + 0.5*168h
+
+    def test_budget_scaling_capped_at_bzrk_timeout(self):
+        def fake(args, timeout=bm.DEFAULT_TIMEOUT):
+            self.calls.append((args, timeout))
+            return "result", False
+        bm.run_bzrk = fake
+        bm.TOOL_BUDGET_SECONDS = 10
+        bm.BUDGET_PER_HOUR_SECONDS = 1000  # absurd rate to force the cap
+        bm.CACHE_TTL_SECONDS = 0
+
+        bm.handle_call("sre_error_rate", {"since": "7d ago"})
+
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0][1], float(bm.DEFAULT_TIMEOUT))
+
+    def test_budget_scaling_disabled_by_default_flag(self):
+        """BUDGET_PER_HOUR_SECONDS=0 (this test's own baseline setUp value)
+        must reproduce the old flat-budget behavior exactly."""
+        def fake(args, timeout=bm.DEFAULT_TIMEOUT):
+            self.calls.append((args, timeout))
+            return "result", False
+        bm.run_bzrk = fake
+        bm.TOOL_BUDGET_SECONDS = 10
+        bm.CACHE_TTL_SECONDS = 0
+
+        bm.handle_call("sre_error_rate", {"since": "72h ago"})
+
+        self.assertEqual(self.calls[0][1], 10)
 
 
 if __name__ == "__main__":

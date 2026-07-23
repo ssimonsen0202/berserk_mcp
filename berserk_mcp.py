@@ -60,7 +60,7 @@ import ingestion_advisor
 import parser_factory
 import secret_scan
 
-__version__ = "1.18.1"
+__version__ = "1.18.2"
 
 
 def log(msg):
@@ -87,6 +87,45 @@ TOOL_BUDGET_SECONDS = min(
     _nonnegative_float_env("BERSERK_MCP_TOOL_BUDGET_SECONDS", 10),
     max(0.0, float(DEFAULT_TIMEOUT)),
 )
+# The base budget was calibrated on short windows (the fleet eval's latency
+# sweep used 15-minute windows), but query cost on this engine grows with the
+# scanned time range — a 72h aggregate that legitimately needs ~13s is not a
+# runaway query, while 13s for a 15m window is. Scale the budget with the
+# requested window instead of applying the short-window number to every call:
+# effective = base + per_hour * window_hours, capped at BZRK_TIMEOUT. The
+# default 0.5 s/h keeps a 15m window at the tight calibrated budget while a
+# 72h window earns ~46s and a 7d cost report ~94s. Set to 0 to restore the
+# flat budget.
+BUDGET_PER_HOUR_SECONDS = _nonnegative_float_env(
+    "BERSERK_MCP_BUDGET_PER_HOUR_SECONDS", 0.5
+)
+
+_SINCE_HOURS_FACTORS = {
+    "s": 1 / 3600, "sec": 1 / 3600, "secs": 1 / 3600,
+    "second": 1 / 3600, "seconds": 1 / 3600,
+    "m": 1 / 60, "min": 1 / 60, "mins": 1 / 60,
+    "minute": 1 / 60, "minutes": 1 / 60,
+    "h": 1, "hr": 1, "hrs": 1, "hour": 1, "hours": 1,
+    "d": 24, "day": 24, "days": 24,
+    "w": 168, "wk": 168, "week": 168, "weeks": 168,
+}
+
+
+def _since_hours(since):
+    """Window length in hours for a valid `since` string; 0.0 for 'now' or
+    anything unparseable (unparseable values fail valid_since anyway)."""
+    m = re.match(r"^(\d+)\s*([a-z]+?)(?:\s+ago)?$", str(since).strip(), re.IGNORECASE)
+    if not m:
+        return 0.0
+    return float(m.group(1)) * _SINCE_HOURS_FACTORS.get(m.group(2).lower(), 0.0)
+
+
+def _window_budget(base, since):
+    """Effective per-query budget for this window, capped at BZRK_TIMEOUT."""
+    if base is None or base <= 0:
+        return base
+    scaled = base + BUDGET_PER_HOUR_SECONDS * _since_hours(since)
+    return min(scaled, max(base, float(DEFAULT_TIMEOUT)))
 FAIL_COOLDOWN_SECONDS = _nonnegative_float_env("BERSERK_MCP_FAIL_COOLDOWN_SECONDS", 30)
 CACHE_TTL_SECONDS = _nonnegative_float_env("BERSERK_MCP_CACHE_TTL_SECONDS", 120)
 
@@ -908,7 +947,7 @@ def bzrk_search(kql, since, extra=None):
     timeout = None
     tool_name = None
     if _FLEET_CONTEXT is not None:
-        timeout = _FLEET_CONTEXT.get("budget")
+        timeout = _window_budget(_FLEET_CONTEXT.get("budget"), since)
         tool_name = _FLEET_CONTEXT.get("tool")
     if timeout is None:
         out, is_err = run_bzrk(
@@ -922,7 +961,9 @@ def bzrk_search(kql, since, extra=None):
     if is_err and _BZRK_TIMEOUT_TEXT_RE.match(str(out or "")) and tool_name:
         return (
             f"{tool_name} exceeded its {timeout:g}s query budget for window {since!r}. "
-            "Retry with a narrower 'since' window.",
+            "Retry with a narrower 'since' window, or raise "
+            "BERSERK_MCP_TOOL_BUDGET_SECONDS / BERSERK_MCP_BUDGET_PER_HOUR_SECONDS "
+            "if this cluster is legitimately slower.",
             True,
         )
     return out, is_err
