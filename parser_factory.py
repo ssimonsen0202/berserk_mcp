@@ -310,7 +310,11 @@ class _FileLock:
                 self._fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 os.write(self._fd, str(os.getpid()).encode("ascii"))
                 return self
-            except FileExistsError:
+            except (FileExistsError, PermissionError):
+                # Windows can raise PermissionError instead of FileExistsError
+                # here -- see berserk_mcp._FileLock.__enter__ for why. Treated
+                # the same as lock contention; still times out below if the
+                # path is genuinely inaccessible rather than mid-churn.
                 try:
                     age = time.time() - os.path.getmtime(self.lock_path)
                     if age > _LOCK_STALE_SECONDS:

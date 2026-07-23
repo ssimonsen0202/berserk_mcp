@@ -60,7 +60,7 @@ import ingestion_advisor
 import parser_factory
 import secret_scan
 
-__version__ = "1.18.0"
+__version__ = "1.18.1"
 
 
 def log(msg):
@@ -342,7 +342,16 @@ class _FileLock:
                 self._fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 os.write(self._fd, str(os.getpid()).encode("ascii"))
                 return self
-            except FileExistsError:
+            except (FileExistsError, PermissionError):
+                # Windows can raise PermissionError instead of FileExistsError
+                # for O_CREAT|O_EXCL here: NTFS briefly keeps a just-deleted
+                # lock file in a pending-delete state, so a fast recreate from
+                # another thread's __exit__/stale-break can collide as
+                # "access denied" rather than "already exists". Treat it the
+                # same as lock contention -- if the path is genuinely
+                # inaccessible rather than mid-churn, this still surfaces as
+                # a TimeoutError once the deadline below is hit, so a real
+                # permissions problem isn't silently swallowed.
                 try:
                     age = time.time() - os.path.getmtime(self.lock_path)
                     if age > _LOCK_STALE_SECONDS:

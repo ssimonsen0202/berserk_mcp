@@ -39,10 +39,14 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.18.0**. This is a bullet-point overview, most recent
+Current version: **1.18.1**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.18.1** (2026-07-23) — Fixes a `windows-latest`/Python 3.11+ CI failure:
+  `_FileLock` didn't catch a transient `PermissionError` Windows can raise
+  instead of `FileExistsError` under lock contention. See
+  [details](docs/releases/v1.18.1.md).
 - **v1.18.0** (2026-07-23) — Adds fleet-friendly worker jitter, interactive
   query budgets, timeout cooldowns, short-TTL read-only caching, and three
   guarded SRE/SOC tools: `detect_anomalies`, `forecast_capacity`, and
