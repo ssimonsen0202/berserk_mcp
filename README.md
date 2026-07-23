@@ -922,9 +922,8 @@ lifecycle method (`initialize`, `notifications/initialized`, `ping`,
 `tools/list`, `tools/call`) — has been externally exercised by two
 independent scanners: Cisco AI Defense `mcp-scanner` and MCP-Shield. Both
 scanners enumerated the full tool surface with no protocol errors. Every
-method has adversarial regression coverage in the test suite; see
-`docs/cisco-mcp-scanner-result-report-2026-07-19.md` for the scanner
-verification. Any client that speaks the same protocol version — Claude
+method has adversarial regression coverage in the test suite. Any client
+that speaks the same protocol version — Claude
 Desktop, Claude Code, and third-party MCP clients — can drive berserk-mcp
 with no server-side changes.
 
@@ -1052,11 +1051,10 @@ external scanner pass:
 
 - **Hand audit.** This covered 15 findings — 7 blocking security/DR issues,
   plus 8 deferred behavioral/documentation issues — each with an
-  adversarial regression test. Findings and closure evidence:
-  [`docs/security-bug-review-report-2026-07-18.md`](docs/security-bug-review-report-2026-07-18.md).
+  adversarial regression test. Internal review reports are not published in
+  this repo; closure evidence lives in the test suite's regression coverage.
 - **Differential re-review.** This produced 6 additional findings (`FVR-001`
-  through `FVR-006`). All 6 are closed:
-  [`docs/security-fix-validation-report-2026-07-19.md`](docs/security-fix-validation-report-2026-07-19.md).
+  through `FVR-006`). All 6 are closed, with regression tests in the suite.
 - **External scanner pass.** Three scanners ran against the code: Cisco AI
   Defense `mcp-scanner` (YARA stdio and pip-audit), MCP-Shield (wire-level
   tool description keyword scan), and Snyk Code (SAST on the GitHub
@@ -1066,8 +1064,7 @@ external scanner pass:
   endpoint URL, and CWE-23 path traversal on the store-path env vars. Both
   are false positives by threat model, because the operator is inside the
   trust boundary — but both are addressed anyway, with defense-in-depth
-  scheme and path allowlists. Full analysis:
-  [`docs/cisco-mcp-scanner-result-report-2026-07-19.md`](docs/cisco-mcp-scanner-result-report-2026-07-19.md).
+  scheme and path allowlists.
 - **Ongoing verification.** The test suite (`tests/`, 276 tests plus 2 role
   tests) includes an adversarial regression test for every finding above.
   It runs before every release. See `## Testing` below.
