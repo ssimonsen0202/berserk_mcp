@@ -17,6 +17,7 @@ signals, and give operators the data they need to decide whether to page, roll b
 | How is service X doing overall? | `sre_service_health service=<name>` |
 | What services exist? | `list_services` |
 | Recent logs for a service | `logs_for_service service=<name>` |
+| Validate custom KQL before saving/running | `validate_kql` |
 | Ad-hoc KQL | `search` |
 
 ## Escalation thresholds (homelab baselines)
@@ -35,6 +36,7 @@ signals, and give operators the data they need to decide whether to page, roll b
 
 ## KQL authoring rules
 
+- Validate custom KQL before saving or running it. Use `validate_kql mode=live` only when runtime cost or engine statistics are needed.
 - Always scope with `where isnotnull(body)` before log filters
 - Use `bin(timestamp, 1m)` for per-minute trend buckets
 - `countif(severity_text == 'ERROR')` works; `avgif` may not — use `summarize` + filter

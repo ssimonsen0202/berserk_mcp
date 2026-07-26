@@ -16,7 +16,7 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 - **Works with Claude Desktop, Claude Code, and any MCP client.** berserk-mcp speaks MCP protocol version `2025-06-18` over stdio (newline-delimited JSON-RPC 2.0). It implements every required method — `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call` — with strict envelope validation and adversarial regression tests. See [Connect it to a client](#connect-it-to-a-client) for `claude_desktop_config.json` and `claude mcp add` recipes.
 - **Zero dependencies.** berserk-mcp uses only the Python standard library. You do not `pip install` anything beyond the package itself. (The optional LLM parser factory uses `urllib`. It still adds no third-party dependency.)
-- **Tiny and auditable.** berserk-mcp has five small stdlib modules: `berserk_mcp.py` (the MCP server), `parser_factory.py` (the optional LLM parser generator), `agent_analytics.py` (Claude Code analytics), `secret_scan.py` (secret detection and redaction), and `ingestion_advisor.py` (catalog-backed telemetry gap analysis). You can read, audit, and vendor each module easily.
+- **Small and auditable.** berserk-mcp is standard-library-only. Its focused modules cover the MCP server, parser generation, Claude analytics, AI FinOps, KQL validation, schema snapshots, secret redaction, and ingestion advice. You can read, audit, and vendor each module without pulling in a framework.
 - **Cross-platform.** berserk-mcp runs anywhere the `bzrk` CLI runs, including Windows.
 - **Safe by construction.** berserk-mcp uses fixed queries. It validates input on every free-text tool. It never calls `shell=True`. The Berserk token never touches this code.
 - **Self-extending (new in 1.7).** An optional [parser factory](#parser-factory-llm-generated-query-packs) detects *new* sources arriving in Berserk. It uses an LLM to author, execute-verify, and save KQL "query packs" for each new source. The design follows Microsoft Sentinel's [ASIM parser AI agent](https://learn.microsoft.com/en-gb/azure/sentinel/normalization-create-parsers-ai-agent). It tries cheap providers first, enforces hard runaway fail-safes, and never lets a generated query overwrite a human one.
@@ -39,10 +39,21 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.19.0**. This is a bullet-point overview, most recent
+Current version: **1.21.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.21.0** (2026-07-25) — Adds enterprise Claude AI FinOps: native and
+  legacy telemetry normalization, effective-dated API-equivalent pricing,
+  governed feature/hour imports, deterministic attribution, management MCP
+  reports, harness feedback, generated dashboards, seven BI datasets, and
+  Grafana/Berserk dashboard assets. See
+  [details](docs/releases/v1.21.0.md).
+- **v1.20.0** (2026-07-24) — Adds schema-grounded, cost-aware KQL validation:
+  `validate_kql`, normalized schema snapshots, strict/warn modes, arbitrary
+  search and saved-query validation, generated-query schema context, live
+  runtime receipts, and a bounded in-process query concurrency guard. See
+  [details](docs/releases/v1.20.0.md).
 - **v1.19.0** (2026-07-23) — Bugfix: the v1.18.0 interactive tool budget was
   a flat 10s regardless of window size; a real 72h query needing ~13s got
   rejected outright. Budget now scales with the requested window. See
@@ -328,7 +339,7 @@ cannot be called by accident and cannot be injected into context.
 |---|---|---|---|
 | SRE | `sre` | Core tools + SRE tools (error rate, host headroom, ingest health, service health, top errors) | On-call Slack bot, editor assistant |
 | SOC | `soc` | Core tools + SOC tools (high-severity logs, log spike, new services, repeated errors, incident timeline) | Security monitoring agent |
-| Claude Code | `claude` | Core tools + Claude Code telemetry tools (sessions, tool histogram, errors, full-text search, loop/model-fit checks) | Developer workflow assistant |
+| Claude Code | `claude` | Core tools + Claude telemetry, AI spend, feature economics, data quality, and governed harness recommendations | Developer workflow and AI FinOps assistant |
 | Ops | `ops` | All tools (full visibility) | Operator shell, admin scripts |
 | Default | `all` (or unset) | All tools | Development, evaluation |
 
@@ -370,8 +381,9 @@ primer. These roles route from the tool descriptions directly.
 | `schema` | Live tables + column schema introspection. |
 | `list_metrics` | Every metric name being ingested, with counts (discovery). |
 | `discover_schema` | Field metadata (type, cardinality, representative values) via Berserk's native `fieldstats`, plus a structural presence sample, to learn an unknown source without exporting raw telemetry (v1.17.0; previously `bag_keys`-based). |
+| `validate_kql` | Validate custom KQL before saving or running it. Static mode checks syntax shape, schema fields, bounds, and cost-risk without executing the query; live mode is opt-in and returns a runtime receipt when enabled. |
 | `bzrk_query_perf` | Berserk query engine latency percentiles (p50/p95/p99 in µs). |
-| `search` | Run arbitrary KQL (escape hatch). Save the result with `save_query` once it works. Fields are nested `resource`/`attributes`, not flat columns — for example `resource['service.name']`, not `service_name`. Call `discover_schema` first if you don't know the field names for a source. A wrong field name matches zero rows; it does not raise an error. |
+| `search` | Run arbitrary KQL (escape hatch). Static validation runs before execution in the default `warn` mode. Save the result with `save_query` once it works. Fields are nested `resource`/`attributes`, not flat columns — for example `resource['service.name']`, not `service_name`. Call `discover_schema` first if you don't know the field names for a source. |
 
 Every query tool takes an optional `since` argument (`"15m ago"`, `"1h ago"`,
 `"2d ago"`, …) with a sensible per-tool default.
@@ -421,6 +433,15 @@ tools mine that data. See [docs/claude-code.md](docs/claude-code.md) for the pip
 | `claude_cost_report` | Multi-day cost report: per-day burn with exact/estimated labels, per-model split, optional per-project attribution from file paths, and a burn-growing/flat/declining trend verdict backed by Berserk's native `series_fit_line` (reports R², v1.17.0). |
 | `claude_session_deep_dive` | One session's timeline: contiguous tool phases with error counts, activity gaps over 5 minutes, cumulative burn, and a loop verdict. |
 | `claude_workflow_insights` | Cross-session patterns: most common tool sequences, error hotspots by tool+target, top-decile burn-per-target sessions. |
+| `claude_spend_overview` | Token classes, public API-equivalent spend, cache ratio, trends, attribution, and pricing coverage grouped by business or technical dimension. |
+| `claude_feature_cost` | Planned/actual developer hours and AI budget/spend, completion forecast, repositories, agents, harnesses, and delivery outcomes for one feature. |
+| `claude_project_economics` | Feature and repository economics within one project, including unattributed spend and data-quality coverage. |
+| `claude_efficiency_insights` | Evidence for expensive models, operations, retries, loops, cache misses, context growth, and agent fan-out. |
+| `claude_harness_recommendations` | Deterministic, stable-ID harness amendments with confidence, risk, validation window, and rollback criteria. |
+| `claude_record_recommendation_decision` | Append-only approval, rejection, or deferral audit record. Owners and rationale are stored as hashes. |
+| `claude_optimization_impact` | Matched before/after harness comparison with keep, rollback, no-change, or insufficient-evidence verdict. |
+| `claude_management_report` | Portfolio, project, or feature summary as readable Markdown plus versioned structured JSON. |
+| `claude_generate_dashboard` | Privacy-safe Markdown or self-contained HTML snapshot beneath the configured report directory. |
 
 ### Agent-log intelligence
 
@@ -434,6 +455,7 @@ A read-only analytics layer for the `claude` lane (v1.12.0; see
 
 ```bash
 berserk-mcp --agent-report --since "6h ago"
+berserk-mcp --agent-report --agent-report-mode weekly --agent-report-json --since "7d ago"
 ```
 
 **Phase J deep analytics (v1.15.0; see [release notes](docs/releases/v1.15.0.md)):**
@@ -451,6 +473,60 @@ its column order. `claude.tokens_input` and `claude.tokens_output` are the
 real attribute names used for exact token counts. See
 [the v1.14.1 release notes](docs/releases/v1.14.1.md) for the silent-failure
 bug this fixed and the live-verification story behind it.
+
+### Enterprise AI development economics
+
+Version 1.21 adds a canonical cost and attribution layer behind the newer
+Claude tools. Native Claude Code OpenTelemetry is the preferred input; the
+existing JSONL-forwarder attributes remain compatible. Reports normalize
+input, output, cache-read, cache-creation, long-context, and chargeable
+server-tool usage, then calculate a versioned public API-equivalent cost.
+Claude's reported approximate cost remains a separate field. This is not an
+invoice, and an unknown model is left unpriced rather than assigned a guessed
+rate.
+
+Launch Claude with governed work context so telemetry can be attributed to a
+feature without inspecting prompts or source code:
+
+```bash
+berserk-claude --team platform --project OBS --feature OBS-142 \
+  --work-item ADO-912 --repository berserk-mcp --harness-version finops-v1 \
+  -- claude
+```
+
+Import planning and actual-hours data through the neutral CSV/NDJSON contract.
+The local store is updated atomically; configure an OTLP logs endpoint to also
+emit privacy-safe `engineering-work` records:
+
+```bash
+berserk-mcp --import-business-data feature --input /absolute/path/features.csv
+berserk-mcp --import-business-data effort --input /absolute/path/worklogs.ndjson \
+  --input-format ndjson
+```
+
+Feature records use stable IDs plus optional portfolio, project, work-item,
+repository, branch, pull-request, planned-hours, AI-budget, and completion
+fields. Effort records contain a stable worklog ID, feature/work-item/team,
+work date, actual hours, source system, and update timestamp. Developer hours
+are never inferred from session duration, commits, or Claude active time.
+
+Create management-ready outputs from the same model:
+
+```bash
+berserk-mcp --export-bi --since "90d ago" \
+  --output /absolute/path/ai-finops-export --export-format csv
+berserk-mcp --generate-dashboard project --identifier OBS --since "90d ago" \
+  --dashboard-format html
+```
+
+The export contains seven versioned datasets and a checksum manifest. Grafana
+provisioning JSON and bounded Berserk Explore queries are in
+[`dashboards/`](dashboards/README.md). Generated snapshots contain aggregates,
+coverage, pricing version, and freshness metadata—never prompts, code, raw
+commands, session bodies, or email addresses. Harness amendments are
+recommendations only: an owner must record a decision, deploy an immutable
+harness version, and use the matched-cohort impact tool before keeping or
+rolling back a change.
 
 ### Secret detection and output redaction
 
@@ -992,6 +1068,12 @@ All configuration is via environment variables. All are optional:
 | `BERSERK_MCP_BUDGET_PER_HOUR_SECONDS` | `0.5` | Added to the base budget per hour of the query's `since` window (capped at `BZRK_TIMEOUT`) — a 72h query gets ~46s, not the 10s base. Set `0` to restore a flat budget regardless of window size (v1.19.0; see [release notes](docs/releases/v1.19.0.md)). |
 | `BERSERK_MCP_FAIL_COOLDOWN_SECONDS` | `30` | Suppress identical timeout retries within one MCP process; `0` disables. |
 | `BERSERK_MCP_CACHE_TTL_SECONDS` | `120` | TTL for allowlisted read-only rollup results; derived from the synthetic trace replay; `0` disables. |
+| `BERSERK_MCP_KQL_VALIDATION` | `warn` | KQL validation policy: `off`, `warn`, or `strict`. `warn` rejects malformed/control-command queries and reports performance warnings on arbitrary `search`; `strict` also blocks high-risk arbitrary and generated queries. |
+| `BERSERK_MCP_KQL_LIVE_VALIDATION` | `0` | Enables `validate_kql` with `mode=live`. Live validation executes a bounded read-only query and can consume query budget. |
+| `BERSERK_MCP_MAX_CONCURRENT_QUERIES` | `2` | Maximum in-process Berserk queries at once. `0` disables the local guard, which weakens retry-storm protection. |
+| `BERSERK_MCP_KQL_MAX_CHARS` | `50000` | Maximum user-supplied KQL length accepted by validation. |
+| `BERSERK_MCP_KQL_MAX_ROWS` | `2000` | Recommended maximum arbitrary-query result bound used by validation warnings. |
+| `BERSERK_MCP_KQL_STATS` | `auto` | `off`, `auto`, or `required`; controls whether live validation asks the CLI for `--stats`. Missing or unrecognized stats are reported as unavailable, never invented. |
 | `BERSERK_TABLE` | `default` | The Berserk table to query. |
 | `BERSERK_MCP_LEARNED_PATH` | platform config dir | Where saved queries persist (`~/.config/berserk-mcp/learned.json` on Linux). |
 | `BERSERK_MCP_ROLE` | `all` | Active role lane: `sre`, `soc`, `claude`, `ops`, or `all`. Controls tool visibility and primer injection. |
@@ -1003,6 +1085,12 @@ All configuration is via environment variables. All are optional:
 | `BERSERK_MCP_TOKENS_IN_ATTR` | `claude.tokens_input` | Claude-Code attribute holding input tokens. Override this if your forwarder emits a different name — for example `claude.usage.input_tokens`. A mismatch just falls back to the body-length estimate. |
 | `BERSERK_MCP_TOKENS_OUT_ATTR` | `claude.tokens_output` | Claude-Code attribute holding output tokens (see above). |
 | `BERSERK_MCP_PROJECT_MARKERS` | `src,tests,lib,pkg` | Path segments that mark "inside a project" for `claude_cost_report` per-project attribution. The directory before the first marker segment is the project name. |
+| `BERSERK_MCP_BUSINESS_STORE_PATH` | platform config dir | Absolute path to the private, atomically updated feature catalog and developer-effort store. |
+| `BERSERK_MCP_RECOMMENDATION_STORE_PATH` | platform config dir | Absolute path to the append-only harness-decision audit store. Owner and rationale values are hashed before persistence. |
+| `BERSERK_MCP_REPORT_DIR` | platform config `reports/` | Absolute directory allowed for generated Markdown/HTML dashboard snapshots. Snapshot filenames cannot contain path components. |
+| `BERSERK_MCP_PRICING_CATALOG_PATH` | packaged catalog | Absolute path to an alternate effective-dated pricing catalog. Unknown models remain unpriced. |
+| `BERSERK_MCP_OTLP_LOGS_ENDPOINT` | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` or unset | Optional OTLP/HTTP logs endpoint for `engineering-work` and recommendation-audit records. Non-loopback endpoints must use HTTPS. |
+| `BERSERK_MCP_OTLP_HEADERS` | `OTEL_EXPORTER_OTLP_HEADERS` or unset | Comma-separated OTLP HTTP headers. Never place credentials in imported records or generated reports. |
 
 Parser-factory (LLM parser generation) has its own env vars — see
 [Parser factory](#parser-factory-llm-generated-query-packs) above.
@@ -1010,7 +1098,7 @@ Parser-factory (LLM parser generation) has its own env vars — see
 ## Connect it to a client
 
 **Compatibility.** berserk-mcp implements MCP protocol version `2025-06-18`
-as a stdio server (newline-delimited JSON-RPC 2.0). All 50 registered tools
+as a stdio server (newline-delimited JSON-RPC 2.0). All 63 registered tools
 appear in the `tools/list` handshake, and each can be invoked via
 `tools/call`. The stdio handshake path — including every required
 lifecycle method (`initialize`, `notifications/initialized`, `ping`,
@@ -1111,6 +1199,10 @@ model routes correctly. Keep new tool descriptions that way.
 ## Security
 
 - **Injection guards.** `logs_for_service` and `sre_service_health`/`soc_timeline` validate the service name against `[A-Za-z0-9._-]`. `claude_search` rejects quotes, pipe, backslash, and backtick. Both values are interpolated into KQL string literals, so these checks block single-quote injection. Every other tool uses a fully fixed query, with no interpolation.
+- **Schema-grounded KQL validation.** User-originated arbitrary KQL is statically validated before `search`, `save_query`, `run_saved`, and generated-query persistence. The default `warn` mode preserves normal workflows while rejecting malformed/control-command input and surfacing cost warnings. `strict` blocks high-risk arbitrary/generated queries. Static cost is an estimate; it cannot know current cluster load from other tenants.
+- **Schema cache stores shape, not telemetry.** The normalized schema snapshot records columns, resource/attribute field names, bounded examples, supported idioms, and a `schema_hash`. It excludes raw bodies and is safe to rebuild when missing or corrupt. Parser-factory prompts receive compact schema context and are instructed not to invent fields.
+- **Live validation receipts do not fabricate engine stats.** `validate_kql mode=live` measures wall time locally and parses CLI stats only when available. Rows, bytes, and engine fields remain `null` with an explicit warning when the CLI does not return a supported stats format.
+- **Local query concurrency guard.** Interactive query execution is limited by `BERSERK_MCP_MAX_CONCURRENT_QUERIES` after request validation and before `bzrk` execution. Semaphore slots are released on success, timeout, and exception.
 - **Read-only by construction.** Every tool is annotated (`readOnlyHint`) and issues only read KQL. The sole exceptions are `save_query`, which writes a local query file (never Berserk), and `request_discovery`, which writes a local queue file.
 - **No shell.** `subprocess` is always invoked with an argument list, never `shell=True`. berserk-mcp contains no `eval`.
 - **No secrets in this code.** The Berserk bearer token lives only in `bzrk`'s own config. berserk-mcp never reads, stores, or logs it.
@@ -1160,8 +1252,8 @@ external scanner pass:
   are false positives by threat model, because the operator is inside the
   trust boundary — but both are addressed anyway, with defense-in-depth
   scheme and path allowlists.
-- **Ongoing verification.** The test suite (`tests/`, 276 tests plus 2 role
-  tests) includes an adversarial regression test for every finding above.
+- **Ongoing verification.** The test suite (`tests/`, 465 tests including role
+  isolation coverage) includes an adversarial regression test for every finding above.
   It runs before every release. See `## Testing` below.
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).

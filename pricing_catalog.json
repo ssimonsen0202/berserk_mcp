@@ -1,0 +1,186 @@
+{
+  "schema_version": 1,
+  "catalog_version": "anthropic-public-2026-07-25",
+  "currency": "USD",
+  "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+  "effective_from": "2026-07-25",
+  "models": [
+    {
+      "id": "claude-fable-5",
+      "aliases": ["claude-fable-5", "fable-5", "fable"],
+      "input_usd_per_mtok": 10.0,
+      "output_usd_per_mtok": 50.0,
+      "cache_read_usd_per_mtok": 1.0,
+      "cache_write_5m_usd_per_mtok": 12.5,
+      "cache_write_1h_usd_per_mtok": 20.0
+    },
+    {
+      "id": "claude-mythos-5",
+      "aliases": ["claude-mythos-5", "mythos-5", "mythos"],
+      "input_usd_per_mtok": 10.0,
+      "output_usd_per_mtok": 50.0,
+      "cache_read_usd_per_mtok": 1.0,
+      "cache_write_5m_usd_per_mtok": 12.5,
+      "cache_write_1h_usd_per_mtok": 20.0
+    },
+    {
+      "id": "claude-opus-4.8",
+      "aliases": ["claude-opus-4-8", "claude-opus-4.8", "opus-4-8", "opus-4.8", "opus"],
+      "input_usd_per_mtok": 5.0,
+      "output_usd_per_mtok": 25.0,
+      "cache_read_usd_per_mtok": 0.5,
+      "cache_write_5m_usd_per_mtok": 6.25,
+      "cache_write_1h_usd_per_mtok": 10.0,
+      "fast_mode": {
+        "input_usd_per_mtok": 10.0,
+        "output_usd_per_mtok": 50.0,
+        "cache_read_usd_per_mtok": 1.0,
+        "cache_write_5m_usd_per_mtok": 12.5,
+        "cache_write_1h_usd_per_mtok": 20.0
+      }
+    },
+    {
+      "id": "claude-opus-4.7",
+      "aliases": ["claude-opus-4-7", "claude-opus-4.7", "opus-4-7", "opus-4.7"],
+      "input_usd_per_mtok": 5.0,
+      "output_usd_per_mtok": 25.0,
+      "cache_read_usd_per_mtok": 0.5,
+      "cache_write_5m_usd_per_mtok": 6.25,
+      "cache_write_1h_usd_per_mtok": 10.0,
+      "fast_mode": {
+        "input_usd_per_mtok": 30.0,
+        "output_usd_per_mtok": 150.0,
+        "cache_read_usd_per_mtok": 3.0,
+        "cache_write_5m_usd_per_mtok": 37.5,
+        "cache_write_1h_usd_per_mtok": 60.0
+      }
+    },
+    {
+      "id": "claude-opus-4.6",
+      "aliases": ["claude-opus-4-6", "claude-opus-4.6", "opus-4-6", "opus-4.6"],
+      "input_usd_per_mtok": 5.0,
+      "output_usd_per_mtok": 25.0,
+      "cache_read_usd_per_mtok": 0.5,
+      "cache_write_5m_usd_per_mtok": 6.25,
+      "cache_write_1h_usd_per_mtok": 10.0
+    },
+    {
+      "id": "claude-opus-4.5",
+      "aliases": ["claude-opus-4-5", "claude-opus-4.5", "opus-4-5", "opus-4.5"],
+      "input_usd_per_mtok": 5.0,
+      "output_usd_per_mtok": 25.0,
+      "cache_read_usd_per_mtok": 0.5,
+      "cache_write_5m_usd_per_mtok": 6.25,
+      "cache_write_1h_usd_per_mtok": 10.0
+    },
+    {
+      "id": "claude-opus-4.1",
+      "aliases": ["claude-opus-4-1", "claude-opus-4.1", "opus-4-1", "opus-4.1"],
+      "input_usd_per_mtok": 15.0,
+      "output_usd_per_mtok": 75.0,
+      "cache_read_usd_per_mtok": 1.5,
+      "cache_write_5m_usd_per_mtok": 18.75,
+      "cache_write_1h_usd_per_mtok": 30.0
+    },
+    {
+      "id": "claude-opus-4",
+      "aliases": ["claude-opus-4", "opus-4"],
+      "input_usd_per_mtok": 15.0,
+      "output_usd_per_mtok": 75.0,
+      "cache_read_usd_per_mtok": 1.5,
+      "cache_write_5m_usd_per_mtok": 18.75,
+      "cache_write_1h_usd_per_mtok": 30.0
+    },
+    {
+      "id": "claude-sonnet-5-introductory",
+      "aliases": ["claude-sonnet-5", "sonnet-5", "sonnet"],
+      "effective_from": "2026-06-09",
+      "effective_to": "2026-08-31",
+      "input_usd_per_mtok": 2.0,
+      "output_usd_per_mtok": 10.0,
+      "cache_read_usd_per_mtok": 0.2,
+      "cache_write_5m_usd_per_mtok": 2.5,
+      "cache_write_1h_usd_per_mtok": 4.0
+    },
+    {
+      "id": "claude-sonnet-5",
+      "aliases": ["claude-sonnet-5", "sonnet-5", "sonnet"],
+      "effective_from": "2026-09-01",
+      "input_usd_per_mtok": 3.0,
+      "output_usd_per_mtok": 15.0,
+      "cache_read_usd_per_mtok": 0.3,
+      "cache_write_5m_usd_per_mtok": 3.75,
+      "cache_write_1h_usd_per_mtok": 6.0
+    },
+    {
+      "id": "claude-sonnet-4.6",
+      "aliases": ["claude-sonnet-4-6", "claude-sonnet-4.6", "sonnet-4-6", "sonnet-4.6"],
+      "input_usd_per_mtok": 3.0,
+      "output_usd_per_mtok": 15.0,
+      "cache_read_usd_per_mtok": 0.3,
+      "cache_write_5m_usd_per_mtok": 3.75,
+      "cache_write_1h_usd_per_mtok": 6.0
+    },
+    {
+      "id": "claude-sonnet-4.5",
+      "aliases": ["claude-sonnet-4-5", "claude-sonnet-4.5", "sonnet-4-5", "sonnet-4.5"],
+      "input_usd_per_mtok": 3.0,
+      "output_usd_per_mtok": 15.0,
+      "cache_read_usd_per_mtok": 0.3,
+      "cache_write_5m_usd_per_mtok": 3.75,
+      "cache_write_1h_usd_per_mtok": 6.0,
+      "long_context": {
+        "threshold_input_tokens": 200000,
+        "input_usd_per_mtok": 6.0,
+        "output_usd_per_mtok": 22.5,
+        "cache_read_usd_per_mtok": 0.6,
+        "cache_write_5m_usd_per_mtok": 7.5,
+        "cache_write_1h_usd_per_mtok": 12.0
+      }
+    },
+    {
+      "id": "claude-sonnet-4",
+      "aliases": ["claude-sonnet-4", "sonnet-4"],
+      "input_usd_per_mtok": 3.0,
+      "output_usd_per_mtok": 15.0,
+      "cache_read_usd_per_mtok": 0.3,
+      "cache_write_5m_usd_per_mtok": 3.75,
+      "cache_write_1h_usd_per_mtok": 6.0,
+      "long_context": {
+        "threshold_input_tokens": 200000,
+        "input_usd_per_mtok": 6.0,
+        "output_usd_per_mtok": 22.5,
+        "cache_read_usd_per_mtok": 0.6,
+        "cache_write_5m_usd_per_mtok": 7.5,
+        "cache_write_1h_usd_per_mtok": 12.0
+      }
+    },
+    {
+      "id": "claude-haiku-4.5",
+      "aliases": ["claude-haiku-4-5", "claude-haiku-4.5", "haiku-4-5", "haiku-4.5", "haiku"],
+      "input_usd_per_mtok": 1.0,
+      "output_usd_per_mtok": 5.0,
+      "cache_read_usd_per_mtok": 0.1,
+      "cache_write_5m_usd_per_mtok": 1.25,
+      "cache_write_1h_usd_per_mtok": 2.0
+    },
+    {
+      "id": "claude-haiku-3.5",
+      "aliases": ["claude-haiku-3-5", "claude-haiku-3.5", "haiku-3-5", "haiku-3.5"],
+      "input_usd_per_mtok": 0.8,
+      "output_usd_per_mtok": 4.0,
+      "cache_read_usd_per_mtok": 0.08,
+      "cache_write_5m_usd_per_mtok": 1.0,
+      "cache_write_1h_usd_per_mtok": 1.6
+    }
+  ],
+  "server_tools": {
+    "web_search": {
+      "usd_per_1000_requests": 10.0
+    },
+    "code_execution": {
+      "usd_per_session_hour": 0.05,
+      "note": "Marginal public rate after the provider organization free allowance; free-tier reconciliation is not applied."
+    }
+  }
+}

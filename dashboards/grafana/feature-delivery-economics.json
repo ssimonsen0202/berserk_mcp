@@ -1,0 +1,65 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {
+      "id": 1,
+      "title": "AI spend by feature",
+      "type": "barchart",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "default | where timestamp >= now() - 90d | where resource['service.name'] == 'claude-code' | summarize cost_usd=sum(todouble(attributes['cost_usd'])) by feature=tostring(resource['business.feature.id']) | sort by cost_usd desc | take 40"}]
+    },
+    {
+      "id": 2,
+      "title": "Developer hours by feature",
+      "type": "barchart",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "default | where timestamp >= now() - 90d | where resource['service.name'] == 'engineering-work' | where isnotempty(tostring(attributes['worklog_id'])) | extend worklog=tostring(attributes['worklog_id']), feature=tostring(attributes['feature_id']), hours=todouble(attributes['hours']) | summarize arg_max(timestamp, feature, hours) by worklog | summarize developer_hours=sum(hours) by feature | sort by developer_hours desc | take 40"}]
+    },
+    {
+      "id": 3,
+      "title": "Delivery outcomes by feature",
+      "type": "table",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "default | where timestamp >= now() - 90d | where resource['service.name'] == 'claude-code' | summarize requests=count(), errors=countif(tostring(attributes['error']) == 'true'), commits=countif(metric_name == 'claude_code.commit.count'), pull_requests=countif(metric_name == 'claude_code.pull_request.count') by feature=tostring(resource['business.feature.id']) | sort by requests desc | take 40"}]
+    },
+    {
+      "id": 4,
+      "title": "Feature spend by model, agent, and harness",
+      "type": "table",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "default | where timestamp >= now() - 90d | where resource['service.name'] == 'claude-code' | where attributes['event.name'] == 'api_request' | summarize cost_usd=sum(todouble(attributes['cost_usd'])) by feature=tostring(resource['business.feature.id']), model=tostring(attributes['model']), agent=tostring(attributes['agent.name']), harness=tostring(resource['berserk.harness.version']) | sort by cost_usd desc | take 100"}]
+    },
+    {
+      "id": 5,
+      "title": "Feature spend timeline and delivery milestones",
+      "type": "timeseries",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "default | where timestamp >= now() - 90d | where resource['service.name'] == 'claude-code' | summarize cost_usd=sum(todouble(attributes['cost_usd'])), commits=countif(metric_name == 'claude_code.commit.count'), pull_requests=countif(metric_name == 'claude_code.pull_request.count') by day=bin(timestamp, 1d), feature=tostring(resource['business.feature.id']) | sort by day asc | take 2000"}]
+    },
+    {
+      "id": 6,
+      "title": "Feature planning baseline",
+      "type": "table",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "default | where timestamp >= now() - 90d | where resource['service.name'] == 'engineering-work' | where isnotempty(tostring(attributes['feature_id'])) | summarize planned_hours=max(todouble(attributes['planned_hours'])), planned_ai_budget_usd=max(todouble(attributes['planned_ai_budget_usd'])), completion_pct=max(todouble(attributes['completion_pct'])) by feature=tostring(attributes['feature_id']) | sort by feature asc | take 100"}]
+    },
+    {
+      "id": 7,
+      "title": "AI spend per actual developer hour",
+      "type": "table",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "let worklogs=default | where timestamp >= now() - 90d | where resource['service.name'] == 'engineering-work' | where isnotempty(tostring(attributes['worklog_id'])) | extend worklog=tostring(attributes['worklog_id']), feature=tostring(attributes['feature_id']), hours=todouble(attributes['hours']) | summarize arg_max(timestamp, feature, hours) by worklog | summarize actual_hours=sum(hours) by feature; let spend=default | where timestamp >= now() - 90d | where resource['service.name'] == 'claude-code' | where attributes['event.name'] == 'api_request' | summarize actual_spend_usd=sum(todouble(attributes['cost_usd'])) by feature=tostring(resource['business.feature.id']); worklogs | join kind=leftouter spend on feature | extend ai_cost_per_hour=actual_spend_usd/actual_hours | project feature, actual_hours, actual_spend_usd, ai_cost_per_hour | sort by actual_spend_usd desc | take 100"}]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["berserk", "claude", "feature", "finops"],
+  "templating": {"list": [
+    {"name": "team", "label": "Team", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['business.team.id']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "project", "label": "Project", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['business.project.id']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "repository", "label": "Repository", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['code.repository.id']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "feature", "label": "Feature", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['business.feature.id']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "model", "label": "Model", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(attributes['model']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "agent", "label": "Agent", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(attributes['agent.name']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "harness", "label": "Harness version", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['berserk.harness.version']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "date_range", "label": "Date range", "type": "custom", "query": "7d,30d,90d", "current": {"text": "30d", "value": "30d"}}
+  ]},
+  "time": {"from": "now-90d", "to": "now"},
+  "timezone": "browser",
+  "title": "Feature Delivery Economics",
+  "uid": "berserk-ai-feature",
+  "version": 1
+}

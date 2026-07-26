@@ -43,6 +43,8 @@ _log = None              # callable(msg) -> None
 _persist_learned_query = None  # callable(entry, action_source) -> log_entry dict
 _sanitize_name = None    # callable(name) -> str
 _redact = None  # mandatory callable(str) -> str; set by configure()
+_validate_static = None  # optional callable(kql, since)->report
+_schema_context_provider = None  # optional callable()->(context, schema_hash, status)
 
 # Schema is table-wide and changes much less often than source discovery runs.
 # Cache it briefly so profiling several sources in one worker pass does not
@@ -55,7 +57,8 @@ KQL_IDIOMS = ""  # set by configure() once TABLE is known
 
 
 def configure(bzrk_search, table, get_store_dir, ensure_private_dir, now_iso, log,
-              persist_learned_query, sanitize_name, redact=None):
+              persist_learned_query, sanitize_name, redact=None,
+              validate_static=None, schema_context_provider=None):
     """Called once by berserk_mcp at import time.
 
     get_store_dir must be a zero-arg callable (not a Path) — see the
@@ -73,6 +76,7 @@ def configure(bzrk_search, table, get_store_dir, ensure_private_dir, now_iso, lo
         raise ValueError("parser_factory.configure requires a redactor")
     global _bzrk_search, _table, _get_store_dir, _ensure_private_dir, _now_iso
     global _log, _persist_learned_query, _sanitize_name, _redact, KQL_IDIOMS
+    global _validate_static, _schema_context_provider
     _bzrk_search = bzrk_search
     _table = table
     _get_store_dir = get_store_dir
@@ -82,6 +86,8 @@ def configure(bzrk_search, table, get_store_dir, ensure_private_dir, now_iso, lo
     _persist_learned_query = persist_learned_query
     _sanitize_name = sanitize_name
     _redact = redact
+    _validate_static = validate_static
+    _schema_context_provider = schema_context_provider
     _schema_cache.clear()
     KQL_IDIOMS = _build_kql_idioms()
 
@@ -509,7 +515,9 @@ def _http_post_json(url, headers, payload, timeout=LLM_TIMEOUT):
         with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
             return _read_bounded_json(resp), None
     except urllib.error.HTTPError as e:
-        return None, f"HTTP {e.code}"
+        code = e.code
+        e.close()
+        return None, f"HTTP {code}"
     except urllib.error.URLError:
         return None, "connection failed"
     except ValueError as e:
@@ -528,7 +536,9 @@ def _http_get_json(url, headers, timeout=LLM_TIMEOUT):
         with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
             return _read_bounded_json(resp), None
     except urllib.error.HTTPError as e:
-        return None, f"HTTP {e.code}"
+        code = e.code
+        e.close()
+        return None, f"HTTP {code}"
     except ValueError as e:
         return None, str(e)
     except Exception as e:
@@ -1344,6 +1354,17 @@ def validate_generated_query(q):
     if take_n < 1 or take_n > MAX_GENERATED_TAKE:
         return False, f"take {take_n} out of range (1..{MAX_GENERATED_TAKE})", None
 
+    validation_report = None
+    if _validate_static is not None:
+        validation_report = _validate_static(kql, q.get("since") or "1h ago")
+        if any(f.get("severity") == "error" for f in validation_report.get("findings", [])):
+            codes = ", ".join(f.get("code", "?") for f in validation_report.get("findings", []) if f.get("severity") == "error")
+            return False, f"static validation failed: {codes}", None
+        if validation_report.get("risk") == "high":
+            codes = ", ".join(f.get("code", "?") for f in validation_report.get("findings", [])[:3])
+            return False, f"static validation high risk: {codes}", None
+        q["_validation_report"] = validation_report
+
     out, err = _bzrk_search(kql, q.get("since") or "1h ago")
     if err:
         return False, f"execution failed: {_safe_diag_text(out)}", None
@@ -1364,6 +1385,9 @@ def validate_generated_query(q):
         if missing:
             warning = f"columns not visible in output header: {', '.join(missing)}"
 
+    if validation_report and validation_report.get("risk") == "medium":
+        note = "static validation risk=medium"
+        warning = note if not warning else warning + "; " + note
     return True, None, warning
 
 
@@ -1392,8 +1416,22 @@ def generate_parser_for(job):
             "reason": f"job deadline ({JOB_DEADLINE_SECONDS}s) exceeded during profiling",
         }), False
 
+    schema_context = ""
+    schema_hash = ""
+    schema_status = ""
+    if _schema_context_provider is not None:
+        try:
+            schema_context, schema_hash, schema_status = _schema_context_provider()
+        except Exception as e:
+            schema_context = f"(schema context unavailable: {type(e).__name__})"
+            schema_status = "unavailable"
+
     user_prompt_base = (
         KQL_IDIOMS + "\n\n"
+        "Confirmed schema context for this Berserk cluster:\n"
+        f"{schema_context}\n\n"
+        "Generated KQL must use only confirmed fields, must preserve explicit bounds "
+        "and narrow projections, and must pass static validation before execution.\n\n"
         f"Source: {source} (kind={kind})\n"
         f"Target role: {role_hint or 'none specified'}\n"
         f"Resource keys: {', '.join(profile['resource_keys']) or '(none discovered)'}\n"
@@ -1492,8 +1530,21 @@ def generate_parser_for(job):
                 "model": used_model,
                 "ts": _now_iso(),
                 "job_source": source,
+                "schema_hash": schema_hash,
+                "schema_status": schema_status,
             },
         }
+        validation_report = q.get("_validation_report") or {}
+        if validation_report:
+            schema_info = validation_report.get("schema", {})
+            entry.update({
+                "validation_version": validation_report.get("validation_version", 1),
+                "validation_risk": validation_report.get("risk"),
+                "schema_hash": schema_info.get("schema_hash") or schema_hash,
+                "schema_status": schema_info.get("schema_status") or schema_status,
+                "validated_at": _now_iso(),
+                "validation_report": validation_report,
+            })
         if role_hint:
             entry["roles"] = [role_hint]
         log_entry = _persist_learned_query(entry, action_source="generated")

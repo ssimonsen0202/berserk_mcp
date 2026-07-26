@@ -1,0 +1,128 @@
+// Berserk Explore query pack: enterprise Claude AI FinOps
+// Each query has an explicit 30-day bound. Adjust it deliberately when needed.
+
+// Daily Claude-reported approximate spend
+default
+| where timestamp >= now() - 30d
+| where resource['service.name'] == 'claude-code'
+| where attributes['event.name'] in ('api_request', 'claude_code.api_request')
+| summarize cost_usd=sum(todouble(attributes['cost_usd'])) by day=bin(timestamp, 1d)
+| sort by day asc
+| render timechart with (title="Claude-reported approximate spend by day", ytitle="USD");
+
+// Project and feature spend
+default
+| where timestamp >= now() - 30d
+| where resource['service.name'] == 'claude-code'
+| where attributes['event.name'] in ('api_request', 'claude_code.api_request')
+| summarize cost_usd=sum(todouble(attributes['cost_usd']))
+  by project=tostring(resource['business.project.id']),
+     feature=tostring(resource['business.feature.id'])
+| sort by cost_usd desc
+| take 30
+| render barchart with (title="AI spend by project and feature", ytitle="USD");
+
+// Cache effectiveness by model
+default
+| where timestamp >= now() - 30d
+| where resource['service.name'] == 'claude-code'
+| where attributes['event.name'] in ('api_request', 'claude_code.api_request')
+| summarize input_tokens=sum(toint(attributes['input_tokens'])),
+            cache_read_tokens=sum(toint(attributes['cache_read_tokens']))
+  by model=tostring(attributes['model'])
+| extend cache_hit_ratio=cache_read_tokens / (input_tokens + cache_read_tokens)
+| sort by cache_hit_ratio desc
+| render columnchart with (title="Prompt-cache reuse by model", ytitle="Ratio");
+
+// Developer hours by feature
+default
+| where timestamp >= now() - 30d
+| where resource['service.name'] == 'engineering-work'
+| where isnotempty(tostring(attributes['worklog_id']))
+| extend worklog=tostring(attributes['worklog_id']),
+         feature=tostring(attributes['feature_id']),
+         hours=todouble(attributes['hours'])
+| summarize arg_max(timestamp, feature, hours) by worklog
+| summarize developer_hours=sum(hours) by feature
+| sort by developer_hours desc
+| take 30
+| render barchart with (title="Developer hours by feature", ytitle="Hours");
+
+// Planned versus actual AI budget by feature. The feature feed is reduced to
+// its latest record before joining, so reimports do not multiply the budget.
+let feature_budget = default
+| where timestamp >= now() - 30d
+| where resource['service.name'] == 'engineering-work'
+| where isnotempty(tostring(attributes['feature_id']))
+| extend feature=tostring(attributes['feature_id']),
+         planned_ai_budget_usd=todouble(attributes['planned_ai_budget_usd'])
+| summarize arg_max(timestamp, planned_ai_budget_usd) by feature;
+let feature_spend = default
+| where timestamp >= now() - 30d
+| where resource['service.name'] == 'claude-code'
+| where attributes['event.name'] in ('api_request', 'claude_code.api_request')
+| extend feature=iff(isnotempty(tostring(attributes['business.feature.id'])),
+                     tostring(attributes['business.feature.id']),
+                     tostring(resource['business.feature.id']))
+| where isnotempty(feature)
+| summarize actual_ai_spend_usd=sum(todouble(attributes['cost_usd'])) by feature;
+feature_budget
+| join kind=fullouter feature_spend on feature
+| project feature, planned_ai_budget_usd, actual_ai_spend_usd
+| sort by actual_ai_spend_usd desc
+| take 30
+| render columnchart with (title="Planned versus actual AI spend by feature", ytitle="USD");
+
+// Token composition
+default
+| where timestamp >= now() - 30d
+| where resource['service.name'] == 'claude-code'
+| where attributes['event.name'] in ('api_request', 'claude_code.api_request')
+| summarize input=sum(toint(attributes['input_tokens'])),
+            output=sum(toint(attributes['output_tokens'])),
+            cache_read=sum(toint(attributes['cache_read_tokens'])),
+            cache_creation=sum(toint(attributes['cache_creation_tokens']))
+  by day=bin(timestamp, 1d)
+| sort by day asc
+| render columnchart with (title="Daily Claude token composition", ytitle="Tokens");
+
+// Top expensive agents and operations
+default
+| where timestamp >= now() - 30d
+| where resource['service.name'] == 'claude-code'
+| where attributes['event.name'] in ('api_request', 'claude_code.api_request')
+| extend agent=tostring(attributes['agent.name']),
+         operation=iff(isnotempty(tostring(attributes['mcp_tool.name'])),
+                       tostring(attributes['mcp_tool.name']),
+                       tostring(attributes['query_source']))
+| summarize cost_usd=sum(todouble(attributes['cost_usd'])), requests=count()
+  by agent=iff(isempty(agent), 'main', agent),
+     operation=iff(isempty(operation), 'unspecified', operation)
+| sort by cost_usd desc
+| take 30
+| render barchart with (title="Top expensive agents and operations", ytitle="USD");
+
+// Unattributed Claude spend
+default
+| where timestamp >= now() - 30d
+| where resource['service.name'] == 'claude-code'
+| where attributes['event.name'] in ('api_request', 'claude_code.api_request')
+| extend feature=iff(isnotempty(tostring(attributes['business.feature.id'])),
+                     tostring(attributes['business.feature.id']),
+                     tostring(resource['business.feature.id']))
+| summarize cost_usd=sum(todouble(attributes['cost_usd']))
+  by attribution=iff(isempty(feature), 'unattributed', 'attributed')
+| render piechart with (title="Feature attribution coverage");
+
+// Harness recommendation impact
+default
+| where timestamp >= now() - 30d
+| where resource['service.name'] == 'claude-code'
+| where attributes['event.name'] in ('api_request', 'claude_code.api_request')
+| summarize cost_usd=sum(todouble(attributes['cost_usd'])),
+            errors=countif(tostring(attributes['error']) == 'true'),
+            requests=count()
+  by harness=tostring(resource['berserk.harness.version'])
+| extend error_rate=errors / requests
+| sort by cost_usd desc
+| render table;

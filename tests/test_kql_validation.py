@@ -1,0 +1,93 @@
+import unittest
+
+import kql_validation as kv
+
+
+SCHEMA_FIELDS = {
+    "timestamp", "metric_name", "value", "severity_text", "body",
+    "resource['service.name']", "resource.service.name", "service.name",
+    "resource['host.name']", "resource.host.name", "host.name",
+}
+
+
+class KqlValidationTest(unittest.TestCase):
+    def report(self, kql, **kw):
+        return kv.validate_kql_static(
+            kql,
+            table="default",
+            since=kw.pop("since", "15m ago"),
+            schema_fields=kw.pop("schema_fields", SCHEMA_FIELDS),
+            suggest=kw.pop("suggest", lambda name: ["resource['service.name']"] if name == "service_name" else []),
+            **kw,
+        )
+
+    def codes(self, report):
+        return [f["code"] for f in report["findings"]]
+
+    def test_valid_bounded_query_low_risk(self):
+        r = self.report("default | where resource['service.name'] == 'api' | project timestamp, severity_text | take 20")
+        self.assertTrue(r["valid"])
+        self.assertEqual(r["risk"], "low")
+
+    def test_wrong_table_and_control_commands_rejected(self):
+        self.assertIn("WRONG_TABLE", self.codes(self.report("other | take 1")))
+        r = self.report(".show tables")
+        self.assertFalse(r["valid"])
+        self.assertIn("CONTROL_COMMAND", self.codes(r))
+
+    def test_missing_and_oversized_bounds(self):
+        self.assertIn("UNBOUNDED_RESULT", self.codes(self.report("default | where metric_name == 'x'")))
+        self.assertIn(
+            "RESULT_BOUND_TOO_LARGE",
+            self.codes(self.report("default | where metric_name == 'x' | take 5000", max_rows=100)),
+        )
+
+    def test_wide_projection_sort_and_expensive_operators(self):
+        r = self.report("default | project timestamp, body, resource | sort by timestamp desc")
+        self.assertIn("WIDE_PROJECTION", self.codes(r))
+        self.assertIn("SORT_BEFORE_FILTER", self.codes(r))
+        self.assertIn("SORT_WITHOUT_BOUND", self.codes(r))
+        r = self.report("default | where body matches regex 'timeout.*' | join kind=inner (default | take 1) on trace_id | take 10")
+        self.assertIn("EXPENSIVE_OPERATOR", self.codes(r))
+        self.assertIn("RAW_CONTAINS_SCAN", self.codes(r))
+
+    def test_selective_predicates_lower_risk_but_do_not_erase_expensive_operator(self):
+        broad = self.report("default | join kind=inner (default | take 1) on trace_id | take 10")
+        narrow = self.report("default | where metric_name == 'x' | join kind=inner (default | take 1) on trace_id | take 10")
+        self.assertLess(narrow["score"], broad["score"])
+        self.assertIn("EXPENSIVE_OPERATOR", self.codes(narrow))
+
+    def test_unknown_field_suggestion_when_schema_supplied(self):
+        r = self.report("default | where service_name == 'api' | take 5")
+        self.assertIn("UNKNOWN_FIELD", self.codes(r))
+        self.assertIn("resource['service.name']", r["findings"][0]["message"])
+        r = self.report("default | where resource['service.nam'] == 'api' | take 5")
+        self.assertIn("UNKNOWN_FIELD", self.codes(r))
+        no_schema = self.report("default | where service_name == 'api' | take 5", schema_fields=None)
+        self.assertNotIn("UNKNOWN_FIELD", self.codes(no_schema))
+
+    def test_deterministic_ordering_and_malformed_inputs(self):
+        a = self.report("default | sort by timestamp desc | project body")
+        b = self.report("default | sort by timestamp desc | project body")
+        self.assertEqual(a["score"], b["score"])
+        self.assertEqual(self.codes(a), self.codes(b))
+        r = self.report(None)
+        self.assertFalse(r["valid"])
+        self.assertIn("EMPTY_QUERY", self.codes(r))
+
+    def test_stats_parser_valid_partial_malformed(self):
+        parsed = kv.parse_cli_stats('{"rows_returned": 3, "rowsProcessed": 9, "bytesScanned": 12, "plan": "x"}')
+        self.assertTrue(parsed["stats_available"])
+        self.assertEqual(parsed["rows_returned"], 3)
+        self.assertEqual(parsed["rows_processed"], 9)
+        self.assertEqual(parsed["bytes_scanned"], 12)
+        partial = kv.parse_cli_stats("rows returned: 4")
+        self.assertTrue(partial["stats_available"])
+        self.assertEqual(partial["rows_returned"], 4)
+        malformed = kv.parse_cli_stats("not stats")
+        self.assertFalse(malformed["stats_available"])
+        self.assertIsNone(malformed["rows_returned"])
+
+
+if __name__ == "__main__":
+    unittest.main()

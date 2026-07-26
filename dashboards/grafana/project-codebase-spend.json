@@ -1,0 +1,65 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Spend by project and repository",
+      "type": "barchart",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "default | where timestamp >= now() - 90d | where resource['service.name'] == 'claude-code' | summarize cost_usd=sum(todouble(attributes['cost_usd'])) by project=tostring(resource['business.project.id']), repository=tostring(resource['code.repository.id']) | sort by cost_usd desc | take 40"}]
+    },
+    {
+      "id": 2,
+      "title": "Token composition by model",
+      "type": "timeseries",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "default | where timestamp >= now() - 90d | where resource['service.name'] == 'claude-code' | summarize input_tokens=sum(toint(attributes['input_tokens'])), output_tokens=sum(toint(attributes['output_tokens'])), cache_read_tokens=sum(toint(attributes['cache_read_tokens'])) by day=bin(timestamp, 1d), model=tostring(attributes['model']) | sort by day asc"}]
+    },
+    {
+      "id": 3,
+      "title": "Feature allocation within each codebase",
+      "type": "table",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "default | where timestamp >= now() - 90d | where resource['service.name'] == 'claude-code' | where attributes['event.name'] == 'api_request' | summarize cost_usd=sum(todouble(attributes['cost_usd'])) by project=tostring(resource['business.project.id']), repository=tostring(resource['code.repository.id']), feature=tostring(resource['business.feature.id']) | sort by cost_usd desc | take 100"}]
+    },
+    {
+      "id": 4,
+      "title": "Cache composition by project",
+      "type": "table",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "default | where timestamp >= now() - 90d | where resource['service.name'] == 'claude-code' | where attributes['event.name'] == 'api_request' | summarize input_tokens=sum(toint(attributes['input_tokens'])), cache_read_tokens=sum(toint(attributes['cache_read_tokens'])), cache_creation_tokens=sum(toint(attributes['cache_creation_tokens'])) by project=tostring(resource['business.project.id']) | extend cache_hit_ratio=cache_read_tokens/(input_tokens+cache_read_tokens) | sort by input_tokens desc | take 50"}]
+    },
+    {
+      "id": 5,
+      "title": "Cost by pull request",
+      "type": "table",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "default | where timestamp >= now() - 90d | where resource['service.name'] == 'claude-code' | where attributes['event.name'] == 'api_request' | where isnotempty(tostring(attributes['vcs.pull_request.id'])) | summarize cost_usd=sum(todouble(attributes['cost_usd'])), requests=count() by project=tostring(resource['business.project.id']), pull_request=tostring(attributes['vcs.pull_request.id']) | sort by cost_usd desc | take 100"}]
+    },
+    {
+      "id": 6,
+      "title": "Monthly project spend trend",
+      "type": "timeseries",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "default | where timestamp >= now() - 90d | where resource['service.name'] == 'claude-code' | where attributes['event.name'] == 'api_request' | summarize cost_usd=sum(todouble(attributes['cost_usd'])) by month=bin(timestamp, 30d), project=tostring(resource['business.project.id']) | sort by month asc | take 2000"}]
+    },
+    {
+      "id": 7,
+      "title": "AI spend per commit by project",
+      "type": "table",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "let spend=default | where timestamp >= now() - 90d | where resource['service.name'] == 'claude-code' | where attributes['event.name'] == 'api_request' | summarize cost_usd=sum(todouble(attributes['cost_usd'])) by project=tostring(resource['business.project.id']); let delivery=default | where timestamp >= now() - 90d | where resource['service.name'] == 'claude-code' | where metric_name == 'claude_code.commit.count' | summarize commits=sum(toint(value)) by project=tostring(resource['business.project.id']); spend | join kind=leftouter delivery on project | extend cost_per_commit=cost_usd/commits | project project, cost_usd, commits, cost_per_commit | sort by cost_usd desc | take 100"}]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["berserk", "claude", "project", "codebase"],
+  "templating": {"list": [
+    {"name": "team", "label": "Team", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['business.team.id']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "project", "label": "Project", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['business.project.id']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "repository", "label": "Repository", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['code.repository.id']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "feature", "label": "Feature", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['business.feature.id']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "model", "label": "Model", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(attributes['model']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "agent", "label": "Agent", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(attributes['agent.name']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "harness", "label": "Harness version", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['berserk.harness.version']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "date_range", "label": "Date range", "type": "custom", "query": "7d,30d,90d", "current": {"text": "30d", "value": "30d"}}
+  ]},
+  "time": {"from": "now-90d", "to": "now"},
+  "timezone": "browser",
+  "title": "Project and Codebase AI Spend",
+  "uid": "berserk-ai-project",
+  "version": 1
+}

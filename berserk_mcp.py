@@ -21,6 +21,12 @@ Configuration (all optional, via environment):
   BERSERK_MCP_TOOL_BUDGET_SECONDS interactive tools/call budget (default: "10")
   BERSERK_MCP_FAIL_COOLDOWN_SECONDS identical timeout suppression (default: "30")
   BERSERK_MCP_CACHE_TTL_SECONDS read-only result cache TTL (default: "120")
+  BERSERK_MCP_KQL_VALIDATION validation policy: off/warn/strict (default: "warn")
+  BERSERK_MCP_KQL_LIVE_VALIDATION enable validate_kql mode=live (default: "0")
+  BERSERK_MCP_MAX_CONCURRENT_QUERIES in-process query concurrency (default: "2")
+  BERSERK_MCP_KQL_MAX_CHARS maximum user KQL length (default: "50000")
+  BERSERK_MCP_KQL_MAX_ROWS recommended arbitrary-query row bound (default: "2000")
+  BERSERK_MCP_KQL_STATS stats handling: off/auto/required (default: "auto")
   BERSERK_TABLE            the Berserk table to query             (default: "default")
   BERSERK_MCP_LEARNED_PATH where saved queries persist  (default: per-user config dir)
 
@@ -56,11 +62,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import agent_analytics
+import ai_finops
 import ingestion_advisor
+import kql_validation
 import parser_factory
+import schema_registry
 import secret_scan
 
-__version__ = "1.19.0"
+__version__ = "1.21.0"
 
 
 def log(msg):
@@ -79,7 +88,24 @@ def _nonnegative_float_env(name, default):
     try:
         return max(0.0, float(os.environ.get(name, str(default))))
     except (TypeError, ValueError):
+        log(f"{name}={os.environ.get(name)!r} is invalid; using {default!r}.")
         return float(default)
+
+
+def _nonnegative_int_env(name, default):
+    try:
+        return max(0, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        log(f"{name}={os.environ.get(name)!r} is invalid; using {default!r}.")
+        return int(default)
+
+
+def _choice_env(name, default, choices):
+    value = os.environ.get(name, default).strip().lower()
+    if value not in choices:
+        log(f"{name}={value!r} is invalid; using {default!r}.")
+        return default
+    return value
 
 
 WORKER_JITTER_SECONDS = _nonnegative_float_env("BERSERK_WORKER_JITTER_SECONDS", 7200)
@@ -128,6 +154,13 @@ def _window_budget(base, since):
     return min(scaled, max(base, float(DEFAULT_TIMEOUT)))
 FAIL_COOLDOWN_SECONDS = _nonnegative_float_env("BERSERK_MCP_FAIL_COOLDOWN_SECONDS", 30)
 CACHE_TTL_SECONDS = _nonnegative_float_env("BERSERK_MCP_CACHE_TTL_SECONDS", 120)
+KQL_VALIDATION_MODE = _choice_env("BERSERK_MCP_KQL_VALIDATION", "warn", {"off", "warn", "strict"})
+KQL_LIVE_VALIDATION = os.environ.get("BERSERK_MCP_KQL_LIVE_VALIDATION", "0").strip().lower() in {"1", "true", "yes", "on"}
+MAX_CONCURRENT_QUERIES = _nonnegative_int_env("BERSERK_MCP_MAX_CONCURRENT_QUERIES", 2)
+KQL_MAX_CHARS = _nonnegative_int_env("BERSERK_MCP_KQL_MAX_CHARS", 50000) or 50000
+KQL_MAX_ROWS = _nonnegative_int_env("BERSERK_MCP_KQL_MAX_ROWS", 2000) or 2000
+KQL_STATS_MODE = _choice_env("BERSERK_MCP_KQL_STATS", "auto", {"off", "auto", "required"})
+_QUERY_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_QUERIES) if MAX_CONCURRENT_QUERIES > 0 else None
 
 # Fleet controls are deliberately in-process. An MCP stdio server is one
 # agent session, so suppressing repeated work here addresses the retry storm
@@ -249,6 +282,37 @@ def _default_learned_path() -> Path:
 LEARNED_PATH = _default_learned_path()
 DISCOVERY_QUEUE_PATH = _default_learned_path().parent / "discovery_queue.json"
 KNOWN_SOURCES_PATH = _default_learned_path().parent / "known_sources.json"
+
+
+def _optional_absolute_env_path(name, default):
+    value = os.environ.get(name)
+    return _validate_store_path(value, name) if value else Path(default)
+
+
+FINOPS_BUSINESS_STORE_PATH = _optional_absolute_env_path(
+    "BERSERK_MCP_BUSINESS_STORE_PATH",
+    _default_learned_path().parent / "ai_finops_business.json",
+)
+FINOPS_DECISION_STORE_PATH = _optional_absolute_env_path(
+    "BERSERK_MCP_RECOMMENDATION_STORE_PATH",
+    _default_learned_path().parent / "ai_finops_recommendations.json",
+)
+FINOPS_REPORT_DIR = _optional_absolute_env_path(
+    "BERSERK_MCP_REPORT_DIR",
+    _default_learned_path().parent / "reports",
+)
+FINOPS_PRICING_CATALOG_PATH = _optional_absolute_env_path(
+    "BERSERK_MCP_PRICING_CATALOG_PATH",
+    Path(__file__).resolve().parent / "pricing_catalog.json",
+)
+FINOPS_OTLP_ENDPOINT = os.environ.get(
+    "BERSERK_MCP_OTLP_LOGS_ENDPOINT",
+    os.environ.get("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", ""),
+).strip()
+FINOPS_OTLP_HEADERS = os.environ.get(
+    "BERSERK_MCP_OTLP_HEADERS",
+    os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", ""),
+).strip()
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_INFO = {"name": "berserk-q", "title": "Berserk Query", "version": __version__}
 
@@ -949,15 +1013,27 @@ def bzrk_search(kql, since, extra=None):
     if _FLEET_CONTEXT is not None:
         timeout = _window_budget(_FLEET_CONTEXT.get("budget"), since)
         tool_name = _FLEET_CONTEXT.get("tool")
-    if timeout is None:
-        out, is_err = run_bzrk(
-            ["-P", PROFILE, "search", kql, "--since", since] + list(extra or [])
+    effective_timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
+    acquired = _query_semaphore_acquire(effective_timeout)
+    if not acquired:
+        return (
+            "Local MCP query queue is full. Retry later, use a narrower 'since' "
+            "window, or raise BERSERK_MCP_MAX_CONCURRENT_QUERIES if this process "
+            "is intentionally serving more parallel callers.",
+            True,
         )
-    else:
-        out, is_err = run_bzrk(
-            ["-P", PROFILE, "search", kql, "--since", since] + list(extra or []),
-            timeout=timeout,
-        )
+    try:
+        if timeout is None:
+            out, is_err = run_bzrk(
+                ["-P", PROFILE, "search", kql, "--since", since] + list(extra or [])
+            )
+        else:
+            out, is_err = run_bzrk(
+                ["-P", PROFILE, "search", kql, "--since", since] + list(extra or []),
+                timeout=timeout,
+            )
+    finally:
+        _query_semaphore_release(acquired)
     if is_err and _BZRK_TIMEOUT_TEXT_RE.match(str(out or "")) and tool_name:
         return (
             f"{tool_name} exceeded its {timeout:g}s query budget for window {since!r}. "
@@ -993,6 +1069,133 @@ def do_schema():
     out2, e2 = run_bzrk(["-P", PROFILE, "search", f"{T} | getschema", "--since", "1h ago"])
     text = f"== tables ==\n{out1}\n== columns ==\n{out2}"
     return text, (e1 or e2)
+
+
+def _schema_fetcher():
+    out_tables, _ = run_bzrk(["-P", PROFILE, "search", ".show tables"])
+    out_schema, _ = run_bzrk(["-P", PROFILE, "search", f"{T} | getschema", "--since", "1h ago"])
+    out_fields, _ = run_bzrk(["-P", PROFILE, "search", q_discover_fieldstats(None), "--since", "1h ago"])
+    out_sample, _ = run_bzrk(["-P", PROFILE, "search", q_discover_sample(None), "--since", "1h ago"])
+    return {
+        "tables": out_tables,
+        "getschema": out_schema,
+        "fieldstats": out_fields,
+        "sample": out_sample,
+        "supported_idioms": [
+            "tail", "take", "top", "summarize", "make-series", "fieldstats",
+            "series_decompose_anomalies", "series_fit_line", "similarto",
+        ],
+    }
+
+
+def _schema_snapshot(force=False, allow_refresh=True):
+    return schema_registry.get_schema_snapshot(
+        force=force,
+        table=TABLE,
+        config_dir=Path(LEARNED_PATH).parent,
+        fetcher=_schema_fetcher if allow_refresh else None,
+    )
+
+
+def _validation_schema(use_schema=True, allow_refresh=True):
+    if not use_schema:
+        return None, None, {"schema_status": "disabled"}
+    try:
+        snapshot = _schema_snapshot(force=False, allow_refresh=allow_refresh)
+        fields = schema_registry.schema_fields(snapshot)
+        info = {
+            "schema_hash": snapshot.get("schema_hash"),
+            "schema_status": snapshot.get("source_status", "unavailable"),
+            "table": snapshot.get("table", TABLE),
+        }
+        return snapshot, fields, info
+    except Exception as e:
+        log(f"schema validation unavailable: {type(e).__name__}: {e}")
+        return None, None, {"schema_status": "unavailable"}
+
+
+def _validate_user_kql(kql, since, *, use_schema=True, allow_refresh_schema=True):
+    base_report = kql_validation.validate_kql_static(
+        str(kql or ""),
+        table=TABLE,
+        since=str(since or ""),
+        schema_fields=None,
+        max_chars=KQL_MAX_CHARS,
+        max_rows=KQL_MAX_ROWS,
+        schema_info={"schema_status": "not_checked"},
+    )
+    if any(f.get("severity") == "error" for f in base_report.get("findings", [])) or not use_schema:
+        return base_report
+    snapshot, fields, info = _validation_schema(use_schema=use_schema, allow_refresh=allow_refresh_schema)
+    report = kql_validation.validate_kql_static(
+        str(kql or ""),
+        table=TABLE,
+        since=str(since or ""),
+        schema_fields=fields,
+        max_chars=KQL_MAX_CHARS,
+        max_rows=KQL_MAX_ROWS,
+        schema_info=info,
+        suggest=(lambda field: schema_registry.suggest_field(field, snapshot)) if snapshot else None,
+    )
+    return report
+
+
+def _blocking_validation(report, *, persistence=False):
+    if any(f.get("severity") == "error" for f in report.get("findings", [])):
+        return True
+    if KQL_VALIDATION_MODE == "strict" and report.get("risk") == "high":
+        return True
+    if persistence and report.get("risk") == "high":
+        return True
+    return False
+
+
+def _format_validation_rejection(report):
+    finding = next((f for f in report.get("findings", []) if f.get("severity") == "error"), None)
+    if finding is None:
+        finding = (report.get("findings") or [{"code": "HIGH_RISK", "message": "high-risk query"}])[0]
+    prefix = "invalid KQL: " if finding.get("code") == "WRONG_TABLE" else ""
+    return (
+        f"{prefix}KQL rejected ({finding.get('code')}): {finding.get('message')} "
+        f"Estimated risk: {report.get('risk')}."
+    )
+
+
+def _format_validation_warnings(report):
+    warnings = [f for f in report.get("findings", []) if f.get("severity") != "error"]
+    if not warnings:
+        return ""
+    return "KQL validation warnings (risk=%s):\n" % report.get("risk") + "\n".join(
+        f"- {f.get('code')}: {f.get('message')}" for f in warnings[:8]
+    )
+
+
+def _query_semaphore_acquire(timeout):
+    if KQL_VALIDATION_MODE == "off" or _QUERY_SEMAPHORE is None:
+        return True
+    try:
+        wait = max(0.0, float(timeout if timeout is not None else DEFAULT_TIMEOUT))
+    except (TypeError, ValueError):
+        wait = float(DEFAULT_TIMEOUT)
+    return _QUERY_SEMAPHORE.acquire(timeout=wait)
+
+
+def _query_semaphore_release(acquired):
+    if acquired and _QUERY_SEMAPHORE is not None:
+        _QUERY_SEMAPHORE.release()
+
+
+def _parser_static_validation(kql, since):
+    return _validate_user_kql(kql, since, use_schema=True)
+
+
+def _parser_schema_context():
+    snapshot = _schema_snapshot(force=False)
+    return (
+        schema_registry.schema_context(snapshot, max_chars=12000),
+        snapshot.get("schema_hash", ""),
+        snapshot.get("source_status", "unavailable"),
+    )
 
 
 # ---------- learned-query store ----------
@@ -1159,6 +1362,8 @@ parser_factory.configure(
     log=log,
     persist_learned_query=persist_learned_query,
     sanitize_name=sanitize_name,
+    validate_static=_parser_static_validation,
+    schema_context_provider=_parser_schema_context,
     redact=lambda text: secret_scan.redact(
         text, include_entropy=True, pii_types=secret_scan.ALL_PII_TYPES,
     )[0],
@@ -1169,6 +1374,19 @@ agent_analytics.configure(
     redact=lambda text: secret_scan.redact(
         text, include_entropy=True, pii_types=secret_scan.ALL_PII_TYPES,
     )[0],
+)
+ai_finops.configure(
+    search=bzrk_search_json,
+    table=TABLE,
+    redact=lambda text: secret_scan.redact(
+        text, include_entropy=True, pii_types=secret_scan.ALL_PII_TYPES,
+    )[0],
+    catalog_path=FINOPS_PRICING_CATALOG_PATH,
+    business_store_path=FINOPS_BUSINESS_STORE_PATH,
+    decision_store_path=FINOPS_DECISION_STORE_PATH,
+    report_dir=FINOPS_REPORT_DIR,
+    otlp_endpoint=FINOPS_OTLP_ENDPOINT,
+    otlp_headers=FINOPS_OTLP_HEADERS,
 )
 secret_scan.configure(
     bzrk_search=bzrk_search_json,
@@ -1229,6 +1447,7 @@ TOOLS = [
     {"name": "list_metrics", "description": "List every metric name currently being ingested, with sample counts + last-seen. Use to DISCOVER what telemetry exists before writing a `search` query.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "bzrk_query_perf", "description": "Berserk query engine latency percentiles: p50, p95, p99 in µs. Use for 'how fast is Berserk?', 'query latency', or 'p50/p95/p99 execution time'. Uses otel_histogram_percentile($raw, N) — the native Berserk histogram aggregate.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "discover_schema", "description": "Discover the shape of a data source: returns (1) every key present under `resource` with row counts, AND (2) a small structural sample with resource/attribute keys and body/metric presence flags. It never exports raw resource, attributes, or body values. Use to learn an unknown or newly-ingested source before querying it. Optional `service` filter. Pair with list_services / list_metrics. Once you work out a query with `search`, persist it with save_query so it becomes reusable.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "optional: limit to one service.name"}}, **_since())}},
+    {"name": "validate_kql", "roles": ["sre", "soc", "claude", "ops"], "description": "Validate custom Berserk KQL before saving or running it. Static mode does not contact Berserk except for cached schema context; live mode is opt-in, executes a bounded read-only query, and may consume query budget.", "inputSchema": {"type": "object", "properties": dict({"kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'."}, "mode": {"type": "string", "enum": ["static", "live"], "default": "static"}, "use_schema": {"type": "boolean", "default": True, "description": "Use cached/discovered schema for unknown-field checks."}}, **_since()), "required": ["kql"]}},
     {"name": "search", "description": "Run an arbitrary Kusto/KQL query against the Berserk table. Use when the other tools do not fit; once it works, persist it with save_query. Fields are nested OTLP resource/log attributes, NOT flat columns — access as resource['service.name'], resource['host.name'], attributes['systemd.unit'], etc. (bare service_name/host_name do not exist and silently match zero rows instead of erroring). If you don't already know the exact field names for this source, call discover_schema first instead of guessing.", "inputSchema": {"type": "object", "properties": dict({"kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'. Field access is resource['key'] / attributes['key'], never a bare column name."}}, **_since()), "required": ["kql"]}},
     {"name": "detect_anomalies", "roles": ["sre", "soc"], "description": "Statistical anomaly detection for service event volume over time. Uses zero-filled make-series and series_decompose_anomalies; use for 'is anything behaving abnormally?' rather than guessing a threshold. Optional service filter.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "optional service.name filter"}}, **_since())}},
     {"name": "find_similar", "roles": ["sre", "soc"], "description": "Find log messages by meaning rather than exact text, for example 'database timeouts' or 'authentication failures'. Semantic indexing must be enabled on the Berserk cluster; use search with has for exact terms. Optional service filter and k (1-50).", "inputSchema": {"type": "object", "properties": dict({"description": {"type": "string", "maxLength": 500, "description": "natural-language description; quotes, pipes, backslashes, and backticks are rejected"}, "service": {"type": "string", "description": "optional service.name filter"}, "k": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10}}, **_since()), "required": ["description"]}},
@@ -1262,6 +1481,15 @@ TOOLS = [
     {"name": "claude_cost_report", "roles": ["claude"], "description": "Claude Code multi-day cost report: per-day token burn with exact/estimated labeling, per-model split, optional per-project attribution from file paths, and a burn-growing/flat/declining trend verdict. Default 7d.", "inputSchema": {"type": "object", "properties": dict({"group_by": {"type": "string", "enum": ["day", "model", "project"], "description": "Aggregation: by day (default), model, or inferred project."}}, **_since())}},
     {"name": "claude_session_deep_dive", "roles": ["claude"], "description": "Timeline drilldown for one Claude Code session: contiguous tool phases with error counts, activity gaps over 5 minutes, cumulative token burn (exact/estimated), and a loop verdict. Requires session_id (find them via claude_sessions).", "inputSchema": {"type": "object", "properties": dict({"session_id": {"type": "string", "description": "claude.session_id value"}}, **_since()), "required": ["session_id"]}},
     {"name": "claude_workflow_insights", "roles": ["claude"], "description": "Cross-session Claude Code workflow patterns: most common tool sequences, error hotspots by tool+target, and top-decile burn-per-target sessions. Use for 'how is my agent working overall?'. Default 7d.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "claude_spend_overview", "roles": ["claude"], "description": "Enterprise Claude spend overview using exact native/legacy token classes and a versioned public pricing catalog. Groups by day, team, portfolio, project, repository, feature, work item, agent, harness, or model and always reports pricing/attribution coverage.", "inputSchema": {"type": "object", "properties": {"since": _since()["since"], "group_by": {"type": "string", "enum": ["day", "team", "portfolio", "project", "repository", "feature", "work_item", "agent", "harness", "model"], "default": "day"}, "team": {"type": "string"}, "project": {"type": "string"}, "repository": {"type": "string"}, "feature": {"type": "string"}, "agent": {"type": "string"}, "harness": {"type": "string"}, "model": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}}}},
+    {"name": "claude_feature_cost", "roles": ["claude"], "description": "Feature delivery economics: planned/actual developer hours, planned/actual AI API-equivalent cost, forecast, attribution, and delivery signals for one governed feature.", "inputSchema": {"type": "object", "properties": {"feature_id": {"type": "string"}, "since": _since()["since"]}, "required": ["feature_id"]}},
+    {"name": "claude_project_economics", "roles": ["claude"], "description": "Project and codebase economics across governed features: developer hours, AI cost, budget, attribution, and feature-level breakdown.", "inputSchema": {"type": "object", "properties": {"project_id": {"type": "string"}, "since": _since()["since"]}, "required": ["project_id"]}},
+    {"name": "claude_efficiency_insights", "roles": ["claude"], "description": "Matched-cohort agent/harness efficiency analysis for cache reuse, context size, tool-result volume, retries, errors, model fit, and cost per successful outcome.", "inputSchema": {"type": "object", "properties": {"since": _since()["since"], "project": {"type": "string"}, "agent": {"type": "string"}, "harness": {"type": "string"}, "model": {"type": "string"}}}},
+    {"name": "claude_harness_recommendations", "roles": ["claude"], "description": "Generate deterministic, evidence-backed harness amendments. Only findings with sufficient samples/confidence are approval-eligible; this tool never modifies a harness.", "inputSchema": {"type": "object", "properties": {"since": _since()["since"], "project": {"type": "string"}, "agent": {"type": "string"}, "harness": {"type": "string"}, "model": {"type": "string"}}}},
+    {"name": "claude_record_recommendation_decision", "roles": ["claude"], "description": "Record an approved, rejected, or deferred harness recommendation as a privacy-safe append-only audit event. Does not apply the amendment.", "inputSchema": {"type": "object", "properties": {"recommendation_id": {"type": "string", "pattern": "^rec_[a-f0-9]{16}$"}, "decision": {"type": "string", "enum": ["approved", "rejected", "deferred"]}, "owner": {"type": "string", "description": "Owner identity; stored only as a SHA-256-derived identifier."}, "rationale": {"type": "string", "maxLength": 1000}}, "required": ["recommendation_id", "decision", "owner", "rationale"]}},
+    {"name": "claude_optimization_impact", "roles": ["claude"], "description": "Compare matched pre/post harness cohorts and return keep, no-material-change, rollback, or insufficient-data using cost, error, and success signals.", "inputSchema": {"type": "object", "properties": {"agent_profile": {"type": "string"}, "before_harness": {"type": "string"}, "after_harness": {"type": "string"}, "project": {"type": "string"}, "since": _since()["since"]}, "required": ["agent_profile", "before_harness", "after_harness"]}},
+    {"name": "claude_management_report", "roles": ["claude"], "description": "Management-ready portfolio, team, project, or feature report with readable text and a schema-versioned JSON envelope.", "inputSchema": {"type": "object", "properties": {"scope": {"type": "string", "enum": ["portfolio", "team", "project", "feature"], "default": "portfolio"}, "identifier": {"type": "string"}, "since": _since()["since"]}}},
+    {"name": "claude_generate_dashboard", "roles": ["claude"], "description": "Generate a privacy-safe Markdown or self-contained HTML dashboard beneath BERSERK_MCP_REPORT_DIR for use from Claude Code. This is an explicit local write.", "inputSchema": {"type": "object", "properties": {"dashboard": {"type": "string", "enum": ["portfolio", "project", "feature", "agent_efficiency", "data_quality"], "default": "portfolio"}, "identifier": {"type": "string"}, "since": _since()["since"], "format": {"type": "string", "enum": ["markdown", "html"], "default": "markdown"}, "filename": {"type": "string", "maxLength": 128}}}},
     {"name": "scan_secrets", "roles": ["soc"], "description": "Audit recent log bodies for potential credentials and optionally selected PII categories. Returns only aggregate service/type counts and first-seen timestamps; secret values are never returned. Default 1h.", "inputSchema": {"type": "object", "properties": {"since": _since()["since"], "include_entropy": {"type": "boolean", "description": "Enable false-positive-prone high-entropy token detection."}, "include_pii": {"type": "array", "items": {"type": "string", "enum": ["email", "ipv4", "ipv6", "credit_card"]}, "description": "Optional PII categories to include."}}}},
     {"name": "suggest_ingestion", "description": "Recommend concrete telemetry sources for a role/use case. With check_gap=true, compares service and metric hints against live Berserk inventory and marks each source present or missing. Catalog-backed and read-only.", "inputSchema": {"type": "object", "properties": {"role_or_usecase": {"type": "string", "description": "Catalog key such as sre/onprem-ad-health, soc/endpoint-identity, change-management/ansible, or scom."}, "check_gap": {"type": "boolean", "description": "Compare recommendations with live service and metric inventory."}, "since": _since()["since"]}, "required": ["role_or_usecase"]}},
 ]
@@ -1302,6 +1530,8 @@ _ANNOTATIONS = {
     "generate_parser": _WRITE_EXTERNAL,
     "run_discovery_worker": _WRITE_EXTERNAL,
     "review_generated": _READ_LOCAL,
+    "claude_record_recommendation_decision": _WRITE_EXTERNAL,
+    "claude_generate_dashboard": _WRITE_LOCAL,
 }
 
 TITLES = {
@@ -1329,6 +1559,7 @@ TITLES = {
     "soc_repeated_errors": "SOC: Repeated Errors",
     "soc_timeline": "SOC: Incident Timeline",
     "discover_schema": "Discover Schema",
+    "validate_kql": "Validate KQL",
     "search": "Run KQL",
     "detect_anomalies": "Detect Anomalies",
     "forecast_capacity": "Forecast Capacity",
@@ -1347,6 +1578,15 @@ TITLES = {
     "claude_cost_report": "Claude Code: Cost Report",
     "claude_session_deep_dive": "Claude Code: Session Deep Dive",
     "claude_workflow_insights": "Claude Code: Workflow Insights",
+    "claude_spend_overview": "Claude Code: Enterprise Spend",
+    "claude_feature_cost": "Claude Code: Feature Cost",
+    "claude_project_economics": "Claude Code: Project Economics",
+    "claude_efficiency_insights": "Claude Code: Efficiency Insights",
+    "claude_harness_recommendations": "Claude Code: Harness Recommendations",
+    "claude_record_recommendation_decision": "Claude Code: Record Recommendation Decision",
+    "claude_optimization_impact": "Claude Code: Optimization Impact",
+    "claude_management_report": "Claude Code: Management Report",
+    "claude_generate_dashboard": "Claude Code: Generate Dashboard",
     "scan_secrets": "SOC: Secret Scan",
     "suggest_ingestion": "Suggest Telemetry Ingestion",
     "list_saved": "List Saved Queries",
@@ -1447,7 +1687,20 @@ def _handle_call_uncached(name, arguments):
             avail = ", ".join(it["name"] for it in items) or "(none)"
             return "No saved query named '" + qn + "'. Available: " + avail, True
         since = arguments.get("since") or match.get("since") or "1h ago"
-        return bzrk_search(match["kql"], since)
+        prefix = ""
+        if KQL_VALIDATION_MODE != "off":
+            report = _validate_user_kql(match["kql"], since)
+            stored_hash = match.get("schema_hash")
+            current_hash = report.get("schema", {}).get("schema_hash")
+            if stored_hash and current_hash and stored_hash != current_hash:
+                prefix = (
+                    f"Schema drift warning: saved query schema_hash={stored_hash}, "
+                    f"current={current_hash}. Revalidated before execution.\n"
+                )
+            if _blocking_validation(report):
+                return prefix + _format_validation_rejection(report), True
+        out, err = bzrk_search(match["kql"], since)
+        return prefix + out, err
     if name == "save_query":
         nm = sanitize_name(arguments.get("name", ""))
         desc = str(arguments.get("description", "")).strip()
@@ -1455,6 +1708,11 @@ def _handle_call_uncached(name, arguments):
         since = arguments.get("since") or "1h ago"
         if not kql or not desc:
             return "save_query needs name, description, and kql.", True
+        validation_report = None
+        if KQL_VALIDATION_MODE != "off":
+            validation_report = _validate_user_kql(kql, since)
+            if _blocking_validation(validation_report, persistence=True):
+                return _format_validation_rejection(validation_report), True
         out, is_err = bzrk_search(kql, since)
         if is_err:
             return "NOT saved - the query failed when verified:\n" + out, True
@@ -1468,6 +1726,15 @@ def _handle_call_uncached(name, arguments):
                 f"to replace it (this will be logged)."
             ), True
         entry = {"name": nm, "description": desc, "kql": kql, "since": since}
+        if validation_report:
+            schema_info = validation_report.get("schema", {})
+            entry.update({
+                "validation_version": validation_report.get("validation_version", 1),
+                "validation_risk": validation_report.get("risk"),
+                "schema_hash": schema_info.get("schema_hash"),
+                "schema_status": schema_info.get("schema_status"),
+                "validated_at": now_iso(),
+            })
         roles = normalize_roles(arguments.get("roles"))
         if roles:
             entry["roles"] = roles
@@ -1588,6 +1855,67 @@ def _handle_call_uncached(name, arguments):
                 f"[{gb.get('provider','?')}/{gb.get('model','?')} @ {gb.get('ts','?')}]"
             )
         return "Generated queries:\n" + "\n".join(lines), False
+
+    if name == "validate_kql":
+        kql = arguments.get("kql")
+        if not kql:
+            return "missing required 'kql'", True
+        since = arguments.get("since") or "15m ago"
+        mode = str(arguments.get("mode") or "static").strip().lower()
+        if mode not in {"static", "live"}:
+            return "mode must be 'static' or 'live'", True
+        use_schema = arguments.get("use_schema", True) is not False
+        report = _validate_user_kql(
+            str(kql), since, use_schema=use_schema,
+            allow_refresh_schema=(mode == "live"),
+        )
+        if mode == "live":
+            if not KQL_LIVE_VALIDATION:
+                return (
+                    "live validation is disabled; set BERSERK_MCP_KQL_LIVE_VALIDATION=1 "
+                    "to allow validate_kql mode=live.",
+                    True,
+                )
+            if any(f.get("severity") == "error" for f in report.get("findings", [])):
+                return json.dumps(report, indent=2), True
+            budget = _window_budget(TOOL_BUDGET_SECONDS if TOOL_BUDGET_SECONDS > 0 else DEFAULT_TIMEOUT, since)
+            argv = ["-P", PROFILE, "search", str(kql), "--since", since]
+            if KQL_STATS_MODE != "off":
+                argv.append("--stats")
+            acquired = _query_semaphore_acquire(budget)
+            if not acquired:
+                return "Local MCP query queue is full; retry later or narrow the time window.", True
+            start = time.monotonic()
+            try:
+                out, err = run_bzrk(argv, timeout=budget)
+            finally:
+                duration_ms = int((time.monotonic() - start) * 1000)
+                _query_semaphore_release(acquired)
+            stats = kql_validation.parse_cli_stats(out if not err else "")
+            runtime = {
+                "duration_ms": duration_ms,
+                "timed_out": bool(err and str(out).lower().startswith("bzrk timed out")),
+                "rows_returned": stats.get("rows_returned"),
+                "rows_processed": stats.get("rows_processed"),
+                "bytes_scanned": stats.get("bytes_scanned"),
+                "engine_stats": stats.get("engine_stats", {}),
+                "stats_available": stats.get("stats_available", False),
+                "budget_seconds": budget,
+                "budget_compatible": not err,
+            }
+            report["runtime"] = runtime
+            if not stats.get("stats_available"):
+                report.setdefault("findings", []).append({
+                    "code": "STATS_UNAVAILABLE",
+                    "severity": "info",
+                    "message": "Engine statistics were unavailable or unrecognized; duration was measured locally.",
+                    "location": "runtime",
+                    "recommendation": "",
+                })
+            if err:
+                report["runtime_error"] = out
+            return json.dumps(report, indent=2), bool(err)
+        return json.dumps(report, indent=2), False
 
     if name == "detect_anomalies":
         service = str(arguments.get("service") or "").strip()
@@ -1758,7 +2086,17 @@ def _handle_call_uncached(name, arguments):
         if not kql:
             return "missing required 'kql'", True
         since = arguments.get("since") or "15m ago"
-        return bzrk_search(str(kql), since)
+        warning = ""
+        if KQL_VALIDATION_MODE != "off":
+            report = _validate_user_kql(str(kql), since)
+            if _blocking_validation(report):
+                return _format_validation_rejection(report), True
+            if KQL_VALIDATION_MODE == "warn":
+                warning = _format_validation_warnings(report)
+        out, err = bzrk_search(str(kql), since)
+        if warning and not err:
+            return warning + "\n\n" + out, False
+        return out, err
     if name == "claude_search":
         term = arguments.get("term")
         if not term:
@@ -1817,6 +2155,75 @@ def _handle_call_uncached(name, arguments):
                 f"'2d ago', or 'now'."
             ), True
         return agent_analytics.claude_workflow_insights(since)
+    if name in {
+        "claude_spend_overview", "claude_feature_cost", "claude_project_economics",
+        "claude_efficiency_insights", "claude_harness_recommendations",
+        "claude_optimization_impact", "claude_management_report",
+        "claude_generate_dashboard",
+    }:
+        default_since = "7d ago" if name in {
+            "claude_spend_overview", "claude_efficiency_insights",
+        } else "90d ago"
+        if name == "claude_harness_recommendations":
+            default_since = "14d ago"
+        if name == "claude_optimization_impact":
+            default_since = "30d ago"
+        since = arguments.get("since") or default_since
+        if not valid_since(since):
+            return (
+                f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
+                f"'2d ago', or 'now'."
+            ), True
+        filters = {
+            key: str(arguments.get(key) or "").strip()
+            for key in ("team", "project", "repository", "feature", "agent", "harness", "model")
+            if arguments.get(key)
+        }
+        if name == "claude_spend_overview":
+            try:
+                limit = int(arguments.get("limit", 20))
+            except (TypeError, ValueError):
+                return "limit must be an integer between 1 and 100", True
+            if not 1 <= limit <= 100:
+                return "limit must be an integer between 1 and 100", True
+            return ai_finops.spend_overview(
+                since, group_by=arguments.get("group_by") or "day",
+                filters=filters, limit=limit,
+            )
+        if name == "claude_feature_cost":
+            return ai_finops.feature_cost(arguments.get("feature_id"), since)
+        if name == "claude_project_economics":
+            return ai_finops.project_economics(arguments.get("project_id"), since)
+        if name == "claude_efficiency_insights":
+            return ai_finops.efficiency_insights(since, filters=filters)
+        if name == "claude_harness_recommendations":
+            return ai_finops.harness_recommendations(since, filters=filters)
+        if name == "claude_optimization_impact":
+            return ai_finops.optimization_impact(
+                str(arguments.get("agent_profile") or ""),
+                str(arguments.get("before_harness") or ""),
+                str(arguments.get("after_harness") or ""),
+                since=since,
+                project=str(arguments.get("project") or ""),
+            )
+        if name == "claude_management_report":
+            scope = str(arguments.get("scope") or "portfolio")
+            identifier = str(arguments.get("identifier") or "")
+            if scope in {"feature", "project"} and not identifier:
+                return f"{scope} scope requires 'identifier'", True
+            return ai_finops.management_report(scope, identifier, since)
+        return ai_finops.generate_dashboard(
+            dashboard=str(arguments.get("dashboard") or "portfolio"),
+            identifier=str(arguments.get("identifier") or ""),
+            since=since,
+            fmt=str(arguments.get("format") or "markdown"),
+            filename=str(arguments.get("filename") or ""),
+        )
+    if name == "claude_record_recommendation_decision":
+        return ai_finops.record_recommendation_decision(
+            arguments.get("recommendation_id"), arguments.get("decision"),
+            arguments.get("owner"), arguments.get("rationale"),
+        )
     if name == "scan_secrets":
         since = arguments.get("since") or "1h ago"
         if not valid_since(since):
@@ -1862,6 +2269,9 @@ _CACHEABLE_TOOLS = frozenset(set(SIMPLE) | {
     "sre_service_health", "soc_timeline",
     "claude_loop_check", "claude_model_fit", "claude_token_burn",
     "claude_cost_report", "claude_session_deep_dive", "claude_workflow_insights",
+    "claude_spend_overview", "claude_feature_cost", "claude_project_economics",
+    "claude_efficiency_insights", "claude_harness_recommendations",
+    "claude_optimization_impact", "claude_management_report",
 })
 
 
@@ -2152,6 +2562,10 @@ def main():
                      help="run one headless discovery pass (for cron)")
     cli.add_argument("--agent-report", action="store_true",
                      help="run Claude Code agent analytics report")
+    cli.add_argument("--agent-report-mode", choices=("operational", "daily", "weekly"),
+                     default="operational", help="agent report depth")
+    cli.add_argument("--agent-report-json", action="store_true",
+                     help="emit a machine-readable agent report envelope")
     cli.add_argument("--auto-queue", action="store_true",
                      help="(worker) queue newly detected sources")
     cli.add_argument("--max-jobs", type=int, default=3,
@@ -2160,9 +2574,59 @@ def main():
                      help="(worker) check known services for schema drift")
     cli.add_argument("--since", default="6h ago",
                      help="(agent-report) time window")
+    cli.add_argument("--import-business-data", choices=("feature", "effort"),
+                     help="import governed feature catalog or developer-effort records")
+    cli.add_argument("--input", help="input CSV/JSON/NDJSON file for business-data import")
+    cli.add_argument("--input-format", choices=("csv", "json", "ndjson", "jsonl"),
+                     help="override business-data input format")
+    cli.add_argument("--export-bi", action="store_true",
+                     help="export management-ready AI FinOps datasets")
+    cli.add_argument("--output", help="absolute BI export directory")
+    cli.add_argument("--export-format", choices=("csv", "ndjson"), default="csv",
+                     help="BI export format")
+    cli.add_argument("--generate-dashboard",
+                     choices=("portfolio", "project", "feature", "agent_efficiency", "data_quality"),
+                     help="generate a Claude Code dashboard snapshot")
+    cli.add_argument("--identifier", help="project/feature identifier for dashboard generation")
+    cli.add_argument("--dashboard-format", choices=("markdown", "html"), default="markdown")
     cli.add_argument("--set-hermes-url", metavar="URL",
                      help="persist the Hermes LLM endpoint and exit")
     ns = cli.parse_args()
+    if ns.import_business_data:
+        if not ns.input:
+            cli.error("--import-business-data requires --input")
+        try:
+            result = ai_finops.import_business_data(
+                ns.import_business_data, ns.input, fmt=ns.input_format,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            sys.exit(0)
+        except Exception as e:
+            print(f"business-data import failed: {type(e).__name__}: {e}", file=sys.stderr)
+            sys.exit(2)
+    if ns.export_bi:
+        if not ns.output:
+            cli.error("--export-bi requires --output")
+        if not valid_since(ns.since):
+            cli.error("--export-bi received an invalid --since value")
+        try:
+            manifest = ai_finops.export_bi(ns.since, ns.output, fmt=ns.export_format)
+            print(json.dumps(manifest, indent=2, sort_keys=True))
+            sys.exit(0)
+        except Exception as e:
+            print(f"BI export failed: {type(e).__name__}: {e}", file=sys.stderr)
+            sys.exit(2)
+    if ns.generate_dashboard:
+        if not valid_since(ns.since):
+            cli.error("--generate-dashboard received an invalid --since value")
+        text, is_error = ai_finops.generate_dashboard(
+            dashboard=ns.generate_dashboard,
+            identifier=ns.identifier or "",
+            since=ns.since,
+            fmt=ns.dashboard_format,
+        )
+        print(text, file=sys.stderr if is_error else sys.stdout)
+        sys.exit(2 if is_error else 0)
     if ns.set_hermes_url:
         try:
             path = parser_factory.save_hermes_url(ns.set_hermes_url)
@@ -2180,7 +2644,10 @@ def main():
             apply_jitter=True,
         ))
     if ns.agent_report:
-        sys.exit(run_agent_report(since=ns.since))
+        sys.exit(run_agent_report(
+            since=ns.since, mode=ns.agent_report_mode,
+            output_json=ns.agent_report_json,
+        ))
     _serve_mcp()
 
 
@@ -2216,7 +2683,9 @@ def _post_discord_alert(text):
         with parser_factory._NO_REDIRECT_OPENER.open(req, timeout=10) as resp:
             return 200 <= resp.status < 300
     except urllib.error.HTTPError as e:
-        log(f"discord alert: bridge returned HTTP {e.code}")
+        code = e.code
+        e.close()
+        log(f"discord alert: bridge returned HTTP {code}")
         return False
     except Exception as e:
         log(f"discord alert failed: {type(e).__name__}")
@@ -2296,7 +2765,7 @@ def run_worker_pass(auto_queue=False, max_jobs=3, check_drift=False, apply_jitte
     return 1 if any_needs_human else 0
 
 
-def run_agent_report(since="6h ago"):
+def run_agent_report(since="6h ago", mode="operational", output_json=False):
     """One headless pass for cron/systemd: run Claude Code loop and
     model-fit checks, print the report, and return non-zero when an alertable
     condition is present.
@@ -2304,9 +2773,36 @@ def run_agent_report(since="6h ago"):
     if not valid_since(since):
         print(f"invalid --since value: {since!r}", file=sys.stderr)
         return 2
-    text, should_alert = agent_analytics.agent_report(since)
-    print(text)
-    return 1 if should_alert else 0
+    if mode not in {"operational", "daily", "weekly"}:
+        print(f"invalid agent report mode: {mode!r}", file=sys.stderr)
+        return 2
+    effective_since = since
+    if since == "6h ago" and mode == "daily":
+        effective_since = "24h ago"
+    elif since == "6h ago" and mode == "weekly":
+        effective_since = "7d ago"
+    text, should_alert = agent_analytics.agent_report(effective_since)
+    spend_text = ""
+    spend_error = False
+    if mode in {"daily", "weekly"}:
+        spend_text, spend_error = ai_finops.spend_overview(
+            effective_since, group_by="project", limit=20,
+        )
+    if output_json:
+        print(json.dumps({
+            "schema_version": ai_finops.SCHEMA_VERSION,
+            "mode": mode,
+            "since": effective_since,
+            "operational_report": text,
+            "spend_report": spend_text,
+            "alert": bool(should_alert),
+            "spend_error": bool(spend_error),
+        }, indent=2, sort_keys=True))
+    else:
+        print(text)
+        if spend_text:
+            print("\n" + spend_text)
+    return 1 if should_alert or spend_error else 0
 
 
 if __name__ == "__main__":

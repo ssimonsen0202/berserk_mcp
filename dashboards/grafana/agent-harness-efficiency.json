@@ -1,0 +1,65 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Cost by agent and harness",
+      "type": "barchart",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | summarize cost_usd=sum(todouble(attributes['cost_usd'])), requests=count() by agent=tostring(resource['berserk.agent.profile']), harness=tostring(resource['berserk.harness.version']) | sort by cost_usd desc | take 40"}]
+    },
+    {
+      "id": 2,
+      "title": "Cache reuse by agent",
+      "type": "table",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | summarize input_tokens=sum(toint(attributes['input_tokens'])), cache_read_tokens=sum(toint(attributes['cache_read_tokens'])) by agent=tostring(resource['berserk.agent.profile']) | extend cache_hit_ratio=cache_read_tokens/(input_tokens+cache_read_tokens) | sort by cache_hit_ratio asc"}]
+    },
+    {
+      "id": 3,
+      "title": "Errors and retries",
+      "type": "table",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | summarize requests=countif(attributes['event.name'] == 'api_request'), errors=countif(attributes['event.name'] == 'api_error' or tostring(attributes['error']) == 'true'), attempts=sum(toint(attributes['attempt'])) by agent=tostring(resource['berserk.agent.profile']), harness=tostring(resource['berserk.harness.version']) | sort by errors desc | take 40"}]
+    },
+    {
+      "id": 4,
+      "title": "Cost per successful request",
+      "type": "table",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | summarize cost_usd=sum(todouble(attributes['cost_usd'])), successes=countif(attributes['event.name'] == 'api_request') by agent=tostring(attributes['agent.name']), harness=tostring(resource['berserk.harness.version']) | extend cost_per_success=cost_usd/successes | sort by cost_per_success desc | take 50"}]
+    },
+    {
+      "id": 5,
+      "title": "Expensive MCP operations and large results",
+      "type": "table",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | where attributes['event.name'] == 'tool_result' | summarize calls=count(), failures=countif(tostring(attributes['success']) == 'false'), result_bytes=sum(toint(attributes['tool_result_size_bytes'])) by mcp_server=tostring(attributes['mcp_server.name']), operation=tostring(attributes['mcp_tool.name']) | sort by result_bytes desc | take 50"}]
+    },
+    {
+      "id": 6,
+      "title": "Compaction and retry pressure by harness",
+      "type": "timeseries",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | summarize compactions=countif(attributes['event.name'] == 'compaction'), retry_exhaustions=countif(attributes['event.name'] == 'api_retries_exhausted') by day=bin(timestamp, 1d), harness=tostring(resource['berserk.harness.version']) | sort by day asc | take 2000"}]
+    },
+    {
+      "id": 7,
+      "title": "Measured harness-version impact",
+      "type": "table",
+      "targets": [{"refId": "A", "queryType": "kql", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | where attributes['event.name'] == 'api_request' | summarize cost_usd=sum(todouble(attributes['cost_usd'])), requests=count(), duration_ms=sum(todouble(attributes['duration_ms'])) by agent=tostring(attributes['agent.name']), harness=tostring(resource['berserk.harness.version']), recommendation=tostring(resource['berserk.recommendation.id']) | extend cost_per_request=cost_usd/requests, avg_duration_ms=duration_ms/requests | sort by agent asc | take 100"}]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["berserk", "claude", "agent", "harness"],
+  "templating": {"list": [
+    {"name": "team", "label": "Team", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['business.team.id']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "project", "label": "Project", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['business.project.id']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "repository", "label": "Repository", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['code.repository.id']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "feature", "label": "Feature", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['business.feature.id']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "model", "label": "Model", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(attributes['model']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "agent", "label": "Agent", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(attributes['agent.name']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "harness", "label": "Harness version", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['berserk.harness.version']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
+    {"name": "date_range", "label": "Date range", "type": "custom", "query": "7d,30d,90d", "current": {"text": "30d", "value": "30d"}}
+  ]},
+  "time": {"from": "now-30d", "to": "now"},
+  "timezone": "browser",
+  "title": "Agent and Harness Efficiency",
+  "uid": "berserk-ai-harness",
+  "version": 1
+}

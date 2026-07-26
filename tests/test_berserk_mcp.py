@@ -1776,6 +1776,81 @@ class FleetControlsTest(unittest.TestCase):
 
         self.assertEqual(self.calls[0][1], 10)
 
+    def test_validate_kql_tool_registered_and_visible_to_operational_roles(self):
+        tool = next(t for t in bm.TOOLS if t["name"] == "validate_kql")
+        self.assertEqual(set(tool["roles"]), {"sre", "soc", "claude", "ops"})
+        self.assertEqual(bm.TITLES["validate_kql"], "Validate KQL")
+
+    def test_validate_kql_static_does_not_execute_user_query(self):
+        text, err = bm.handle_call("validate_kql", {"kql": "default | take 1"})
+        self.assertFalse(err)
+        report = json.loads(text)
+        self.assertTrue(report["valid"])
+        # Schema may be fetched, but the user query itself is not executed in static mode.
+        self.assertNotIn(["-P", bm.PROFILE, "search", "default | take 1", "--since", "15m ago"], self.calls)
+
+    def test_strict_mode_rejects_control_command_before_bzrk(self):
+        old = bm.KQL_VALIDATION_MODE
+        try:
+            bm.KQL_VALIDATION_MODE = "strict"
+            text, err = bm.handle_call("search", {"kql": ".show tables"})
+            self.assertTrue(err)
+            self.assertIn("CONTROL_COMMAND", text)
+            self.assertEqual(self.calls, [])
+        finally:
+            bm.KQL_VALIDATION_MODE = old
+
+    def test_save_query_persists_validation_metadata_and_legacy_run_still_works(self):
+        def fake(args, timeout=bm.DEFAULT_TIMEOUT):
+            self.calls.append(list(args))
+            return "OK", False
+        bm.run_bzrk = fake
+        with tempfile.TemporaryDirectory() as d:
+            old_path = bm.LEARNED_PATH
+            try:
+                bm.LEARNED_PATH = Path(d) / "learned.json"
+                text, err = bm.handle_call("save_query", {
+                    "name": "validated",
+                    "description": "validated query",
+                    "kql": "default | where metric_name == 'x' | count",
+                    "since": "1h ago",
+                })
+                self.assertFalse(err, text)
+                saved = bm.load_learned()[0]
+                self.assertEqual(saved["validation_version"], 1)
+                self.assertIn("validation_risk", saved)
+                legacy = {"name": "legacy", "description": "old", "kql": "default | take 1", "since": "1h ago"}
+                bm.save_learned([legacy])
+                self.calls.clear()
+                text, err = bm.handle_call("run_saved", {"name": "legacy"})
+                self.assertFalse(err, text)
+                self.assertEqual(self.calls[-1][3], "default | take 1")
+            finally:
+                bm.LEARNED_PATH = old_path
+
+    def test_validate_kql_live_receipt(self):
+        old_live = bm.KQL_LIVE_VALIDATION
+        old_stats = bm.KQL_STATS_MODE
+        try:
+            bm.KQL_LIVE_VALIDATION = True
+            bm.KQL_STATS_MODE = "auto"
+            def fake(args, timeout=bm.DEFAULT_TIMEOUT):
+                self.calls.append(list(args))
+                return '{"rows_returned": 2, "rowsProcessed": 5}', False
+            bm.run_bzrk = fake
+            text, err = bm.handle_call("validate_kql", {
+                "kql": "default | where metric_name == 'x' | take 2",
+                "mode": "live",
+            })
+            self.assertFalse(err)
+            report = json.loads(text)
+            self.assertEqual(report["runtime"]["rows_returned"], 2)
+            self.assertEqual(report["runtime"]["rows_processed"], 5)
+            self.assertIn("--stats", self.calls[-1])
+        finally:
+            bm.KQL_LIVE_VALIDATION = old_live
+            bm.KQL_STATS_MODE = old_stats
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

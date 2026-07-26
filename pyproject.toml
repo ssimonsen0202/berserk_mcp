@@ -27,13 +27,16 @@ Issues = "https://github.com/ssimonsen0202/berserk_mcp/issues"
 
 [project.scripts]
 berserk-mcp = "berserk_mcp:main"
+berserk-claude = "ai_finops:launcher_main"
 
 [tool.setuptools]
-py-modules = ["berserk_mcp", "parser_factory", "agent_analytics", "secret_scan", "ingestion_advisor"]
+py-modules = ["berserk_mcp", "parser_factory", "agent_analytics", "ai_finops", "secret_scan", "ingestion_advisor", "kql_validation", "schema_registry"]
 
 [tool.setuptools.data-files]
-"share/berserk-mcp" = ["ingestion_catalog.json"]
-"share/berserk-mcp/primers" = ["primers/claude.md", "primers/soc.md", "primers/sre.md", "primers/windows-forensics.md"]
+"share/berserk-mcp" = ["ingestion_catalog.json", "pricing_catalog.json"]
+"share/berserk-mcp/primers" = ["primers/claude.md", "primers/soc.md", "primers/sre.md", "primers/ops.md", "primers/windows-forensics.md"]
+"share/berserk-mcp/dashboards/grafana" = ["dashboards/grafana/*.json"]
+"share/berserk-mcp/dashboards/berserk" = ["dashboards/berserk/*.kql"]
 
 [tool.setuptools.dynamic]
 version = { attr = "berserk_mcp.__version__" }

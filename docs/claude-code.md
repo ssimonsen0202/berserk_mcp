@@ -1,76 +1,172 @@
-# Claude Code telemetry tools
+# Claude Code telemetry and AI FinOps
 
-`berserk-mcp` ships Claude-lane tools that mine [Claude Code](https://claude.com/claude-code)
-session activity, *if* you forward Claude Code's session logs into Berserk under
-the service name `claude-code`. If you don't, ignore these — the other tools work
-without them.
+`berserk-mcp` ships a Claude lane for developer-workflow observability,
+AI-development economics, and governed harness optimization. The lane is
+active when Claude Code telemetry is sent to Berserk with
+`resource['service.name'] == 'claude-code'`. Other berserk-mcp lanes work
+without this telemetry.
 
-## Pipeline
+## Collection paths
 
+Native Claude Code OpenTelemetry is the preferred source:
+
+```text
+Claude Code native OTel metrics/events
+  → your OTel collector and ingest controls
+  → Berserk `default` table (`service.name=claude-code`)
+  → aggregate-first berserk-mcp `claude_*` tools
 ```
-Claude Code JSONL  (~/.claude/projects/*/*.jsonl)
-  → a forwarder that tails the JSONL, redacts secrets, enriches, and ships OTLP
-  → OTLP HTTP  →  your Berserk ingest endpoint  (e.g. http://<berserk-host>:<port>/v1/logs)
-  → Berserk `default` table  (resource service.name = "claude-code")
-  → berserk-mcp  claude_* tools
+
+The existing JSONL forwarder remains supported:
+
+```text
+Claude Code JSONL (`~/.claude/projects/*/*.jsonl`)
+  → a redacting OTLP forwarder
+  → Berserk `default` table (`service.name=claude-code`)
+  → berserk-mcp `claude_*` tools
 ```
 
-The forwarder is a separate component; any tool that tails Claude Code's JSONL
-and emits OTLP logs with the attributes below will work. This repo only provides
-the query side.
+Collection and ingest are deployment responsibilities. Keep prompt, source
+code, command, file-content, and user-email capture disabled or redacted. The
+FinOps reports consume aggregate usage and governed identifiers, not those
+payloads.
 
-## Expected attributes
+## Normalized attributes
 
-Each JSONL line becomes one OTLP log record. The tools read these promoted
-attributes:
+The normalizer accepts native OTel names and the legacy promoted attributes.
+Important signal families are:
 
-- `claude.type` — `user`, `assistant`, `system`, …
-- `claude.session_id` — group by this to scope to one session
-- `claude.message_role` — `user` / `assistant` (API perspective)
-- `claude.message_model` — model id for the turn
-- `claude.tool_names` — comma-joined tool names used in an assistant turn (e.g. `Bash,Read`)
-- `claude.error` — `"true"` (string) when the record is an error / a tool result failed
+- correlation: session, interaction, request, and parent-agent identifiers;
+- usage: input, output, cache-read, 5-minute/1-hour cache-creation, and
+  long-context token classes;
+- cost: Claude-reported approximate cost and independently calculated public
+  API-equivalent cost;
+- execution: model, query source, agent/subagent, harness version, tool/MCP
+  name, duration, result tokens, success, retry, and error;
+- outcomes: active time, lines added/removed, commits, pull requests, and
+  work-item completion when emitted;
+- business context: portfolio, team, project, feature, work item, cost center,
+  repository, branch, PR, agent profile, and recommendation ID.
 
-## Tools
+Legacy attributes such as `claude.session_id`, `claude.message_model`,
+`claude.tool_names`, `claude.error`, `claude.tokens_input`, and
+`claude.tokens_output` continue to work. Missing token data remains labeled as
+estimated. Unknown models retain usage but have `pricing_status=unknown`.
 
-| Tool | What it answers |
+## Governed work context
+
+Use the packaged launcher to attach low-cardinality business identifiers to
+Claude's OTel resource attributes:
+
+```bash
+berserk-claude --team platform --portfolio ENG --project OBS \
+  --feature OBS-142 --work-item ADO-912 --cost-center CC-40 \
+  --repository berserk-mcp --branch feature/OBS-142 \
+  --agent-profile claude-code --harness-version finops-v1 -- claude
+```
+
+The launcher preserves existing `OTEL_RESOURCE_ATTRIBUTES`, enables Claude
+telemetry, validates identifiers, and then replaces itself with the requested
+command. Agent SDK deployments can set the same attributes per invocation.
+
+Attribution precedence is explicit feature/work item, session work context,
+PR mapping, branch mapping, unambiguous repository/project mapping, then
+`unattributed`. A session is never silently split across features. Every
+financial report exposes attribution coverage and unattributed cost.
+
+## Feature and developer-effort imports
+
+Import CSV, JSON, or NDJSON through a platform-neutral contract:
+
+```bash
+berserk-mcp --import-business-data feature --input /absolute/path/features.csv
+berserk-mcp --import-business-data effort --input /absolute/path/worklogs.ndjson \
+  --input-format ndjson
+```
+
+Feature rows require `feature_id`; effort rows require `worklog_id` and
+nonnegative `actual_hours`. Include stable source record and update fields so
+reimports replace stale versions deterministically. The private local store is
+atomic. When `BERSERK_MCP_OTLP_LOGS_ENDPOINT` is set, sanitized records are
+also emitted as `engineering-work` logs. Remote cleartext HTTP is refused.
+
+Hours come only from the effort feed. Session elapsed time, Claude active time,
+commits, and lines changed are kept as separate delivery signals and are never
+converted into developer hours.
+
+## Tool groups
+
+The original session tools remain available: `claude_recent`,
+`claude_sessions`, `claude_tools`, `claude_errors`, `claude_search`,
+`claude_loop_check`, `claude_model_fit`, `claude_token_burn`,
+`claude_cost_report`, `claude_session_deep_dive`, and
+`claude_workflow_insights`. `claude_search` rejects KQL metacharacters.
+
+The enterprise reporting tools are:
+
+| Tool | Purpose |
 |---|---|
-| `claude_recent` | Recent activity: timestamp, type, role, model, tools, error flag. Default 1h. |
-| `claude_sessions` | Per-session rollup: events, first/last seen, assistant turns, tool turns, errors. Default 6h. |
-| `claude_tools` | Tool-use histogram — how often each tool was used. Default 6h. |
-| `claude_errors` | Failed tool results (`is_error`) with a body snippet. Default 6h. |
-| `claude_search` | Full-text substring search across message/tool bodies. Default 6h. |
-| `claude_loop_check` | Loop detector: repetition ratio, top repeated call, error-retry count, and verdict per session. Default 6h. |
-| `claude_model_fit` | Model-fit heuristic: flags frontier models on trivial sessions and cheap models on complex/repetitive sessions. Default 6h. |
-| `claude_token_burn` | Token-burn proxy: estimated tokens, burn per progress unit, and combined high-burn/loop verdict. Default 6h. |
+| `claude_spend_overview` | Group spend and token classes by day, team, project, repository, feature, agent, harness, or model. |
+| `claude_feature_cost` | Compare one feature's planned/actual hours and planned/actual/forecast AI spend. |
+| `claude_project_economics` | Roll up project features, repositories, and unattributed usage. |
+| `claude_efficiency_insights` | Surface expensive operations, poor cache use, retries, loops, model mismatch, and fan-out. |
+| `claude_harness_recommendations` | Return deterministic amendment IDs, evidence, confidence, risk, validation window, and rollback criteria. |
+| `claude_record_recommendation_decision` | Append an approved/rejected/deferred audit decision; owner and rationale are persisted as hashes. |
+| `claude_optimization_impact` | Compare matched model/operation cohorts across immutable harness versions. |
+| `claude_management_report` | Return readable Markdown and schema-versioned JSON for portfolio, project, or feature scope. |
+| `claude_generate_dashboard` | Write aggregate Markdown or self-contained HTML beneath `BERSERK_MCP_REPORT_DIR`. |
 
-`claude_search` rejects quotes, pipe, backslash, and backtick in the term
-(KQL-injection guard).
+All new analytical tools return a human-readable summary and a JSON envelope
+with schema, pricing, attribution, exact/estimated, and freshness metadata.
 
-## Headless agent report
+## Cost semantics
 
-For cron/systemd alerting, run all three analytics checks in one pass:
+`pricing_catalog.json` is versioned and effective-dated. It prices model
+aliases, base and long-context input/output, prompt-cache classes, and
+chargeable server tools. Supported provider fast-mode rates are kept separate
+from standard speed so mixed cohorts cannot silently inherit the wrong rate.
+Reports keep these fields separate:
+
+- `reported_cost_usd`: Claude's approximate emitted signal;
+- `public_api_equivalent_usd`: catalog calculation;
+- `allocated_license_cost_usd`: reserved for an approved seat-allocation
+  adapter;
+- `provider_billed_cost_usd`: reserved for billing reconciliation;
+- `pricing_status`: `priced`, `partially_priced`, or `unknown`.
+
+Public API-equivalent cost is planning and comparison data, not a provider
+invoice. Developer hours and AI dollars are shown side by side and are not
+combined unless finance supplies an approved loaded labor rate.
+
+## Headless reports, dashboards, and BI
 
 ```bash
 berserk-mcp --agent-report --since "6h ago"
+berserk-mcp --agent-report --agent-report-mode daily --agent-report-json \
+  --since "24h ago"
+berserk-mcp --agent-report --agent-report-mode weekly --agent-report-json \
+  --since "7d ago"
+
+berserk-mcp --generate-dashboard feature --identifier OBS-142 \
+  --since "90d ago" --dashboard-format html
+berserk-mcp --export-bi --since "90d ago" \
+  --output /absolute/path/ai-finops-export --export-format ndjson
 ```
 
-The command prints a text summary and exits non-zero if it sees a likely loop,
-an underpowered session, or high burn. Token burn uses the forwarder's
-`claude.tokens_input` and `claude.tokens_output` attributes when present and a
-clearly labeled body-length estimate for sessions where they are absent. Alert
-transport is intentionally out of scope for this repo; pipe stdout/stderr to
-your homelab wrapper.
+Generated HTML uses inline SVG and no external JavaScript or CDN. The BI
+export atomically publishes seven stable datasets plus checksums. Grafana JSON
+and copy-ready Berserk Explore KQL live in the
+[dashboard package](../dashboards/README.md).
 
-## Why the windows are bounded
+## Bounded-query policy
 
-In Berserk's `default` table, `timestamp` has range pruning and common
-dimensions such as `resource['service.name']` and `metric_name` have shard/bloom
-indexes. `claude-code` records still share the table with the rest of your
-telemetry, so bounded-window queries (≤ ~6h) remain the safe default; widen it
-explicitly with `since` when you need to, knowing it costs a wider scan. See the
-[KQL performance guide](kql-performance-guide.md) for the live verification
-details and query-author checklist.
+Claude records share the `default` table with other telemetry. FinOps queries
+filter by service and time first, summarize inside Berserk, project only the
+canonical fields, and cap returned groups. The MCP's existing validation,
+query budget, cooldown, concurrency, and read-cache controls still apply. Use
+metrics or exported snapshots for long-range reporting rather than repeated
+raw multi-month session scans. See the
+[KQL performance guide](kql-performance-guide.md).
 
 ## Phase J live-verification checklist (live-verified 2026-07-22)
 
