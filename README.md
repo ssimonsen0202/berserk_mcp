@@ -39,10 +39,15 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.22.0**. This is a bullet-point overview, most recent
+Current version: **1.23.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.23.0** (2026-07-27) — Security remediation Phase 3: generated-content
+  sanitization, per-deployment HMAC owner pseudonyms, spreadsheet-safe CSV,
+  model-facing fence hardening, mandatory Discord egress redaction, scrubbed
+  public deployment examples, and honest fixed-window Grafana dashboards.
+  See [details](docs/releases/v1.23.0.md).
 - **v1.22.0** (2026-07-27) — Security remediation Phases 0–2: execution-boundary
   KQL guards, bounded `bzrk` output, trusted binary resolution, deterministic
   FinOps redaction, shared cross-platform private stores, hardened HTTP for
