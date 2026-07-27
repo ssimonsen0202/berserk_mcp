@@ -31,6 +31,15 @@ def usage_row(session, ts, tools, tokens_in, tokens_out, body=""):
     return event
 
 
+def block_row(session, ts, tokens_in, tokens_out, message_id, body=""):
+    """One content-block JSONL row of a real assistant response — several of
+    these can share one message_id and an identical usage payload, the
+    over-counting shape described in DUPLICATE_INGESTION_BUG_HANDOFF.md."""
+    event = usage_row(session, ts, "", tokens_in, tokens_out, body)
+    event["message_id"] = message_id
+    return event
+
+
 def jsonl(rows):
     return "\n".join(json.dumps(r) for r in rows)
 
@@ -212,6 +221,80 @@ class AgentAnalyticsPureTest(unittest.TestCase):
         self.assertEqual(aa._parse_rows(json.dumps(doc)), [])
 
 
+class MessageIdCollapseTest(unittest.TestCase):
+    """Regression coverage for the per-content-block over-counting bug:
+    Claude Code logs one JSONL line per content block (thinking/text/
+    tool_use/...) of a response, and every block carries an identical copy
+    of that response's token usage. See DUPLICATE_INGESTION_BUG_HANDOFF.md
+    and PROPER_FIX_PLAN.md."""
+
+    def test_two_block_group_collapses_to_one_event(self):
+        # Real example from the handoff: msg_011CdQxKcJT7a8nrRisqxhnV, two
+        # rows (thinking + tool_use), both tokens_out=200.
+        events = [
+            block_row("s1", "2026-07-12T10:00:00Z", 0, 200, "msg_A"),
+            block_row("s1", "2026-07-12T10:00:00.003Z", 0, 200, "msg_A"),
+        ]
+        collapsed = aa._collapse_by_message(events)
+        self.assertEqual(len(collapsed), 1)
+        report = aa.analyze_token_burn_events(events)[0]
+        self.assertEqual(report["tokens"], 200)
+
+    def test_three_block_group_collapses_to_one_event(self):
+        # Real example from the handoff: msg_011CdQywMdmqadDj6RXmftpT, three
+        # rows (thinking + text + tool_use), all tokens_out=3351.
+        events = [
+            block_row("s1", "2026-07-12T10:00:00Z", 0, 3351, "msg_B"),
+            block_row("s1", "2026-07-12T10:00:00.002Z", 0, 3351, "msg_B"),
+            block_row("s1", "2026-07-12T10:00:00.005Z", 0, 3351, "msg_B"),
+        ]
+        collapsed = aa._collapse_by_message(events)
+        self.assertEqual(len(collapsed), 1)
+        report = aa.analyze_token_burn_events(events)[0]
+        self.assertEqual(report["tokens"], 3351)
+
+    def test_different_message_ids_do_not_collapse_even_with_same_tokens(self):
+        # Regression test for the wrong (content-fingerprint) design the plan
+        # explicitly warns against: two genuinely distinct calls that happen
+        # to share a token count and land close in time must NOT merge.
+        events = [
+            block_row("s1", "2026-07-12T10:00:00Z", 10, 20, "msg_C"),
+            block_row("s1", "2026-07-12T10:00:01Z", 10, 20, "msg_D"),
+        ]
+        collapsed = aa._collapse_by_message(events)
+        self.assertEqual(len(collapsed), 2)
+        report = aa.analyze_token_burn_events(events)[0]
+        self.assertEqual(report["tokens"], 60)
+
+    def test_empty_message_id_rows_never_collapse_into_each_other(self):
+        # Historical data predates message_id capture entirely -- an absent
+        # id must never be treated as a shared grouping key, or distinct
+        # historical events would silently vanish (worse than the original
+        # overcount). This is the fallback path Step 3 addresses separately.
+        events = [
+            usage_row("s1", "2026-07-12T10:00:00Z", "Read", 10, 20),
+            usage_row("s1", "2026-07-12T10:00:01Z", "Read", 10, 20),
+            usage_row("s1", "2026-07-12T10:00:02Z", "Read", 10, 20),
+        ]
+        collapsed = aa._collapse_by_message(events)
+        self.assertEqual(len(collapsed), 3)
+        report = aa.analyze_token_burn_events(events)[0]
+        self.assertEqual(report["tokens"], 90)
+
+    def test_message_groups_keep_full_group_for_tool_attribution(self):
+        # tool/file info may live on only one block of a message (e.g. the
+        # tool_use row); _message_groups must expose every row in the group
+        # so callers can scan for it, even though tokens are counted once.
+        thinking = block_row("s1", "2026-07-12T10:00:00Z", 0, 50, "msg_E")
+        tool_use = block_row("s1", "2026-07-12T10:00:00.003Z", 0, 50, "msg_E")
+        tool_use["tools"] = "Edit"
+        tool_use["file_targets"] = "src/app.py"
+        groups = aa._message_groups([thinking, tool_use])
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(len(groups[0]), 2)
+        self.assertEqual(aa._file_targets(groups[0]), {"src/app.py"})
+
+
 def daily_row(day, model="m", events=10, errors=0, tin=0, tout=0, chars=0):
     return {"day": day, "model": model, "events": events, "errors": errors,
             "tokens_in_sum": tin, "tokens_out_sum": tout, "body_chars_sum": chars}
@@ -275,12 +358,21 @@ class CostReportPureTest(unittest.TestCase):
         self.assertIn("claude-code", q)
         self.assertIn("summarize", q)
         self.assertNotIn("take ", q)
+        # Two-stage aggregation: collapse by message_id (falling back to a
+        # per-row-unique uuid key when message_id is empty) before the
+        # day/model rollup, so duplicate content-block rows aren't summed
+        # more than once. See _collapse_by_message's docstring.
+        self.assertEqual(q.count("summarize"), 2)
+        self.assertIn("claude.message_id", q)
+        self.assertIn("by gkey", q)
 
     def test_cost_trend_query_uses_native_series_fit(self):
         q = aa._cost_trend_query()
         self.assertIn("make-series", q)
         self.assertIn("series_fit_line", q)
         self.assertIn("default=0", q)
+        self.assertIn("claude.message_id", q)
+        self.assertIn("by gkey", q)
 
 
 class ProjectInferenceTest(unittest.TestCase):

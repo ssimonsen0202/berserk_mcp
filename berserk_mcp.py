@@ -69,7 +69,7 @@ import parser_factory
 import schema_registry
 import secret_scan
 
-__version__ = "1.21.0"
+__version__ = "1.21.1"
 
 
 def log(msg):

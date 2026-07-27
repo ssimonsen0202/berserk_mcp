@@ -39,10 +39,17 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.21.0**. This is a bullet-point overview, most recent
+Current version: **1.21.1**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.21.1** (2026-07-27) — Bugfix: `claude_token_burn`, `claude_cost_report`,
+  and the AI FinOps usage pipeline were over-counting tokens/cost. Claude
+  Code logs one JSONL row per content block of a response, each carrying an
+  identical copy of that response's usage; nothing downstream collapsed
+  them back to one billable call. Now grouped by `claude.message_id`
+  wherever tokens are summed, client-side and in KQL. See
+  [details](docs/releases/v1.21.1.md).
 - **v1.21.0** (2026-07-25) — Adds enterprise Claude AI FinOps: native and
   legacy telemetry normalization, effective-dated API-equivalent pricing,
   governed feature/hour imports, deterministic attribution, management MCP
