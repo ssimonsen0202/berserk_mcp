@@ -768,6 +768,19 @@ class DashboardAndExportTest(FinopsTestCase):
         self.assertNotIn("owner@example.com", clean["note"])
         self.assertNotEqual(clean["feature_id"], payload["feature_id"])
 
+    def test_model_envelope_cannot_be_broken_by_backtick_runs(self):
+        text = af._envelope("Report", {"note": "before ```json injected ``` after"})
+        self.assertEqual(text.count("```"), 2)
+        self.assertNotIn("before ```json", text)
+        self.assertIn(r"\u200b", text)
+
+    def test_markdown_dashboard_cannot_be_broken_by_backtick_runs(self):
+        text = af._markdown_dashboard(
+            "Report", {"note": "before ```` injected ```` after"}, "30d ago"
+        )
+        self.assertEqual(text.count("```"), 2)
+        self.assertNotIn("before ````", text)
+
     def test_dashboard_markdown_and_html_are_self_contained(self):
         text, error = af.generate_dashboard("portfolio", since="30d ago", fmt="markdown")
         self.assertFalse(error)

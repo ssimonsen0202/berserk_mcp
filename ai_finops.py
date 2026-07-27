@@ -1416,11 +1416,9 @@ def build_spend_overview(raw_rows, catalog, store=None, group_by="day", filters=
 
 def _envelope(title, payload, lines=None):
     readable = [title]
-    readable.extend(lines or [])
+    readable.extend(_sanitize_payload(list(lines or [])))
     readable.append("\nStructured data:")
-    readable.append("```json")
-    readable.append(json.dumps(payload, indent=2, sort_keys=True))
-    readable.append("```")
+    readable.extend(_fenced_json_lines(payload))
     return "\n".join(readable)
 
 
@@ -1440,6 +1438,18 @@ _STRUCTURAL_ID_PATTERNS = {
 }
 
 
+def _break_markdown_fence_runs(value):
+    """Keep untrusted text from terminating a model-facing Markdown fence."""
+    return re.sub(
+        r"`{3,}",
+        lambda match: "\u200b".join(
+            match.group(0)[index:index + 2]
+            for index in range(0, len(match.group(0)), 2)
+        ),
+        str(value),
+    )
+
+
 def _sanitize_payload(value, field_name=""):
     if isinstance(value, dict):
         return {str(key): _sanitize_payload(item, str(key)) for key, item in value.items()}
@@ -1450,12 +1460,20 @@ def _sanitize_payload(value, field_name=""):
         # skip only optional entropy matching, and only after format validation.
         base = _redact(value)
         if base != value:
-            return base
+            return _break_markdown_fence_runs(base)
         pattern = _STRUCTURAL_ID_PATTERNS.get(field_name)
         if pattern is not None and pattern.fullmatch(value):
             return value
-        return _redact_aggressive(value)
+        return _break_markdown_fence_runs(_redact_aggressive(value))
     return value
+
+
+def _fenced_json_lines(payload):
+    clean = _sanitize_payload(payload)
+    serialized = json.dumps(clean, indent=2, sort_keys=True)
+    runs = [len(match.group(0)) for match in re.finditer(r"`+", serialized)]
+    fence = "`" * max(3, max(runs, default=0) + 1)
+    return [fence + "json", serialized, fence]
 
 
 def _fetch_usage(since):
@@ -1990,8 +2008,7 @@ def _markdown_dashboard(title, payload, since):
                          f"{row.get('public_api_equivalent_usd', 0):.4f} | "
                          f"{row.get('events', 0)} | {row.get('error_rate', 0) * 100:.1f}% |")
     else:
-        lines.extend(["## Report", "", "```json",
-                      json.dumps(payload, indent=2, sort_keys=True), "```"])
+        lines.extend(["## Report", ""] + _fenced_json_lines(payload))
     lines.extend(["", "---", "Costs are public API equivalents, not invoices. "])
     return "\n".join(lines)
 

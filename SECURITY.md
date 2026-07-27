@@ -66,6 +66,9 @@ are preserved only when they match the field's expected format, so BI joins and
 recommendation decisions remain deterministic. Optional high-entropy filtering
 for FinOps free text is controlled by
 `BERSERK_MCP_FINOPS_REDACT_ENTROPY`; it does not exempt malformed IDs or secrets.
+Runs of backticks in imported or telemetry-derived strings are broken before
+model-facing Markdown/JSON fences are rendered, so data cannot terminate a
+fenced block and become adjacent instruction-like prose.
 
 Feature and recommendation-decision owners are HMAC-pseudonymised before local
 persistence using a per-deployment key. If no key is supplied through
