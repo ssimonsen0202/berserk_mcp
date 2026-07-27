@@ -229,11 +229,11 @@ The result is the AI Ops experience — agents ask questions instead of humans
 reading dashboards — with the entire agent loop inside the sovereign
 boundary, not just the telemetry store.
 
-This is not hypothetical. One real deployment is a Discord-facing agent
-called "Hermes." It answers on-call questions against a homelab Berserk
-instance. Hermes logs every tool call and every full prompt/reply back into
-Berserk itself: model name, redacted arguments, redacted results, and session
-ID, all as structured, queryable records. This is the same durable,
+This is not hypothetical. One production-like deployment uses a
+Discord-facing local agent to answer on-call questions against Berserk. The
+agent logs every tool call and every full prompt/reply back into Berserk
+itself: model name, redacted arguments, redacted results, and session ID, all
+as structured, queryable records. This is the same durable,
 back-testable "what did the agent actually do" record that Berserk's AI Ops
 page highlights in its Ethira governance case study — running end-to-end
 against berserk-mcp instead of a bespoke integration. The `claude_*` tool
@@ -322,22 +322,16 @@ The diagram makes three things clear:
 2. **The learning loop closes back into the cheap lane.** Pay the capable model once to author and verify a query. After that, the cheap lane runs the query free, forever, via `run_saved`.
 3. **The worker is the automation bridge.** When `request_discovery` queues a new source, the worker drains the queue on its own — it discovers the source, authors KQL, and saves the query, with no operator KQL authoring.
 
-### Monitored hosts (not shown in the diagram)
+### Example ingestion topology (not shown in the diagram)
 
 The diagram above covers the **query path**: how an agent asks questions.
-The **ingestion path** is separate. Each monitored host runs a lightweight
-`journal-forwarder` script. This script tails selected systemd units and
-ships OTLP log payloads through a local `otel-collector` into the Berserk
-gateway.
-
-| Host | Key services forwarded |
-|---|---|
-| **HermesRuntime** | `hermes-discord`, `docker`, `otel-collector`, `ssh` |
-| **OpenClaw** | `ollama`, `openclaw`, `docker`, `otel-collector`, `check-esxi-snap`, `ssh` |
-
-Each unit ships under its own `resource['service.name']` — for example
-`ollama` or `hermes-discord`. This lets `list_services`, `logs_for_service`,
-and `search` filter by the actual service, not by the forwarding mechanism.
+The **ingestion path** is separate. A typical deployment runs a lightweight
+journal forwarder on each monitored host. It tails explicitly selected
+services and ships OTLP log payloads through a local collector into the
+Berserk gateway. Each service uses its own
+`resource['service.name']`, so `list_services`, `logs_for_service`, and
+`search` filter by the workload rather than the forwarding mechanism. Keep
+real host and service inventories in private deployment documentation.
 
 ---
 
@@ -386,7 +380,7 @@ for the active lane; otherwise startup fails with a configuration error. The
 | `top_memory` | Containers ranked by memory (MB). Use for container-specific questions; for host memory use `host_memory`. |
 | `errors_by_service` | ERROR-level log counts grouped by service. |
 | `list_services` | All services/sources, with log vs metric breakdown. |
-| `list_hosts` | All hosts reporting telemetry (HermesRuntime, OpenClaw, ESXi, …). |
+| `list_hosts` | All hosts reporting telemetry, by record count. |
 | `host_cpu` | Per-**host** CPU (1-minute load average). Default for ambiguous whole-machine CPU questions. |
 | `host_memory` | Per-**host** memory used (GB). Default for ambiguous whole-machine memory questions. |
 | `container_hosts` | Which host/VM each container runs on (join key for container↔host questions). |
@@ -627,7 +621,7 @@ Distributed-trace analysis (v1.14.0; see
 [release notes](docs/releases/v1.14.0.md)), following this table's
 `<signal>_name` field convention (`metric_name` for metrics, `body` and
 `severity_text` for logs). This feature was ported from a separate
-TypeScript MCP prototype (`ssn-bzrk`) that explored the same problem space.
+TypeScript MCP prototype that explored the same problem space.
 These tools are verified against a real Berserk cluster whose own internal
 services are self-instrumented — `service=query`, `service=gateway`, and
 `service=ingest` spans are real trace/span data, not synthetic test
@@ -1084,7 +1078,7 @@ All configuration is via environment variables. All are optional:
 | `BZRK_PROFILE` | `local` | The `bzrk` profile to query. |
 | `BZRK_TIMEOUT` | `120` | Per-query timeout, seconds (worker and generation paths). |
 | `BERSERK_WORKER_JITTER_SECONDS` | `7200` | Maximum random startup delay for `--worker`; set `0` to disable. Interactive MCP calls are never jittered. Derived from the 100-worker collision sweep. |
-| `BERSERK_MCP_TOOL_BUDGET_SECONDS` | `10` (clamped to `BZRK_TIMEOUT`) | Base per-query budget for interactive `tools/call`, for short windows; derived from the five-repeat homelab p95 sweep. Scales up for wider `since` windows — see `BERSERK_MCP_BUDGET_PER_HOUR_SECONDS`. Timeout errors advise a narrower window or raising these values. |
+| `BERSERK_MCP_TOOL_BUDGET_SECONDS` | `10` (clamped to `BZRK_TIMEOUT`) | Base per-query budget for interactive `tools/call`, for short windows; derived from a five-repeat deployment p95 sweep. Scales up for wider `since` windows — see `BERSERK_MCP_BUDGET_PER_HOUR_SECONDS`. Timeout errors advise a narrower window or raising these values. |
 | `BERSERK_MCP_BUDGET_PER_HOUR_SECONDS` | `0.5` | Added to the base budget per hour of the query's `since` window (capped at `BZRK_TIMEOUT`) — a 72h query gets ~46s, not the 10s base. Set `0` to restore a flat budget regardless of window size (v1.19.0; see [release notes](docs/releases/v1.19.0.md)). |
 | `BERSERK_MCP_FAIL_COOLDOWN_SECONDS` | `30` | Suppress identical timeout retries within one MCP process; `0` disables. |
 | `BERSERK_MCP_CACHE_TTL_SECONDS` | `120` | TTL for allowlisted read-only rollup results; derived from the synthetic trace replay; `0` disables. |

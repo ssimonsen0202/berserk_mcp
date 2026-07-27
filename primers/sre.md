@@ -20,7 +20,7 @@ signals, and give operators the data they need to decide whether to page, roll b
 | Validate custom KQL before saving/running | `validate_kql` |
 | Ad-hoc KQL | `search` |
 
-## Escalation thresholds (homelab baselines)
+## Escalation thresholds (example deployment baselines)
 
 - Error rate > 10/min per service → investigate; > 50/min → page
 - `system.cpu.load_average.1m` > 2.0 on any host → investigate

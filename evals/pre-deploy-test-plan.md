@@ -1,4 +1,4 @@
-# Pre-deploy test plan — updated homelab MCP (spec polish)
+# Pre-deploy test plan — updated example MCP deployment (spec polish)
 
 Goal: before cutting Hermes over to the updated `berserk-mcp.py`, surface **every**
 user-visible change — improvements AND regressions AND "no different but now slower/

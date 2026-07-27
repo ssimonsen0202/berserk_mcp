@@ -181,7 +181,7 @@ Useful prompts:
 
 ### Deployment evidence (2026-07-23)
 
-On the configured `homelab` profile, a one-hour `claude-code` count showed
+On an example deployment profile, a one-hour `claude-code` count showed
 586 shard chunks skipped and 260 bloom chunks skipped; a timestamp-bounded
 count used range pruning. `tail 50` and `sort ... | take 50` returned the same
 rows; the captured engine times were 0.12s and 0.14s respectively. The
@@ -191,7 +191,7 @@ the cluster's indexing configuration changes.
 
 ### Verified function availability (2026-07-23)
 
-These are bounded live probes against the configured `homelab` profile using a
+These are bounded live probes against the example deployment profile using a
 15-minute event-time window. “Available” means the query parsed and returned a
 result; the semantic-top probe is recorded as unavailable because the parser
 rejected the documented modifier.
@@ -213,7 +213,7 @@ rejected the documented modifier.
 
 ### Phase 1 native-query timings (2026-07-23)
 
-Read-only live comparisons use the same `homelab` profile and bounded window;
+Read-only live comparisons use the same example profile and bounded window;
 the wall-clock column includes CLI and transport overhead, while engine time is
 the `--stats` query-time value. `make-series` intentionally returns compact
 zero-filled arrays rather than one row per bucket.

@@ -179,19 +179,15 @@ raw multi-month session scans. See the
 
 `claude_cost_report`, `claude_session_deep_dive`, and
 `claude_workflow_insights` (added 2026-07-20) were unit-tested against
-stubbed telemetry and have now been run against the live `homelab`
-Berserk instance. Findings:
+stubbed telemetry and have now been run against an example deployment.
+Findings:
 
-1. **Attribute presence, 7d window** (11,134 `claude-code` events):
-   `claude.session_id` 11,130/11,134 (99.96%), `claude.type` 11,134/11,134
-   (100%), `claude.tokens_input`/`claude.tokens_output` 5,313/11,134 each
-   (47.7% — the rest fall back to the body-length estimate, exactly as
-   designed), `claude.tool_names` 2,611/11,134 (23.4%, only present on
-   assistant turns that called a tool, as expected). **File-target
-   attributes are absent entirely**: `claude.tool_input.file_path` and
-   `claude.file_target` were both 0/1,779 in a 24h sample — this
-   forwarder does not currently emit either candidate.
-2. **Per-tool live run** (2026-07-22, `homelab` endpoint):
+1. **Attribute presence, 7d window:** `claude.session_id` was present on
+   99.96% of events, `claude.type` on 100%, token fields on 47.7% (the rest
+   use the documented body-length estimate), and `claude.tool_names` on
+   23.4% (assistant turns that called a tool). File-target attributes were
+   absent in the bounded sample, so project attribution remained gated.
+2. **Per-tool live run** (2026-07-22, example endpoint):
    - `claude_cost_report(since="7d ago", group_by="day")` — **76.8s**,
      real output: `verdict=burn-growing (slope +26.1%/day)`, 8 daily
      buckets with exact/estimated token labels, event and error counts
@@ -199,7 +195,7 @@ Berserk instance. Findings:
    - `claude_cost_report(since="24h ago", group_by="project")` —
      29.9s, output: `(unattributed): ~3721269 tokens across 1793
      events` — see finding 3.
-   - `claude_session_deep_dive("1775e12f-d0ea-4edd-a690-0578e90d5efe",
+   - `claude_session_deep_dive("<session-id>",
      since="7d ago")` — 14.4s, output:
      `loop=healthy, ~315 tokens (estimated)` with one contiguous
      no-tool phase example.

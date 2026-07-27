@@ -88,7 +88,7 @@ experience, including digesting tool output.
 | Tier | Models | Notes |
 |---|---|---|
 | **Local (preferred)** | Qwen2.5-7B-Instruct, Qwen2.5-14B-Instruct, Llama-3.1-8B-Instruct, Mistral-Small, Qwen3-8B | 7B Q4 ≈ 5–6 GB (fits RTX 3080 10 GB); 14B Q4 ≈ 9 GB (tight on 3080, OK on Mac 16 GB). All have native tool-calling in Ollama. |
-| **Local floor check** | qwen3:1.7b (the homelab default) | Confirm the lower bound. Known CPU-bound on the 2-vCPU VM; test on the GPU box to separate "model can't route" from "hardware too slow." |
+| **Local floor check** | qwen3:1.7b (the example deployment default) | Confirm the lower bound. Known CPU-bound on a small VM; test on a GPU host to separate "model can't route" from "hardware too slow." |
 | **Cheap API** | gpt-4.1-mini, Claude Haiku, Gemini Flash | Fallback when local won't fit or latency matters. |
 | **Frontier (ceiling)** | Claude Sonnet, GPT-5-class | Reference only — establishes the gap, not a deployment target. |
 
@@ -133,7 +133,7 @@ model — and catches description edits that quietly hurt routing.
 
 - The 26-test offline suite already stubs `bzrk`; the Layer-A harness reuses that stub
   pattern, so it needs no live backend.
-- The homelab already ships telemetry (incl. cost metrics like `hermes.api.cost_usd`)
+- The example deployment already ships telemetry (including cost metrics such as `assistant.api.cost_usd`)
   into Berserk — the harness can optionally emit its own run metrics there too, but a
   local CSV/JSON is enough to start.
 
@@ -165,7 +165,7 @@ against live Berserk, comparing the default cheap lane (`gpt-4.1-mini`) against 
 `@deep` lane (`claude-sonnet-4-6`). Each question was run via `hermes -z`, and answers
 were verified against the deterministic `bzrk-q` helper as ground truth.
 
-> Caveat: this exercised the *deployed two-file MCP* (`/opt/assistant/bin/`), not the
+> Caveat: this exercised the *deployed two-file MCP* (`<deployment-bin>/`), not the
 > public single-file rewrite. KQL is identical, but the rewrite's server `instructions`
 > + tool annotations were **not** deployed — so this measures the older tool descriptions.
 
@@ -242,7 +242,7 @@ Candidate families (fill in the current generation at test time; names below
 are the mid-2026 open-weight lines to shortlist from — re-check BFCL first):
 
 - **Small tier:** Qwen3 4B/8B, Llama 3.x 8B, Gemma 3 4B/12B, Ministral 8B,
-  Phi-4-mini, plus the homelab floor check (qwen3:1.7b).
+  Phi-4-mini, plus the example-deployment floor check (qwen3:1.7b).
 - **Deep tier:** Gemma 3 27B, Qwen3 32B, GLM-4.5-Air, DeepSeek-R1-Distill-32B,
   GPT-OSS-20B, Llama 3.3 70B (Q4, needs ≥ 48 GB), Kimi K2 (MoE — only if a
   server-class box is available; otherwise skip, do not run degraded quants).

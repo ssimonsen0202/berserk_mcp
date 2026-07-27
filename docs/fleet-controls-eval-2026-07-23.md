@@ -23,12 +23,12 @@ in `evals/results/latency_eval.json`.
 
 ## Phase 3 live probes
 
-Against `BZRK_PROFILE=homelab`:
+Against an example deployment profile:
 
 - `detect_anomalies` parsed and returned zero-filled event, anomaly, score, and
   baseline arrays from `make-series` + `series_decompose_anomalies`.
 - `forecast_capacity` parsed native fit arrays. It refused a weak/downward
-  OpenClaw trend (`R²=0.156`, negative slope) and reported a reliable HermesRuntime
+  host-a trend (`R²=0.156`, negative slope) and reported a reliable host-b
   upward trend (`R²=0.688`) without inventing a ceiling date.
 - `find_similar` degraded safely because this cluster's parser rejects
   `similarto`; the response directs users to exact-term `search` instead.

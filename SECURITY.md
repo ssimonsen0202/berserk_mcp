@@ -22,6 +22,12 @@ The most useful areas for security review are:
 - MCP, HTTP, OTLP, Discord, dashboard, and BI egress paths.
 - Atomic JSON stores, publication directories, and cross-process locks.
 
+Public documentation uses neutral deployment examples. Real hostnames,
+service-unit inventories, private profile names, and live session identifiers
+belong in private operator documentation. A tracked-file regression test scans
+README, policy files, primers, docs, dashboards, eval plans, and catalogs for
+known deployment markers and UUID-shaped live identifiers.
+
 ## Query and process execution
 
 All subprocesses use argv lists. The project forbids `shell=True`, `eval`,
