@@ -959,11 +959,24 @@ class AssetTest(unittest.TestCase):
                 ),
                 path.name,
             )
+            variables = data["templating"]["list"]
             self.assertEqual(
-                {item["name"] for item in data["templating"]["list"]},
-                {"team", "project", "repository", "feature", "model", "agent",
-                 "harness", "date_range"},
+                variables,
+                [],
+                f"{path.name} must not advertise filters that its queries ignore",
             )
+            panel_queries = [
+                panel["targets"][0]["query"] for panel in data["panels"]
+            ]
+            for variable in variables:
+                name = variable["name"]
+                self.assertTrue(
+                    any(
+                        f"${name}" in query or f"${{{name}" in query
+                        for query in panel_queries
+                    ),
+                    f"{path.name} declares an unwired {name!r} variable",
+                )
             for panel in data["panels"]:
                 query = panel["targets"][0]["query"]
                 self.assertIn("timestamp >= now() -", query)

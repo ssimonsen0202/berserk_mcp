@@ -47,16 +47,7 @@
   ],
   "schemaVersion": 39,
   "tags": ["berserk", "claude", "feature", "finops"],
-  "templating": {"list": [
-    {"name": "team", "label": "Team", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['business.team.id']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
-    {"name": "project", "label": "Project", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['business.project.id']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
-    {"name": "repository", "label": "Repository", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['code.repository.id']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
-    {"name": "feature", "label": "Feature", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['business.feature.id']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
-    {"name": "model", "label": "Model", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(attributes['model']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
-    {"name": "agent", "label": "Agent", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(attributes['agent.name']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
-    {"name": "harness", "label": "Harness version", "type": "query", "query": "default | where timestamp >= now() - 30d | where resource['service.name'] == 'claude-code' | distinct value=tostring(resource['berserk.harness.version']) | where isnotempty(value) | sort by value asc", "includeAll": true, "multi": true, "refresh": 1},
-    {"name": "date_range", "label": "Date range", "type": "custom", "query": "7d,30d,90d", "current": {"text": "30d", "value": "30d"}}
-  ]},
+  "templating": {"list": []},
   "time": {"from": "now-90d", "to": "now"},
   "timezone": "browser",
   "title": "Feature Delivery Economics",

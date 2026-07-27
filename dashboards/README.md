@@ -16,9 +16,12 @@ source code, raw commands, user email, or session bodies.
 
 Import the JSON through Grafana or provision it with your normal dashboard
 deployment process. Configure the Berserk data source after import. The
-queries use bounded windows and aggregate projections. Template variables
-cover team, project, repository, feature, model, agent, harness, and date
-range where relevant.
+queries use fixed 30-day or 90-day windows and aggregate projections. The
+shipped JSON intentionally declares no template variables: this repository
+does not define a tested data-source contract for multi-value interpolation or
+Grafana's `All` value. These are whole-dataset views. Add filters only after
+validating the installed Berserk data-source syntax and wiring each variable
+into every applicable query.
 
 These dashboards read Claude's emitted `cost_usd` as reported approximate
 cost. For independently calculated, effective-dated public API-equivalent
@@ -29,6 +32,9 @@ provider invoice.
 Management access should default to team, project, and feature aggregates.
 Restrict session-level drilldowns to authorized engineering users, and apply
 the same retention and access policy used for the underlying Berserk table.
+Grafana variables are not an authorization boundary; enforce tenant and team
+scope with data-source permissions, folder access, and server-side query
+policy.
 
 ## Berserk Explore
 

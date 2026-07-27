@@ -83,6 +83,12 @@ configuration directory. These stable pseudonyms remain personal data; apply
 the same authorization, retention, and deletion policy used for the source
 management records. Recommendation rationale remains stored as a one-way hash.
 
+The shipped Grafana dashboards are fixed-window, whole-dataset aggregate views
+and declare no decorative template variables. Add data-source-specific filters
+only when every applicable query enforces them. Dashboard variables are not an
+authorization boundary; tenant and team isolation belongs in server-side query
+policy and data-source or folder access controls.
+
 The Discord bridge is an optional worker-notification path, not a general raw
 query-result sink. Every alert is forced through deterministic secret and PII
 redaction before its transport-size cap, regardless of the weaker MCP output
