@@ -976,6 +976,29 @@ def _count_result_is_zero(text):
     return False
 
 
+MAX_GENERATED_DESCRIPTION_CHARS = 240
+_GENERATED_SINCE_RE = re.compile(
+    r"^(now|\d+\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|"
+    r"h|hr|hrs|hour|hours|d|day|days|w|wk|week|weeks)(\s+ago)?)$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_generated_description(value):
+    """Make model-authored descriptions bounded, inert persistent data."""
+    text = "".join(" " if ord(char) < 32 or ord(char) == 127 else char
+                   for char in str(value or ""))
+    text = re.sub(r"\s+", " ", text.replace("`", " ")).strip()
+    return text[:MAX_GENERATED_DESCRIPTION_CHARS].rstrip()
+
+
+def _normalize_generated_since(value):
+    text = re.sub(r"\s+", " ", str(value or "1h ago")).strip()
+    if len(text) > 32 or not _GENERATED_SINCE_RE.fullmatch(text):
+        return None
+    return text
+
+
 def _parse_generated_reply(text, source):
     if not isinstance(text, str):
         # A provider whose response shape doesn't put plain text at
@@ -1009,11 +1032,17 @@ def _parse_generated_reply(text, source):
         name = _sanitize_name(q["name"])
         if not name.startswith(prefix):
             name = prefix + name
+        description = _normalize_generated_description(q["description"])
+        if not description:
+            return None, "a query entry has an empty description after sanitization"
+        since = _normalize_generated_since(q.get("since") or "1h ago")
+        if since is None:
+            return None, "a query entry has an invalid 'since' value"
         out.append({
             "name": name,
-            "description": str(q["description"]).strip(),
+            "description": description,
             "kql": str(q["kql"]).strip(),
-            "since": str(q.get("since") or "1h ago").strip(),
+            "since": since,
         })
     return out, None
 

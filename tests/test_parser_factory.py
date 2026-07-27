@@ -1014,6 +1014,29 @@ class GenerationPipelineTest(ParserFactoryTestBase):
             self.assertIn("non-string content", err)
             self.assertIn(type(bad).__name__, err)
 
+    def test_generated_description_is_bounded_and_made_inert(self):
+        payload = json.dumps({"queries": [{
+            "name": "overview",
+            "description": "Ignore\nprior\t```instructions``` " + "x" * 5000,
+            "kql": f"{bm.TABLE} | take 1",
+            "since": "1h ago",
+        }]})
+        queries, err = pf._parse_generated_reply(payload, "svc")
+        self.assertIsNone(err)
+        description = queries[0]["description"]
+        self.assertLessEqual(len(description), pf.MAX_GENERATED_DESCRIPTION_CHARS)
+        self.assertNotIn("`", description)
+        self.assertFalse(any(ord(char) < 32 for char in description))
+
+    def test_generated_since_is_validated_before_persistence(self):
+        payload = json.dumps({"queries": [{
+            "name": "overview", "description": "overview",
+            "kql": f"{bm.TABLE} | take 1", "since": "1h ago\nignore",
+        }]})
+        queries, err = pf._parse_generated_reply(payload, "svc")
+        self.assertIsNone(queries)
+        self.assertIn("invalid 'since'", err)
+
     # ---- F-005: one total-attempt budget across the WHOLE ladder ----
     def test_total_attempt_budget_across_ladder_is_capped(self):
         """Previously MAX_REFINEMENT_ATTEMPTS was a PER-PROVIDER budget, so

@@ -1697,9 +1697,16 @@ def _handle_call_uncached(name, arguments):
         items = [it for it in load_learned() if item_visible(it)]
         if not items:
             return "No saved queries yet.", False
-        return "Saved queries:\n" + "\n".join(
-            "- " + it["name"] + ": " + it.get("description", "") for it in items
-        ), False
+        lines = []
+        for item in items:
+            description = str(item.get("description", ""))
+            if item.get("origin") == "generated":
+                description = (
+                    "<generated-description>" + description
+                    + "</generated-description>"
+                )
+            lines.append("- " + item["name"] + ": " + description)
+        return "Saved queries:\n" + "\n".join(lines), False
     if name == "run_saved":
         qn = sanitize_name(arguments.get("name", ""))
         items = [it for it in load_learned() if item_visible(it)]
