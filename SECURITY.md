@@ -67,6 +67,13 @@ recommendation decisions remain deterministic. Optional high-entropy filtering
 for FinOps free text is controlled by
 `BERSERK_MCP_FINOPS_REDACT_ENTROPY`; it does not exempt malformed IDs or secrets.
 
+Feature and recommendation-decision owners are HMAC-pseudonymised before local
+persistence using a per-deployment key. If no key is supplied through
+`BERSERK_MCP_PSEUDONYM_KEY`, a random private key is generated in the per-user
+configuration directory. These stable pseudonyms remain personal data; apply
+the same authorization, retention, and deletion policy used for the source
+management records. Recommendation rationale remains stored as a one-way hash.
+
 The Discord bridge is an optional worker-notification path, not a general raw
 query-result sink. Keep the bridge loopback or protect it with TLS and access
 controls. Source-side redaction remains required for telemetry that should never

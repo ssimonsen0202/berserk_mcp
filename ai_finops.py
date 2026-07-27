@@ -9,12 +9,14 @@ from datetime import datetime, timezone
 import argparse
 import csv
 import hashlib
+import hmac
 import html
 import json
 import math
 import os
 from pathlib import Path
 import re
+import secrets
 import sys
 import threading
 
@@ -35,6 +37,9 @@ _redact_aggressive = lambda value: str(value)
 _catalog_path = None
 _business_store_path = None
 _decision_store_path = None
+_pseudonym_key_path = None
+_pseudonym_key_cache = None
+_pseudonym_key_source = None
 _report_dir = None
 _otlp_endpoint = ""
 _otlp_headers = ""
@@ -43,10 +48,11 @@ _store_lock = threading.RLock()
 
 def configure(search, table="default", redact=None, redact_aggressive=None, catalog_path=None,
               business_store_path=None, decision_store_path=None,
-              report_dir=None, otlp_endpoint="", otlp_headers=""):
+              pseudonym_key_path=None, report_dir=None, otlp_endpoint="", otlp_headers=""):
     """Inject runtime dependencies without importing ``berserk_mcp``."""
     global _search, _table, _redact, _redact_aggressive, _catalog_path, _business_store_path
-    global _decision_store_path, _report_dir, _otlp_endpoint, _otlp_headers
+    global _decision_store_path, _pseudonym_key_path, _pseudonym_key_cache
+    global _pseudonym_key_source, _report_dir, _otlp_endpoint, _otlp_headers
     _search = search
     _table = str(table or "default")
     _redact = redact or (lambda value: str(value))
@@ -54,6 +60,9 @@ def configure(search, table="default", redact=None, redact_aggressive=None, cata
     _catalog_path = Path(catalog_path) if catalog_path else None
     _business_store_path = Path(business_store_path) if business_store_path else None
     _decision_store_path = Path(decision_store_path) if decision_store_path else None
+    _pseudonym_key_path = Path(pseudonym_key_path) if pseudonym_key_path else None
+    _pseudonym_key_cache = None
+    _pseudonym_key_source = None
     _report_dir = Path(report_dir) if report_dir else None
     _otlp_endpoint = str(otlp_endpoint or "").strip()
     _otlp_headers = str(otlp_headers or "").strip()
@@ -61,6 +70,50 @@ def configure(search, table="default", redact=None, redact_aggressive=None, cata
 
 def _now_iso():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _deployment_pseudonym_key():
+    """Return the deployment-scoped HMAC key without exposing its material."""
+    global _pseudonym_key_cache, _pseudonym_key_source
+    configured = os.environ.get("BERSERK_MCP_PSEUDONYM_KEY")
+    if configured is not None:
+        if not configured:
+            raise ValueError("BERSERK_MCP_PSEUDONYM_KEY must not be empty")
+        key = hashlib.sha256(configured.encode("utf-8")).digest()
+        source = ("environment", key)
+        with _store_lock:
+            if _pseudonym_key_source != source:
+                _pseudonym_key_cache = key
+                _pseudonym_key_source = source
+            return _pseudonym_key_cache
+
+    if _pseudonym_key_path is None:
+        raise RuntimeError("AI FinOps pseudonym key path is not configured")
+    path = _store.validate_store_path(_pseudonym_key_path, "pseudonym key")
+    source = ("file", str(path))
+    with _store_lock:
+        if _pseudonym_key_source == source and _pseudonym_key_cache is not None:
+            return _pseudonym_key_cache
+        with _store.FileLock(path):
+            if path.exists():
+                encoded = path.read_text(encoding="utf-8").strip()
+                if not re.fullmatch(r"[a-f0-9]{64}", encoded):
+                    raise ValueError("persisted AI FinOps pseudonym key is malformed")
+            else:
+                encoded = secrets.token_hex(32)
+                _store.atomic_write_text(path, encoded + "\n", private=True)
+        _pseudonym_key_cache = bytes.fromhex(encoded)
+        _pseudonym_key_source = source
+        return _pseudonym_key_cache
+
+
+def _pseudonymize(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return hmac.new(
+        _deployment_pseudonym_key(), text.encode("utf-8"), hashlib.sha256
+    ).hexdigest()[:32]
 
 
 def _nonnegative_int(value):
@@ -868,6 +921,15 @@ def load_business_store(path=None):
         return _empty_business_store()
     data.setdefault("features", [])
     data.setdefault("effort", [])
+    # Upgrade legacy v1.21 records in memory so a pre-remediation cleartext
+    # owner can never flow into reports, dashboards, or BI exports. The next
+    # governed import persists the normalized owner_hash-only representation.
+    for feature in data["features"]:
+        if not isinstance(feature, dict):
+            continue
+        legacy_owner = str(feature.pop("owner_id", "") or "").strip()
+        if legacy_owner and not feature.get("owner_hash"):
+            feature["owner_hash"] = _pseudonymize(legacy_owner)
     return data
 
 
@@ -968,13 +1030,14 @@ def _identifier_list(value, field):
 
 def normalize_business_record(kind, record):
     if kind == "feature":
+        owner_id = _identifier(record.get("owner_id"), "owner_id")
         result = {
             "feature_id": _identifier(record.get("feature_id"), "feature_id", True),
             "work_item_id": _identifier(record.get("work_item_id"), "work_item_id"),
             "project_id": _identifier(record.get("project_id"), "project_id", True),
             "portfolio_id": _identifier(record.get("portfolio_id"), "portfolio_id"),
             "team_id": _identifier(record.get("team_id"), "team_id"),
-            "owner_id": _identifier(record.get("owner_id"), "owner_id"),
+            "owner_hash": _pseudonymize(owner_id),
             "cost_center": _identifier(record.get("cost_center"), "cost_center"),
             "name": str(record.get("name") or record.get("feature_id") or "").strip()[:240],
             "status": str(record.get("status") or "planned").strip().lower()[:40],
@@ -1368,6 +1431,7 @@ _STRUCTURAL_ID_PATTERNS = {
     "session_id": re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"),
     "schema_hash": re.compile(r"[A-Fa-f0-9]{32,128}"),
     "sha256": re.compile(r"[A-Fa-f0-9]{64}"),
+    "owner_hash": re.compile(r"[a-f0-9]{32}"),
     "feature_id": _IDENT_RE,
     "project_id": _IDENT_RE,
     "work_item_id": _IDENT_RE,
@@ -1739,7 +1803,7 @@ def record_recommendation_decision(recommendation_id, decision, owner, rationale
     entry = {
         "recommendation_id": recommendation_id,
         "decision": decision,
-        "owner_hash": hashlib.sha256(owner.encode("utf-8")).hexdigest()[:16],
+        "owner_hash": _pseudonymize(owner),
         "rationale_hash": hashlib.sha256(rationale.encode("utf-8")).hexdigest(),
         "ts": _now_iso(),
     }

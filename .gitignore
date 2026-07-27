@@ -18,6 +18,7 @@ known_sources.json
 schema_knowledge.json
 amendments_log.json
 llm_config.json
+pseudonym.key
 *.lock
 *.tmp
 *.*.tmp

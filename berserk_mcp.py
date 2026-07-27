@@ -324,6 +324,7 @@ FINOPS_DECISION_STORE_PATH = _optional_absolute_env_path(
     "BERSERK_MCP_RECOMMENDATION_STORE_PATH",
     _default_learned_path().parent / "ai_finops_recommendations.json",
 )
+FINOPS_PSEUDONYM_KEY_PATH = _default_learned_path().parent / "pseudonym.key"
 FINOPS_REPORT_DIR = _optional_absolute_env_path(
     "BERSERK_MCP_REPORT_DIR",
     _default_learned_path().parent / "reports",
@@ -1405,6 +1406,7 @@ ai_finops.configure(
     catalog_path=FINOPS_PRICING_CATALOG_PATH,
     business_store_path=FINOPS_BUSINESS_STORE_PATH,
     decision_store_path=FINOPS_DECISION_STORE_PATH,
+    pseudonym_key_path=FINOPS_PSEUDONYM_KEY_PATH,
     report_dir=FINOPS_REPORT_DIR,
     otlp_endpoint=FINOPS_OTLP_ENDPOINT,
     otlp_headers=FINOPS_OTLP_HEADERS,
@@ -1507,7 +1509,7 @@ TOOLS = [
     {"name": "claude_project_economics", "roles": ["claude"], "description": "Project and codebase economics across governed features: developer hours, AI cost, budget, attribution, and feature-level breakdown.", "inputSchema": {"type": "object", "properties": {"project_id": {"type": "string"}, "since": _since()["since"]}, "required": ["project_id"]}},
     {"name": "claude_efficiency_insights", "roles": ["claude"], "description": "Matched-cohort agent/harness efficiency analysis for cache reuse, context size, tool-result volume, retries, errors, model fit, and cost per successful outcome.", "inputSchema": {"type": "object", "properties": {"since": _since()["since"], "project": {"type": "string"}, "agent": {"type": "string"}, "harness": {"type": "string"}, "model": {"type": "string"}}}},
     {"name": "claude_harness_recommendations", "roles": ["claude"], "description": "Generate deterministic, evidence-backed harness amendments. Only findings with sufficient samples/confidence are approval-eligible; this tool never modifies a harness.", "inputSchema": {"type": "object", "properties": {"since": _since()["since"], "project": {"type": "string"}, "agent": {"type": "string"}, "harness": {"type": "string"}, "model": {"type": "string"}}}},
-    {"name": "claude_record_recommendation_decision", "roles": ["claude"], "description": "Record an approved, rejected, or deferred harness recommendation as a privacy-safe append-only audit event. Does not apply the amendment.", "inputSchema": {"type": "object", "properties": {"recommendation_id": {"type": "string", "pattern": "^rec_[a-f0-9]{16}$"}, "decision": {"type": "string", "enum": ["approved", "rejected", "deferred"]}, "owner": {"type": "string", "description": "Owner identity; stored only as a SHA-256-derived identifier."}, "rationale": {"type": "string", "maxLength": 1000}}, "required": ["recommendation_id", "decision", "owner", "rationale"]}},
+    {"name": "claude_record_recommendation_decision", "roles": ["claude"], "description": "Record an approved, rejected, or deferred harness recommendation as a privacy-safe append-only audit event. Does not apply the amendment.", "inputSchema": {"type": "object", "properties": {"recommendation_id": {"type": "string", "pattern": "^rec_[a-f0-9]{16}$"}, "decision": {"type": "string", "enum": ["approved", "rejected", "deferred"]}, "owner": {"type": "string", "description": "Owner identity; stored only as a deployment-scoped HMAC pseudonym."}, "rationale": {"type": "string", "maxLength": 1000}}, "required": ["recommendation_id", "decision", "owner", "rationale"]}},
     {"name": "claude_optimization_impact", "roles": ["claude"], "description": "Compare matched pre/post harness cohorts and return keep, no-material-change, rollback, or insufficient-data using cost, error, and success signals.", "inputSchema": {"type": "object", "properties": {"agent_profile": {"type": "string"}, "before_harness": {"type": "string"}, "after_harness": {"type": "string"}, "project": {"type": "string"}, "since": _since()["since"]}, "required": ["agent_profile", "before_harness", "after_harness"]}},
     {"name": "claude_management_report", "roles": ["claude"], "description": "Management-ready portfolio, team, project, or feature report with readable text and a schema-versioned JSON envelope.", "inputSchema": {"type": "object", "properties": {"scope": {"type": "string", "enum": ["portfolio", "team", "project", "feature"], "default": "portfolio"}, "identifier": {"type": "string"}, "since": _since()["since"]}}},
     {"name": "claude_generate_dashboard", "roles": ["claude"], "description": "Generate a privacy-safe Markdown or self-contained HTML dashboard beneath BERSERK_MCP_REPORT_DIR for use from Claude Code. This is an explicit local write.", "inputSchema": {"type": "object", "properties": {"dashboard": {"type": "string", "enum": ["portfolio", "project", "feature", "agent_efficiency", "data_quality"], "default": "portfolio"}, "identifier": {"type": "string"}, "since": _since()["since"], "format": {"type": "string", "enum": ["markdown", "html"], "default": "markdown"}, "filename": {"type": "string", "maxLength": 128}}}},

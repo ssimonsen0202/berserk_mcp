@@ -114,7 +114,7 @@ The enterprise reporting tools are:
 | `claude_project_economics` | Roll up project features, repositories, and unattributed usage. |
 | `claude_efficiency_insights` | Surface expensive operations, poor cache use, retries, loops, model mismatch, and fan-out. |
 | `claude_harness_recommendations` | Return deterministic amendment IDs, evidence, confidence, risk, validation window, and rollback criteria. |
-| `claude_record_recommendation_decision` | Append an approved/rejected/deferred audit decision; owner and rationale are persisted as hashes. |
+| `claude_record_recommendation_decision` | Append an approved/rejected/deferred audit decision; owner is a deployment-scoped HMAC pseudonym and rationale remains a hash. |
 | `claude_optimization_impact` | Compare matched model/operation cohorts across immutable harness versions. |
 | `claude_management_report` | Return readable Markdown and schema-versioned JSON for portfolio, project, or feature scope. |
 | `claude_generate_dashboard` | Write aggregate Markdown or self-contained HTML beneath `BERSERK_MCP_REPORT_DIR`. |

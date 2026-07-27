@@ -59,6 +59,7 @@ class FinopsTestCase(unittest.TestCase):
             catalog_path=CATALOG,
             business_store_path=self.root / "business.json",
             decision_store_path=self.root / "decisions.json",
+            pseudonym_key_path=self.root / "pseudonym.key",
             report_dir=self.root / "reports",
         )
 
@@ -69,6 +70,7 @@ class FinopsTestCase(unittest.TestCase):
             catalog_path=bm.FINOPS_PRICING_CATALOG_PATH,
             business_store_path=bm.FINOPS_BUSINESS_STORE_PATH,
             decision_store_path=bm.FINOPS_DECISION_STORE_PATH,
+            pseudonym_key_path=bm.FINOPS_PSEUDONYM_KEY_PATH,
             report_dir=bm.FINOPS_REPORT_DIR,
             otlp_endpoint=bm.FINOPS_OTLP_ENDPOINT,
             otlp_headers=bm.FINOPS_OTLP_HEADERS,
@@ -407,6 +409,64 @@ class BusinessDataAndAttributionTest(FinopsTestCase):
         self.assertEqual(store["features"][0]["feature_id"], "FEAT-1")
         self.assertEqual(store["effort"][0]["hours"], 4)
 
+    def test_feature_owner_is_stored_only_as_deployment_pseudonym(self):
+        record = af.normalize_business_record("feature", {
+            "feature_id": "FEAT-1", "project_id": "PROJ-1",
+            "owner_id": "a.person",
+        })
+        self.assertNotIn("owner_id", record)
+        self.assertRegex(record["owner_hash"], r"^[a-f0-9]{32}$")
+        self.assertNotIn("a.person", json.dumps(record))
+
+    def test_pseudonym_is_stable_per_deployment_and_private_on_disk(self):
+        first = af._pseudonymize("a.person")
+        self.assertEqual(first, af._pseudonymize("a.person"))
+        key_path = self.root / "pseudonym.key"
+        self.assertTrue(key_path.exists())
+        if os.name != "nt":
+            self.assertEqual(key_path.stat().st_mode & 0o777, 0o600)
+
+        other_root = self.root / "other"
+        af.configure(
+            search=self.search, table="default", catalog_path=CATALOG,
+            business_store_path=other_root / "business.json",
+            decision_store_path=other_root / "decisions.json",
+            pseudonym_key_path=other_root / "pseudonym.key",
+            report_dir=other_root / "reports",
+        )
+        self.assertNotEqual(first, af._pseudonymize("a.person"))
+
+    def test_legacy_owner_never_reaches_exports_or_dashboards(self):
+        af._atomic_write_json(self.root / "business.json", {
+            "schema_version": 1,
+            "features": [{
+                "feature_id": "FEAT-1", "project_id": "berserk",
+                "owner_id": "a.person", "name": "Feature one",
+                "source_system": "jira", "source_record_id": "FEAT-1",
+                "source_updated_at": "2026-07-25T00:00:00Z",
+            }],
+            "effort": [], "updated_at": "2026-07-25T00:00:00Z",
+        })
+        loaded = af.load_business_store()
+        self.assertNotIn("owner_id", loaded["features"][0])
+        self.assertRegex(loaded["features"][0]["owner_hash"], r"^[a-f0-9]{32}$")
+
+        output = self.root / "bi-owner"
+        af.export_bi("30d ago", output, fmt="csv")
+        exported = "\n".join(
+            path.read_text(encoding="utf-8") for path in output.rglob("*")
+            if path.is_file()
+        )
+        self.assertNotIn("a.person", exported)
+
+        for fmt in ("markdown", "html"):
+            _, error = af.generate_dashboard("feature", "FEAT-1", "30d ago", fmt=fmt)
+            self.assertFalse(error)
+        reports = "\n".join(
+            path.read_text(encoding="utf-8") for path in (self.root / "reports").glob("*")
+        )
+        self.assertNotIn("a.person", reports)
+
     def test_import_rejects_bad_hours_and_identifier(self):
         with self.assertRaises(ValueError):
             af.normalize_business_record("effort", {
@@ -634,6 +694,18 @@ class ReportingAndRecommendationTest(FinopsTestCase):
         self.assertFalse(error2)
         self.assertIn('"idempotent": true', text2)
         self.assertEqual(len(json.loads((self.root / "decisions.json").read_text())), 1)
+
+    def test_feature_and_decision_use_the_same_owner_pseudonym(self):
+        feature = af.normalize_business_record("feature", {
+            "feature_id": "FEAT-1", "project_id": "PROJ-1",
+            "owner_id": "a.person",
+        })
+        _, error = af.record_recommendation_decision(
+            "rec_0123456789abcdef", "approved", "a.person", "approved for rollout",
+        )
+        self.assertFalse(error)
+        decision = json.loads((self.root / "decisions.json").read_text())[0]
+        self.assertEqual(feature["owner_hash"], decision["owner_hash"])
 
     def test_optimization_impact_keeps_lower_cost_cohort(self):
         self.rows = [
