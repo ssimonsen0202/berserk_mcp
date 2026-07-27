@@ -65,6 +65,10 @@ query window, pricing catalog, row count, and SHA-256 checksum for every
 dataset. Preserve the previous successful directory or ingest transactionally
 in the downstream BI platform if snapshot history is required.
 
+CSV string cells beginning with spreadsheet formula characters are prefixed
+with a single quote. Numeric values, including negative numbers, are unchanged.
+Use NDJSON when the downstream system requires the original string bytes.
+
 The output directory is an intentional publication boundary. berserk-mcp does
 not chmod or replace the ACL on an existing directory, and it preserves an
 existing POSIX file mode when replacing a file. Configure access for the BI

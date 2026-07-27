@@ -2156,13 +2156,21 @@ def build_bi_datasets(raw_rows, catalog, store=None, decisions=None):
     }
 
 
+def _csv_safe_cell(value):
+    """Neutralize spreadsheet formulas without changing numeric values."""
+    if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
+        return "'" + value
+    return value
+
+
 def _csv_text(rows):
     flat_rows = []
     fields = set()
     for row in rows:
         flat = {}
         for key, value in row.items():
-            flat[key] = json.dumps(value, sort_keys=True) if isinstance(value, (dict, list)) else value
+            serialized = json.dumps(value, sort_keys=True) if isinstance(value, (dict, list)) else value
+            flat[key] = _csv_safe_cell(serialized)
             fields.add(key)
         flat_rows.append(flat)
     fieldnames = sorted(fields)
@@ -2171,7 +2179,7 @@ def _csv_text(rows):
     import io
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
-    writer.writeheader()
+    writer.writerow({name: _csv_safe_cell(name) for name in fieldnames})
     writer.writerows(flat_rows)
     return buffer.getvalue()
 

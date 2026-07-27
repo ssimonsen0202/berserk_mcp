@@ -1,4 +1,5 @@
 import contextlib
+import csv
 import io
 import json
 import os
@@ -801,6 +802,39 @@ class DashboardAndExportTest(FinopsTestCase):
         immutable = output / on_disk["datasets"]["ai_usage_daily"]["filename"]
         self.assertTrue(immutable.exists())
         self.assertIn("coverage", on_disk)
+
+    def test_csv_formula_cells_are_neutralized_but_numbers_are_unchanged(self):
+        dangerous = ["=1+1", "+cmd", "-formula", "@lookup", "\tformula", "\rformula"]
+        text = af._csv_text([
+            {"name": value, "negative_number": -1.5} for value in dangerous
+        ])
+        rows = list(csv.DictReader(io.StringIO(text)))
+        self.assertEqual([row["name"] for row in rows], ["'" + value for value in dangerous])
+        self.assertTrue(all(row["negative_number"] == "-1.5" for row in rows))
+
+    def test_bi_csv_neutralizes_hostile_name_while_ndjson_is_lossless(self):
+        feature = af.normalize_business_record("feature", {
+            "feature_id": "FEAT-1", "project_id": "berserk",
+            "name": "=cmd|'/c calc'!A1",
+        })
+        af._atomic_write_json(self.root / "business.json", {
+            "schema_version": 1, "features": [feature], "effort": [],
+            "updated_at": "2026-07-25T00:00:00Z",
+        })
+        csv_dir = self.root / "csv-export"
+        ndjson_dir = self.root / "ndjson-export"
+        af.export_bi("30d ago", csv_dir, fmt="csv")
+        af.export_bi("30d ago", ndjson_dir, fmt="ndjson")
+        with (csv_dir / "feature_cost_snapshot.csv").open(newline="", encoding="utf-8") as handle:
+            csv_rows = list(csv.DictReader(handle))
+        self.assertTrue(csv_rows)
+        self.assertFalse(any(
+            isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r"))
+            for value in csv_rows[0].values()
+        ))
+        self.assertIn("=cmd|'/c calc'!A1", csv_rows[0]["feature"])
+        self.assertIn('"name":"=cmd|\'/c calc\'!A1"',
+                      (ndjson_dir / "feature_cost_snapshot.ndjson").read_text())
 
     @unittest.skipIf(os.name == "nt", "POSIX mode assertion")
     def test_bi_export_leaves_operator_directory_permissions_unchanged(self):
