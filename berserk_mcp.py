@@ -2696,6 +2696,15 @@ def _post_discord_alert(text):
     text = str(text or "").strip()
     if not text:
         return False
+    # Alerts are an egress boundary, never a raw debugging surface. Force the
+    # strongest deterministic secret/PII policy even when MCP output is in an
+    # explicitly weaker flag/off mode, and do so before the transport cap.
+    text = secret_scan.apply_output_filter(
+        text,
+        mode="redact",
+        include_entropy=False,
+        pii_types=secret_scan.ALL_PII_TYPES,
+    )
     try:
         _http.validate_http_url(DISCORD_ALERT_URL, label="discord alert endpoint")
     except _http.UrlPolicyError as e:

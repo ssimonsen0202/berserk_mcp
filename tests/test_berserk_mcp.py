@@ -700,6 +700,56 @@ class BerserkMcpTest(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_post_discord_alert_forces_redaction_before_transport_cap(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        received = []
+
+        class AlertHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                received.append(body["text"])
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), AlertHandler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        orig_url, orig_secret = self._with_discord_config(
+            url=f"http://127.0.0.1:{port}/alert", secret="bridge-secret")
+        old_mode = bm.REDACT_MODE
+        original_filter = bm.secret_scan.apply_output_filter
+        observed_lengths = []
+
+        def observing_filter(value, **kwargs):
+            observed_lengths.append(len(value))
+            return original_filter(value, **kwargs)
+
+        bm.REDACT_MODE = "off"
+        bm.secret_scan.apply_output_filter = observing_filter
+        raw = (
+            "password=topsecret AKIAIOSFODNN7EXAMPLE owner@example.com "
+            + "x" * bm.DISCORD_ALERT_MAX_CHARS
+        )
+        try:
+            self.assertTrue(bm._post_discord_alert(raw))
+            self.assertEqual(observed_lengths, [len(raw)])
+            self.assertLessEqual(len(received[0]), bm.DISCORD_ALERT_MAX_CHARS)
+            self.assertIn("[REDACTED:", received[0])
+            for secret in ("topsecret", "AKIAIOSFODNN7EXAMPLE", "owner@example.com"):
+                self.assertNotIn(secret, received[0])
+        finally:
+            bm.secret_scan.apply_output_filter = original_filter
+            bm.REDACT_MODE = old_mode
+            bm.DISCORD_ALERT_URL, bm.DISCORD_ALERT_SECRET = orig_url, orig_secret
+            server.shutdown()
+            server.server_close()
+
     def test_post_discord_alert_returns_false_on_bridge_error_never_raises(self):
         import threading
         from http.server import BaseHTTPRequestHandler, HTTPServer

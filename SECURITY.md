@@ -78,9 +78,11 @@ the same authorization, retention, and deletion policy used for the source
 management records. Recommendation rationale remains stored as a one-way hash.
 
 The Discord bridge is an optional worker-notification path, not a general raw
-query-result sink. Keep the bridge loopback or protect it with TLS and access
-controls. Source-side redaction remains required for telemetry that should never
-leave the cluster.
+query-result sink. Every alert is forced through deterministic secret and PII
+redaction before its transport-size cap, regardless of the weaker MCP output
+mode an operator may have selected. Keep the bridge loopback or protect it with
+TLS and access controls. Source-side redaction remains required for telemetry
+that should never leave the cluster.
 
 ## Outbound HTTP
 
