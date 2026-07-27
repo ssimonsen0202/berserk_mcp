@@ -287,7 +287,7 @@ flowchart TB
   end
 
   Worker["discover-worker\ndrains queue · authors KQL · posts Discord\nruns via daily cron"]:::deep
-  Bzrk["bzrk CLI\nbearer token lives only in bzrk's own 0600 config\nMCP never reads or stores it"]:::berserk
+  Bzrk["bzrk CLI\nbearer token lives only in bzrk's own config\nMCP never reads or stores it"]:::berserk
 
   subgraph B["Your Berserk instance"]
     direction TB
@@ -323,7 +323,7 @@ flowchart TB
 
 The diagram makes three things clear:
 
-1. **The bearer token never enters this code.** `bzrk` owns the token in its own 0600 config. berserk-mcp shells out via an argv list: no shell, no token in process memory, no token in logs.
+1. **The bearer token never enters this code.** `bzrk` owns the token in its own configuration. berserk-mcp invokes it with an argv list: no shell, no token in berserk-mcp process memory, no token in berserk-mcp logs. Private-file permissions are platform-specific; see [Security](#security).
 2. **The learning loop closes back into the cheap lane.** Pay the capable model once to author and verify a query. After that, the cheap lane runs the query free, forever, via `run_saved`.
 3. **The worker is the automation bridge.** When `request_discovery` queues a new source, the worker drains the queue on its own — it discovers the source, authors KQL, and saves the query, with no operator KQL authoring.
 
@@ -534,11 +534,12 @@ berserk-mcp --generate-dashboard project --identifier OBS --since "90d ago" \
 The export contains seven versioned datasets and a checksum manifest. Grafana
 provisioning JSON and bounded Berserk Explore queries are in
 [`dashboards/`](dashboards/README.md). Generated snapshots contain aggregates,
-coverage, pricing version, and freshness metadata—never prompts, code, raw
-commands, session bodies, or email addresses. Harness amendments are
-recommendations only: an owner must record a decision, deploy an immutable
-harness version, and use the matched-cohort impact tool before keeping or
-rolling back a change.
+coverage, pricing version, freshness metadata, and deployment-scoped owner
+pseudonyms where management attribution is needed. They do not contain prompts,
+code, raw commands, session bodies, cleartext owner IDs, or email addresses.
+Harness amendments are recommendations only: an owner must record a decision,
+deploy an immutable harness version, and use the matched-cohort impact tool
+before keeping or rolling back a change.
 
 Private local stores use current-user-only permissions. BI exports and generated
 management reports are publication outputs: berserk-mcp leaves an existing
@@ -859,7 +860,7 @@ skipped):
 |---|---|---|
 | `BERSERK_LLM_LADDER` | `hermes,openai,anthropic` | Provider order for generation. |
 | `HERMES_API_KEY` | — | Bearer token for the Hermes/Open WebUI endpoint. |
-| `BERSERK_LLM_HERMES_URL` | `http://localhost:3000/api/chat/completions` | Hermes chat-completions endpoint. Resolution order: this env var, then a local `llm_config.json`, then the default. Persist a private URL without an env var, and without hardcoding it in the repo, using `berserk-mcp --set-hermes-url <URL>` — this writes `~/.config/berserk-mcp/llm_config.json` (0600). By default, plaintext `http://` is accepted only for a loopback host (`localhost`/`127.0.0.1`/`::1`). See `BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE` below if Hermes runs on a private or VPN network. |
+| `BERSERK_LLM_HERMES_URL` | `http://localhost:3000/api/chat/completions` | Hermes chat-completions endpoint. Resolution order: this env var, then a local `llm_config.json`, then the default. Persist a private URL without an env var, and without hardcoding it in the repo, using `berserk-mcp --set-hermes-url <URL>` — this writes `llm_config.json` in the per-user berserk-mcp config directory with current-user-only protection (`0600` on POSIX, a protected DACL on Windows). By default, plaintext `http://` is accepted only for a loopback host (`localhost`/`127.0.0.1`/`::1`). See `BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE` below if Hermes runs on a private or VPN network. |
 | `BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE` | unset | Set to `1` to allow `BERSERK_LLM_HERMES_URL`/`--set-hermes-url` to point at a **non-loopback** host over plain `http://` — for example a Tailscale or private-LAN Hermes gateway. Without this setting, a non-loopback `http://` URL is rejected at both save-time and call-time, because the bearer token would otherwise cross the network unencrypted. Prefer `https://` when the endpoint supports it. Use this flag only for trusted private networks that do not support `https://`. |
 | `BERSERK_LLM_HERMES_MODEL` | auto-discovered via `/api/models` | Hermes model id. |
 | `OPENAI_API_KEY` | — | OpenAI API key. |
@@ -994,9 +995,9 @@ package claims it first.
 
 berserk-mcp uses only the Python standard library. It has no third-party
 runtime dependencies. Installation must include the accompanying local
-modules (`parser_factory.py`, `secret_scan.py`, `agent_analytics.py`,
-`ingestion_advisor.py`) and packaged data (`primers/`, `ingestion_catalog.json`).
-Use `pip install .` or a built wheel. Do not copy `berserk_mcp.py` alone.
+modules declared in `pyproject.toml` plus packaged data (`primers/`,
+`ingestion_catalog.json`). Use `pip install .` or a built wheel. Do not copy
+`berserk_mcp.py` alone.
 
 ## Authenticate to `bzrk`
 
@@ -1042,9 +1043,10 @@ constant string:
 bzrk authentication failed; run `bzrk login` and retry
 ```
 
-berserk-mcp never propagates raw `bzrk` stderr, tokens, or tenant
-identifiers to the caller — see [Security](#security) for the full
-rationale.
+For authentication failures, berserk-mcp never propagates raw `bzrk` stderr,
+tokens, or tenant identifiers to the caller. Other backend diagnostics can be
+returned to the MCP caller, but they are bounded and pass through output
+redaction; see [Security](#security) for the full rationale.
 
 **Full `bzrk` auth options** (SSO, service accounts, per-profile config) are
 out of scope for this README. See the official Berserk CLI docs at
@@ -1243,9 +1245,9 @@ model routes correctly. Keep new tool descriptions that way.
 - **All KQL rejects semicolons unconditionally.** Berserk executes semicolon-separated multi-statement KQL. Both generated-query validation and the final search execution boundary therefore reject any semicolon, including one inside a quoted string literal.
 - **A malformed LLM provider reply can't crash the generation pipeline.** A provider can legitimately return `content: null` — common for a tool-call-only reply. `_parse_generated_reply` validates the type before use, so a null or non-text value fails just the one job instead of the whole `--worker` loop.
 - **`BERSERK_MAX_AUTOQUEUE` is clamped, not just parsed.** A negative value clamps to 0. An absurdly large value is capped at a hard ceiling of 500. An unparseable value falls back to the documented default of 5. This enforces the flood-control invariant regardless of the input value.
-- **CI and repository hygiene.** GitHub Actions steps are pinned to a full commit SHA, not a mutable tag. The workflow explicitly declares `permissions: contents: read`. The checkout step sets `persist-credentials: false`, so the runner never retains a token past the job. `setuptools` is version-bounded (`>=61,<90`), instead of open-ended. `.gitignore` now excludes `.env*` files, private-key file extensions, and every local generated store this project creates — `discovery_queue.json`, `known_sources.json`, `schema_knowledge.json`, `amendments_log.json`, `llm_config.json`, lock files, and temp files — not just `learned.json`.
+- **CI and repository hygiene.** GitHub Actions steps are pinned to a full commit SHA, not a mutable tag. The workflow explicitly declares `permissions: contents: read`. The checkout step sets `persist-credentials: false`, so the runner never retains a token past the job. `setuptools` is version-bounded (`>=61,<90`), instead of open-ended. `.gitignore` excludes `.env*` files, private-key file extensions, generated stores and reports (`learned.json`, `discovery_queue.json`, `known_sources.json`, `schema_knowledge.json`, `amendments_log.json`, `llm_config.json`, `pseudonym.key`, `schema_snapshot_*.json`, `ai_finops_business.json`, `ai_finops_recommendations.json`, `reports/`, `.snapshots/`, `manifest.json`, `evals/results/`), lock files, and temp files.
 - **Bounded redaction.** `redact()` uses two explicit limits: `MAX_REDACT_CHARS = 1_000_000` and `MAX_REDACT_CANDIDATES = 50_000`. Its sort-merge-join pipeline fail-closes to `[REDACTED:redaction_limit]` on any bound violation. No partial original text is ever returned.
-- **Constant auth-failure messaging.** `bzrk` auth failures always return the constant string `"bzrk authentication failed; run \`bzrk login\` and retry"`. berserk-mcp never returns raw stderr, tokens, or tenant identifiers.
+- **Constant auth-failure messaging.** `bzrk` auth failures always return the constant string `"bzrk authentication failed; run \`bzrk login\` and retry"`. In this auth-failure path, berserk-mcp never returns raw stderr, tokens, or tenant identifiers. Non-auth backend diagnostics are still caller-visible when useful, but they are bounded and subject to output redaction.
 - **JSON-RPC 2.0 strict envelope validation.** `initialize` requires a nonempty string `protocolVersion`, and object-typed `capabilities` and `clientInfo`. `ping` and `tools/list` reject nonempty params. A notification sent as a request is rejected with `-32600`. An unexpected handler exception surfaces as `-32603`, instead of silently converting to an `isError=true` result.
 - **Generated-query policy.** An LLM-generated query must start with `{table} | ...`. It must terminate with `| take N`, where `1 ≤ N ≤ 50`. It must fit within 2,000 characters. The policy check runs on a stripped copy of the KQL, with string literals and `//` comments removed, so operator text inside a quoted string or a comment cannot satisfy the check.
 - **Provider error scrubbing.** An HTTP error from an LLM provider returns only `"HTTP <code>"`. Response bodies and exception messages are never propagated to the caller.
@@ -1276,8 +1278,9 @@ external scanner pass:
   are false positives by threat model, because the operator is inside the
   trust boundary — but both are addressed anyway, with defense-in-depth
   scheme and path allowlists.
-- **Ongoing verification.** The test suite (`tests/`, 465 tests including role
-  isolation coverage) includes an adversarial regression test for every finding above.
+- **Ongoing verification.** The test suite (`tests/`, including role
+  isolation coverage) includes adversarial regression coverage for the security
+  findings above.
   It runs before every release. See `## Testing` below.
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).

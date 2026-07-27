@@ -19,6 +19,13 @@ schema_knowledge.json
 amendments_log.json
 llm_config.json
 pseudonym.key
+schema_snapshot_*.json
+ai_finops_business.json
+ai_finops_recommendations.json
+reports/
+.snapshots/
+manifest.json
+evals/results/
 *.lock
 *.tmp
 *.*.tmp
