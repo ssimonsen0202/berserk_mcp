@@ -17,8 +17,9 @@ from pathlib import Path
 import re
 import sys
 import threading
-import urllib.parse
-import urllib.request
+
+import _http
+import _store
 
 
 SCHEMA_VERSION = "1.0"
@@ -30,6 +31,7 @@ _SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _search = None
 _table = "default"
 _redact = lambda value: str(value)
+_redact_aggressive = lambda value: str(value)
 _catalog_path = None
 _business_store_path = None
 _decision_store_path = None
@@ -39,15 +41,16 @@ _otlp_headers = ""
 _store_lock = threading.RLock()
 
 
-def configure(search, table="default", redact=None, catalog_path=None,
+def configure(search, table="default", redact=None, redact_aggressive=None, catalog_path=None,
               business_store_path=None, decision_store_path=None,
               report_dir=None, otlp_endpoint="", otlp_headers=""):
     """Inject runtime dependencies without importing ``berserk_mcp``."""
-    global _search, _table, _redact, _catalog_path, _business_store_path
+    global _search, _table, _redact, _redact_aggressive, _catalog_path, _business_store_path
     global _decision_store_path, _report_dir, _otlp_endpoint, _otlp_headers
     _search = search
     _table = str(table or "default")
     _redact = redact or (lambda value: str(value))
+    _redact_aggressive = redact_aggressive or _redact
     _catalog_path = Path(catalog_path) if catalog_path else None
     _business_store_path = Path(business_store_path) if business_store_path else None
     _decision_store_path = Path(decision_store_path) if decision_store_path else None
@@ -674,9 +677,10 @@ def load_pricing_catalog(path=None):
     last_error = None
     for candidate in candidates:
         try:
-            with open(candidate, "r", encoding="utf-8") as handle:
+            safe_candidate = _safe_absolute(candidate, "pricing catalog")
+            with open(safe_candidate, "r", encoding="utf-8") as handle:
                 data = json.load(handle)
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
             last_error = exc
             continue
         if not isinstance(data, dict) or not isinstance(data.get("models"), list):
@@ -839,33 +843,15 @@ def _empty_business_store():
 
 
 def _safe_absolute(path, purpose):
-    candidate = Path(path)
-    if not candidate.is_absolute():
-        raise ValueError(f"{purpose} path must be absolute")
-    if ".." in candidate.parts:
-        raise ValueError(f"{purpose} path must not contain '..'")
-    return candidate.resolve(strict=False)
+    return _store.validate_store_path(path, purpose)
 
 
-def _atomic_write_text(path, text):
-    safe = _safe_absolute(path, "output")
-    safe.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(safe.parent, 0o700)
-    except OSError:
-        pass
-    tmp = safe.with_name(f".{safe.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    with open(tmp, "w", encoding="utf-8", newline="") as handle:
-        handle.write(text)
-    try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        pass
-    os.replace(tmp, safe)
+def _atomic_write_text(path, text, *, private=True):
+    return _store.atomic_write_text(path, text, private=private)
 
 
-def _atomic_write_json(path, value):
-    _atomic_write_text(path, json.dumps(value, indent=2, sort_keys=True) + "\n")
+def _atomic_write_json(path, value, *, private=True):
+    return _store.atomic_write_json(path, value, private=private, sort_keys=True)
 
 
 def load_business_store(path=None):
@@ -873,9 +859,10 @@ def load_business_store(path=None):
     if target is None:
         return _empty_business_store()
     try:
-        with open(target, "r", encoding="utf-8") as handle:
+        safe = _safe_absolute(target, "business store")
+        with open(safe, "r", encoding="utf-8") as handle:
             data = json.load(handle)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
         return _empty_business_store()
     if not isinstance(data, dict):
         return _empty_business_store()
@@ -896,7 +883,7 @@ def _business_data_stale(store, max_age_days=7):
 
 
 def _load_import_file(path, fmt=None):
-    source = Path(path)
+    source = _safe_absolute(path, "business import")
     chosen = (fmt or source.suffix.lstrip(".")).lower()
     if chosen == "csv":
         with open(source, "r", encoding="utf-8-sig", newline="") as handle:
@@ -1076,23 +1063,18 @@ def _otlp_attributes(record):
 
 
 def _parse_headers(raw):
-    headers = {"Content-Type": "application/json"}
-    for item in str(raw or "").split(","):
-        if "=" in item:
-            key, value = item.split("=", 1)
-            if key.strip() and "\n" not in key + value and "\r" not in key + value:
-                headers[key.strip()] = value.strip()
-    return headers
+    return _http.parse_header_items(raw, force_json=True)
 
 
 def emit_otlp_records(records, service_name):
     if not _otlp_endpoint or not records:
         return False
-    parsed = urllib.parse.urlparse(_otlp_endpoint)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ValueError("OTLP endpoint must be an absolute HTTP(S) URL")
-    if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
-        raise ValueError("remote OTLP endpoints must use HTTPS")
+    try:
+        _http.validate_http_url(
+            _otlp_endpoint, label="OTLP endpoint", allow_plaintext_remote=False,
+        )
+    except _http.UrlPolicyError as exc:
+        raise ValueError(str(exc)) from None
     logs = []
     now_ns = str(int(datetime.now(timezone.utc).timestamp() * 1_000_000_000))
     for record in records:
@@ -1110,14 +1092,16 @@ def emit_otlp_records(records, service_name):
                            "logRecords": logs}],
         }]
     }
-    request = urllib.request.Request(
+    status = _http.post_bytes_status(
         _otlp_endpoint,
-        data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-        headers=_parse_headers(_otlp_headers),
-        method="POST",
+        _parse_headers(_otlp_headers),
+        json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        timeout=15,
+        label="OTLP endpoint",
+        allow_plaintext_remote=False,
+        cap=_http.MAX_RESPONSE_BYTES,
     )
-    with urllib.request.urlopen(request, timeout=15) as response:
-        return 200 <= int(response.status) < 300
+    return 200 <= status < 300
 
 
 def import_business_data(kind, input_path, fmt=None, store_path=None, emit_otlp=True):
@@ -1377,13 +1361,36 @@ def _envelope(title, payload, lines=None):
     return "\n".join(readable)
 
 
-def _sanitize_payload(value):
+_STRUCTURAL_ID_PATTERNS = {
+    "recommendation_id": re.compile(r"rec_[a-f0-9]{16}"),
+    "request_id": re.compile(r"req_[A-Za-z0-9_-]{8,128}"),
+    "dedupe_key": re.compile(r"(?:request|message|event):[A-Za-z0-9_.:/-]{1,220}"),
+    "session_id": re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"),
+    "schema_hash": re.compile(r"[A-Fa-f0-9]{32,128}"),
+    "sha256": re.compile(r"[A-Fa-f0-9]{64}"),
+    "feature_id": _IDENT_RE,
+    "project_id": _IDENT_RE,
+    "work_item_id": _IDENT_RE,
+    "harness_version": _IDENT_RE,
+    "agent_profile": _IDENT_RE,
+}
+
+
+def _sanitize_payload(value, field_name=""):
     if isinstance(value, dict):
-        return {str(key): _sanitize_payload(item) for key, item in value.items()}
+        return {str(key): _sanitize_payload(item, str(key)) for key, item in value.items()}
     if isinstance(value, list):
-        return [_sanitize_payload(item) for item in value]
+        return [_sanitize_payload(item, field_name) for item in value]
     if isinstance(value, str):
-        return _redact(value)
+        # Always run deterministic secret/PII patterns first. Structural IDs
+        # skip only optional entropy matching, and only after format validation.
+        base = _redact(value)
+        if base != value:
+            return base
+        pattern = _STRUCTURAL_ID_PATTERNS.get(field_name)
+        if pattern is not None and pattern.fullmatch(value):
+            return value
+        return _redact_aggressive(value)
     return value
 
 
@@ -1706,9 +1713,10 @@ def _load_decisions(path=None):
     if target is None:
         return []
     try:
-        with open(target, "r", encoding="utf-8") as handle:
+        safe = _safe_absolute(target, "decision store")
+        with open(safe, "r", encoding="utf-8") as handle:
             value = json.load(handle)
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
+    except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
         return []
     return value if isinstance(value, list) else []
 
@@ -1983,7 +1991,7 @@ def generate_dashboard(dashboard="portfolio", identifier="", since="90d ago",
         return "report output must remain inside BERSERK_MCP_REPORT_DIR", True
     title = "Claude " + dashboard.replace("_", " ").title()
     content = _markdown_dashboard(title, payload, since) if fmt == "markdown" else _html_dashboard(title, payload, since)
-    _atomic_write_text(target, content)
+    _atomic_write_text(target, content, private=False)
     result = {"schema_version": SCHEMA_VERSION, "dashboard": dashboard,
               "format": fmt, "path": str(target), "generated_at": _now_iso()}
     return _envelope("Claude dashboard generated", result, [f"Report: {target}"]), False
@@ -2168,11 +2176,11 @@ def export_bi(since, output_dir, fmt="csv"):
     # and all files it references intact.
     snapshot_dir.mkdir(parents=True, exist_ok=False)
     for filename, content in serialized.items():
-        _atomic_write_text(snapshot_dir / filename, content)
+        _atomic_write_text(snapshot_dir / filename, content, private=False)
     target_dir.mkdir(parents=True, exist_ok=True)
     for filename, content in serialized.items():
-        _atomic_write_text(target_dir / filename, content)
-    _atomic_write_json(target_dir / "manifest.json", manifest)
+        _atomic_write_text(target_dir / filename, content, private=False)
+    _atomic_write_json(target_dir / "manifest.json", manifest, private=False)
     return manifest
 
 

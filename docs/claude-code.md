@@ -87,8 +87,11 @@ berserk-mcp --import-business-data effort --input /absolute/path/worklogs.ndjson
 Feature rows require `feature_id`; effort rows require `worklog_id` and
 nonnegative `actual_hours`. Include stable source record and update fields so
 reimports replace stale versions deterministically. The private local store is
-atomic. When `BERSERK_MCP_OTLP_LOGS_ENDPOINT` is set, sanitized records are
-also emitted as `engineering-work` logs. Remote cleartext HTTP is refused.
+atomic and current-user-only (`0600`/`0700` on POSIX, a protected DACL on
+Windows). Existing parent-directory permissions are never changed. When
+`BERSERK_MCP_OTLP_LOGS_ENDPOINT` is set, sanitized records are also emitted as
+`engineering-work` logs. Remote cleartext HTTP and redirects are refused;
+responses and configured headers are bounded and validated.
 
 Hours come only from the effort feed. Session elapsed time, Claude active time,
 commits, and lines changed are kept as separate delivery signals and are never
@@ -157,6 +160,10 @@ Generated HTML uses inline SVG and no external JavaScript or CDN. The BI
 export atomically publishes seven stable datasets plus checksums. Grafana JSON
 and copy-ready Berserk Explore KQL live in the
 [dashboard package](../dashboards/README.md).
+
+Dashboards and BI files are publication outputs. berserk-mcp does not tighten
+an existing output directory's mode or ACL; the operator must grant the
+management or BI service account the required read access.
 
 ## Bounded-query policy
 

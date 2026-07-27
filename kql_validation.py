@@ -35,6 +35,7 @@ FINDING_ORDER = {
     "MULTI_STATEMENT_USER_QUERY": 50,
     "WRONG_TABLE": 60,
     "UNSAFE_OPERATOR": 70,
+    "SOURCE_INTRODUCING_OPERATOR": 75,
     "UNBOUNDED_RESULT": 80,
     "RESULT_BOUND_TOO_LARGE": 90,
     "UNKNOWN_FIELD": 100,
@@ -73,6 +74,9 @@ _EXPENSIVE_PATTERNS = [
 ]
 _UNSAFE_RE = re.compile(r"\b(set|drop|alter|delete|update|ingest|create)\b", re.I)
 _CONTROL_RE = re.compile(r"^\s*\.")
+_SOURCE_INTRODUCING_RE = re.compile(
+    r"(?:^|\|)\s*(union|evaluate|find|search)\b|\bexternaldata\s*\(", re.I
+)
 _RAW_SCAN_RE = re.compile(r"\b(body|\$raw)\b[^|]{0,80}\b(contains|has_any|matches\s+regex)\b|\b(contains|has_any|matches\s+regex)\b[^|]{0,80}\b(body|\$raw)\b", re.I)
 _FIELD_REF_RE = re.compile(
     r"(resource|attributes)\s*\[\s*['\"]([^'\"]+)['\"]\s*\]|"
@@ -93,7 +97,8 @@ _KQL_WORDS = {
 
 
 def _strip_strings(text):
-    return _STRING_RE.sub("''", str(text or ""))
+    stripped = _STRING_RE.sub("''", str(text or ""))
+    return re.sub(r"//[^\r\n]*", "", stripped)
 
 
 def _split_pipeline(kql):
@@ -198,8 +203,11 @@ def validate_kql_static(kql, *, table, since, schema_fields=None, max_chars=5000
             findings.append(_finding("INVALID_SINCE", "error", f"Invalid since window: {since!r}."))
         if _CONTROL_RE.match(query):
             findings.append(_finding("CONTROL_COMMAND", "error", "Control commands are not allowed for user KQL."))
-        if ";" in _strip_strings(query):
-            findings.append(_finding("MULTI_STATEMENT_USER_QUERY", "error", "Multiple statements are not allowed."))
+        if ";" in query:
+            findings.append(_finding(
+                "MULTI_STATEMENT_USER_QUERY", "error",
+                "Semicolons are not allowed in user KQL, including string literals.",
+            ))
 
         parts = _split_pipeline(query)
         if not parts or parts[0] != table or len(parts) < 2:
@@ -208,10 +216,19 @@ def validate_kql_static(kql, *, table, since, schema_fields=None, max_chars=5000
                 f"Query must begin with '{table} | ...'.",
                 recommendation=f"Start with: {table} | where ... | take 50",
             ))
-        if _UNSAFE_RE.search(_strip_strings(query)):
-            findings.append(_finding("UNSAFE_OPERATOR", "error", "Mutation-like or unsafe syntax is present."))
-
         stripped = _strip_strings(query)
+        if _UNSAFE_RE.search(stripped):
+            findings.append(_finding("UNSAFE_OPERATOR", "error", "Mutation-like or unsafe syntax is present."))
+        source_operator = _SOURCE_INTRODUCING_RE.search(stripped)
+        if source_operator:
+            operator = next((part for part in source_operator.groups() if part), "externaldata")
+            findings.append(_finding(
+                "SOURCE_INTRODUCING_OPERATOR", "error",
+                f"Source-introducing operator {operator!r} is not allowed in user KQL.",
+                "pipeline",
+                "Query only the configured Berserk table through its existing pipeline.",
+            ))
+
         bounds = []
         for m in _BOUND_RE.finditer(stripped):
             n = m.group(2) or m.group(3)

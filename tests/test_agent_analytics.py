@@ -686,6 +686,9 @@ class SessionDeepDiveTest(_RewiredAnalytics):
         text, err = aa.claude_session_deep_dive("bad id; drop")
         self.assertTrue(err)
         self.assertIn("invalid session", text)
+        text, err = aa.claude_session_deep_dive("s" * 129)
+        self.assertTrue(err)
+        self.assertIn("invalid session", text)
 
     def test_wrapper_unknown_session_is_explicit(self):
         self.rewire(lambda q, s: ("(no rows)", False))

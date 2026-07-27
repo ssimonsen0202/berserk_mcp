@@ -799,7 +799,8 @@ def claude_cost_report(since="7d ago", group_by="day"):
     return "\n".join(lines), False
 
 
-_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
+MAX_SESSION_ID_CHARS = 128
 _GAP_SECONDS = 300
 
 
@@ -865,7 +866,7 @@ def analyze_session_events(events):
 def claude_session_deep_dive(session_id, since="24h ago"):
     """Timeline + burn + loop drilldown for one session. NOT yet live-verified."""
     sid = str(session_id or "").strip()
-    if not _SESSION_ID_RE.match(sid):
+    if len(sid) > MAX_SESSION_ID_CHARS or not _SESSION_ID_RE.fullmatch(sid):
         return "invalid session_id (allowed: letters, digits, '.', '_', '-')", True
     text, is_err = _bzrk_search(_session_events_query(sid), since)
     if is_err:

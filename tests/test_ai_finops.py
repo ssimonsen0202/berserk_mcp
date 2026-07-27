@@ -9,6 +9,8 @@ from unittest import mock
 
 import ai_finops as af
 import berserk_mcp as bm
+import secret_scan
+import _http
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -452,6 +454,96 @@ class BusinessDataAndAttributionTest(FinopsTestCase):
         with self.assertRaises(ValueError):
             af.emit_otlp_records([self._feature()], "engineering-work")
 
+    def test_otlp_headers_fail_on_malformed_and_cannot_override_json(self):
+        with self.assertRaises(ValueError):
+            af._parse_headers("Authorization Bearer token")
+        headers = af._parse_headers("Content-Type=text/plain,Authorization=Bearer token")
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertNotIn("text/plain", headers.values())
+
+    def test_otlp_redirect_does_not_forward_auth_header(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        target_headers = []
+
+        class TargetHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                target_headers.append(dict(self.headers.items()))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        target = HTTPServer(("127.0.0.1", 0), TargetHandler)
+        target_port = target.server_address[1]
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{target_port}/v1/logs")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        redirect = HTTPServer(("127.0.0.1", 0), RedirectHandler)
+        for server in (target, redirect):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            af.configure(
+                self.search,
+                catalog_path=CATALOG,
+                business_store_path=self.root / "business.json",
+                decision_store_path=self.root / "decisions.json",
+                report_dir=self.root / "reports",
+                otlp_endpoint=f"http://127.0.0.1:{redirect.server_address[1]}/v1/logs",
+                otlp_headers="Authorization=Bearer test-secret",
+            )
+            with self.assertRaisesRegex(Exception, "302") as caught:
+                af.emit_otlp_records([self._feature()], "engineering-work")
+            caught.exception.close()
+            self.assertEqual(target_headers, [])
+        finally:
+            redirect.shutdown()
+            target.shutdown()
+            redirect.server_close()
+            target.server_close()
+
+    def test_otlp_response_is_bounded(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class OversizedHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"x" * 128)
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), OversizedHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            af.configure(
+                self.search,
+                catalog_path=CATALOG,
+                business_store_path=self.root / "business.json",
+                decision_store_path=self.root / "decisions.json",
+                report_dir=self.root / "reports",
+                otlp_endpoint=f"http://127.0.0.1:{server.server_address[1]}/v1/logs",
+            )
+            with mock.patch.object(_http, "MAX_RESPONSE_BYTES", 64):
+                with self.assertRaisesRegex(ValueError, "exceeds 64 bytes"):
+                    af.emit_otlp_records([self._feature()], "engineering-work")
+        finally:
+            server.shutdown()
+            server.server_close()
+
 
 class ReportingAndRecommendationTest(FinopsTestCase):
     def _write_store(self):
@@ -573,6 +665,36 @@ class ReportingAndRecommendationTest(FinopsTestCase):
 
 
 class DashboardAndExportTest(FinopsTestCase):
+    def test_payload_sanitizer_preserves_valid_ids_but_not_secrets(self):
+        af.configure(
+            search=self.search,
+            table="default",
+            redact=lambda value: secret_scan.redact(
+                value, include_entropy=False, pii_types=secret_scan.ALL_PII_TYPES,
+            )[0],
+            redact_aggressive=lambda value: secret_scan.redact(
+                value, include_entropy=True, pii_types=secret_scan.ALL_PII_TYPES,
+            )[0],
+            catalog_path=CATALOG,
+            business_store_path=self.root / "business.json",
+            decision_store_path=self.root / "decisions.json",
+            report_dir=self.root / "reports",
+        )
+        payload = {
+            "recommendation_id": "rec_9f3c1ab27de40561",
+            "request_id": "req_011CQ7xKp2mNvR8sTuVwXyZ1",
+            "dedupe_key": "request:req_011CQ7xKp2mNvR8sTuVwXyZ1",
+            "note": "password=topsecret and owner@example.com",
+            "feature_id": "AKIAIOSFODNN7EXAMPLE",
+        }
+        clean = af._sanitize_payload(payload)
+        self.assertEqual(clean["recommendation_id"], payload["recommendation_id"])
+        self.assertEqual(clean["request_id"], payload["request_id"])
+        self.assertEqual(clean["dedupe_key"], payload["dedupe_key"])
+        self.assertNotIn("topsecret", clean["note"])
+        self.assertNotIn("owner@example.com", clean["note"])
+        self.assertNotEqual(clean["feature_id"], payload["feature_id"])
+
     def test_dashboard_markdown_and_html_are_self_contained(self):
         text, error = af.generate_dashboard("portfolio", since="30d ago", fmt="markdown")
         self.assertFalse(error)
@@ -608,6 +730,14 @@ class DashboardAndExportTest(FinopsTestCase):
         self.assertTrue(immutable.exists())
         self.assertIn("coverage", on_disk)
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode assertion")
+    def test_bi_export_leaves_operator_directory_permissions_unchanged(self):
+        output = self.root / "shared-bi"
+        output.mkdir()
+        os.chmod(output, 0o755)
+        af.export_bi("30d ago", output, fmt="csv")
+        self.assertEqual(output.stat().st_mode & 0o777, 0o755)
+
     def test_failed_bi_generation_retains_previous_manifest_and_snapshot(self):
         output = self.root / "bi-retain"
         first = af.export_bi("30d ago", output, fmt="csv")
@@ -615,10 +745,10 @@ class DashboardAndExportTest(FinopsTestCase):
         snapshot_before = output / first["datasets"]["ai_usage_daily"]["filename"]
         original = af._atomic_write_text
 
-        def fail_new_snapshot(path, content):
+        def fail_new_snapshot(path, content, **kwargs):
             if ".snapshots" in Path(path).parts:
                 raise OSError("simulated export failure")
-            return original(path, content)
+            return original(path, content, **kwargs)
 
         with mock.patch.object(af, "_atomic_write_text", side_effect=fail_new_snapshot):
             with self.assertRaises(OSError):

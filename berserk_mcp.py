@@ -14,7 +14,7 @@ only in `bzrk`'s own config (typically 0600) and is never read, stored, or
 logged by this server.
 
 Configuration (all optional, via environment):
-  BZRK_BIN                 path/name of the bzrk binary           (default: "bzrk")
+  BZRK_BIN                 trusted path/name of the bzrk binary   (default: "bzrk")
   BZRK_PROFILE             bzrk profile to query                  (default: "local")
   BZRK_TIMEOUT             per-query timeout in seconds           (default: "120")
   BERSERK_WORKER_JITTER_SECONDS  max random startup delay for --worker (default: "7200")
@@ -27,6 +27,8 @@ Configuration (all optional, via environment):
   BERSERK_MCP_KQL_MAX_CHARS maximum user KQL length (default: "50000")
   BERSERK_MCP_KQL_MAX_ROWS recommended arbitrary-query row bound (default: "2000")
   BERSERK_MCP_KQL_STATS stats handling: off/auto/required (default: "auto")
+  BERSERK_MCP_MAX_RESULT_BYTES hard cap for bzrk stdout (default: 10485760)
+  BERSERK_MCP_FINOPS_REDACT_ENTROPY enable entropy redaction in FinOps free text (default: "0")
   BERSERK_TABLE            the Berserk table to query             (default: "default")
   BERSERK_MCP_LEARNED_PATH where saved queries persist  (default: per-user config dir)
 
@@ -53,14 +55,17 @@ import json
 import subprocess
 import re
 import os
+import shutil
 import threading
 import time
 import urllib.error
-import urllib.request
 import random
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+import _http
+import _store
 import agent_analytics
 import ai_finops
 import ingestion_advisor
@@ -69,7 +74,7 @@ import parser_factory
 import schema_registry
 import secret_scan
 
-__version__ = "1.21.1"
+__version__ = "1.22.0"
 
 
 def log(msg):
@@ -77,7 +82,54 @@ def log(msg):
 
 
 # ---------- configuration (env-overridable) ----------
-BZRK_BIN = os.environ.get("BZRK_BIN", "bzrk")
+_BZRK_BIN_CONFIG = os.environ.get("BZRK_BIN", "bzrk")
+
+
+def _path_is_within(path, directory):
+    try:
+        Path(path).resolve(strict=False).relative_to(Path(directory).resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_bzrk_binary(value, *, os_name=None, which=None, cwd=None):
+    """Resolve the CLI once so subprocess never receives an unsafe bare name.
+
+    Windows searches the current working directory before PATH for bare
+    executable names.  Refuse that resolution unless the operator explicitly
+    supplied an absolute path; an MCP client, not the operator, often controls
+    the server's working directory.
+    """
+    configured = str(value or "bzrk").strip()
+    if not configured:
+        configured = "bzrk"
+    platform_name = os.name if os_name is None else os_name
+    resolver = shutil.which if which is None else which
+    current_dir = Path.cwd() if cwd is None else Path(cwd)
+    candidate = Path(configured)
+    if candidate.is_absolute():
+        resolved = candidate.resolve(strict=False)
+        return str(resolved) if resolved.is_file() else None
+    if "/" in configured or "\\" in configured:
+        raise ValueError("BZRK_BIN must be an absolute path or a bare executable name")
+    found = resolver(configured)
+    if not found:
+        return None
+    resolved = Path(found).resolve(strict=False)
+    if platform_name == "nt" and _path_is_within(resolved, current_dir):
+        raise ValueError(
+            "bare BZRK_BIN resolved inside the current working directory; "
+            "set BZRK_BIN to the trusted executable's absolute path"
+        )
+    return str(resolved)
+
+
+try:
+    _RESOLVED_BZRK_BIN = _resolve_bzrk_binary(_BZRK_BIN_CONFIG)
+except ValueError as _bzrk_resolution_error:
+    sys.exit(f"berserk-mcp: invalid BZRK_BIN: {_bzrk_resolution_error}")
+BZRK_BIN = _RESOLVED_BZRK_BIN or _BZRK_BIN_CONFIG
 PROFILE = os.environ.get("BZRK_PROFILE", "local")
 TABLE = os.environ.get("BERSERK_TABLE", "default")
 DEFAULT_TIMEOUT = int(os.environ.get("BZRK_TIMEOUT", "120"))
@@ -160,6 +212,13 @@ MAX_CONCURRENT_QUERIES = _nonnegative_int_env("BERSERK_MCP_MAX_CONCURRENT_QUERIE
 KQL_MAX_CHARS = _nonnegative_int_env("BERSERK_MCP_KQL_MAX_CHARS", 50000) or 50000
 KQL_MAX_ROWS = _nonnegative_int_env("BERSERK_MCP_KQL_MAX_ROWS", 2000) or 2000
 KQL_STATS_MODE = _choice_env("BERSERK_MCP_KQL_STATS", "auto", {"off", "auto", "required"})
+MAX_BZRK_RESULT_BYTES = (
+    _nonnegative_int_env("BERSERK_MCP_MAX_RESULT_BYTES", 10 * 1024 * 1024)
+    or 10 * 1024 * 1024
+)
+FINOPS_REDACT_ENTROPY = os.environ.get(
+    "BERSERK_MCP_FINOPS_REDACT_ENTROPY", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
 _QUERY_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_QUERIES) if MAX_CONCURRENT_QUERIES > 0 else None
 
 # Fleet controls are deliberately in-process. An MCP stdio server is one
@@ -222,40 +281,8 @@ DISCORD_ALERT_SECRET = os.environ.get("BERSERK_DISCORD_ALERT_SECRET", "")
 DISCORD_ALERT_MAX_CHARS = 3800  # two bridge-side 1900-char chunks' worth
 
 
-class StorePathError(ValueError):
-    """Raised when a caller-supplied store path fails safety validation."""
-
-
-def _validate_store_path(candidate, purpose):
-    """Defense-in-depth guard for operator-supplied filesystem paths.
-
-    Env vars (BERSERK_MCP_LEARNED_PATH, XDG_CONFIG_HOME, APPDATA) are set
-    by the operator running this process, so a rogue value is self-inflicted
-    rather than remote-attacker-controlled. This validator still rejects
-    the two mistakes most likely to cause real damage:
-
-    - a non-absolute path (rules out unpredictable CWD-relative writes)
-    - traversal patterns (``..`` in any segment before or after resolve)
-
-    Returns the resolved absolute ``Path`` on success; raises
-    ``StorePathError`` otherwise.
-    """
-    if not candidate:
-        raise StorePathError(f"{purpose} path is empty")
-    if not isinstance(candidate, (str, Path)):
-        raise StorePathError(f"{purpose} path must be a string or Path")
-    text = str(candidate)
-    if any(ord(c) < 32 for c in text):
-        raise StorePathError(f"{purpose} path contains control characters")
-    p = Path(text)
-    if not p.is_absolute():
-        raise StorePathError(f"{purpose} path must be absolute (got {text!r})")
-    if ".." in p.parts:
-        raise StorePathError(f"{purpose} path must not contain '..' segments")
-    resolved = p.resolve(strict=False)
-    if ".." in resolved.parts:
-        raise StorePathError(f"{purpose} path resolves through '..'")
-    return resolved
+StorePathError = _store.StorePathError
+_validate_store_path = _store.validate_store_path
 
 
 def _default_learned_path() -> Path:
@@ -346,18 +373,39 @@ def _load_primer(role: str) -> str:
     """Load primers/<role>.md from BERSERK_MCP_PRIMERS_DIR, adjacent to this script,
     or the installed data-files location (share/berserk-mcp/primers/)."""
     env_dir = os.environ.get("BERSERK_MCP_PRIMERS_DIR", "")
-    search_dirs = []
+    configured_dir = None
     if env_dir:
-        search_dirs.append(Path(env_dir))
-    search_dirs.append(Path(__file__).parent / "primers")
-    search_dirs.append(Path(sys.prefix) / "share" / "berserk-mcp" / "primers")
-    if role in _ROLE_PREFIX:
-        for primer_dir in search_dirs:
-            f = primer_dir / f"{role}.md"
-            try:
-                return f.read_text(encoding="utf-8").strip() + "\n\n"
-            except OSError:
-                continue
+        try:
+            configured_dir = _validate_store_path(env_dir, "BERSERK_MCP_PRIMERS_DIR")
+        except StorePathError as exc:
+            sys.exit(f"berserk-mcp: invalid BERSERK_MCP_PRIMERS_DIR: {exc}")
+    if role not in _ROLE_PREFIX:
+        return ""
+    if configured_dir is not None:
+        primer_path = configured_dir / f"{role}.md"
+        try:
+            if not primer_path.is_file():
+                raise FileNotFoundError(primer_path)
+            text = primer_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            sys.exit(
+                f"berserk-mcp: BERSERK_MCP_PRIMERS_DIR is configured but "
+                f"{primer_path} is not readable: {type(exc).__name__}"
+            )
+        log(f"loaded {role} primer from {primer_path.resolve(strict=False)}")
+        return text.strip() + "\n\n"
+    search_dirs = [
+        Path(__file__).parent / "primers",
+        Path(sys.prefix) / "share" / "berserk-mcp" / "primers",
+    ]
+    for primer_dir in search_dirs:
+        primer_path = primer_dir / f"{role}.md"
+        try:
+            text = primer_path.read_text(encoding="utf-8")
+            log(f"loaded {role} primer from {primer_path.resolve(strict=False)}")
+            return text.strip() + "\n\n"
+        except OSError:
+            continue
     return ""
 
 
@@ -409,149 +457,35 @@ def now_iso():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-_LOCK_STALE_SECONDS = 30
-_LOCK_TIMEOUT_SECONDS = 10
-_LOCK_RETRY_INTERVAL = 0.05
+_LOCK_STALE_SECONDS = _store.LOCK_STALE_SECONDS
+_LOCK_TIMEOUT_SECONDS = _store.LOCK_TIMEOUT_SECONDS
+_LOCK_RETRY_INTERVAL = _store.LOCK_RETRY_INTERVAL
 
 
-class _FileLock:
-    """Portable (POSIX + Windows) advisory lock via atomic lockfile
-    creation, not fcntl/msvcrt -- keeps the project stdlib-only and
-    platform-uniform (F-007). os.O_CREAT|os.O_EXCL is atomic "create if
-    absent, fail if present" on every platform this project supports, so
-    no platform-specific locking module is needed.
-
-    Not reentrant. Guards the load-modify-save critical section for a
-    JSON store so two concurrent writers can't both read stale state and
-    have the second writer's atomic replace silently discard the first
-    writer's update -- unique-per-writer temp files alone don't fix that,
-    since the race is at the logical read-then-write level, not just the
-    file-rename level.
-
-    A lock older than _LOCK_STALE_SECONDS is assumed to be abandoned by a
-    crashed holder and is broken rather than causing a permanent
-    deadlock -- these are quick JSON read-modify-write operations that
-    should never legitimately hold the lock anywhere near that long.
-    """
-
-    def __init__(self, target_path):
-        self.lock_path = str(target_path) + ".lock"
-        self._fd = None
-
-    def __enter__(self):
-        deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
-        while True:
-            try:
-                self._fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(self._fd, str(os.getpid()).encode("ascii"))
-                return self
-            except (FileExistsError, PermissionError):
-                # Windows can raise PermissionError instead of FileExistsError
-                # for O_CREAT|O_EXCL here: NTFS briefly keeps a just-deleted
-                # lock file in a pending-delete state, so a fast recreate from
-                # another thread's __exit__/stale-break can collide as
-                # "access denied" rather than "already exists". Treat it the
-                # same as lock contention -- if the path is genuinely
-                # inaccessible rather than mid-churn, this still surfaces as
-                # a TimeoutError once the deadline below is hit, so a real
-                # permissions problem isn't silently swallowed.
-                try:
-                    age = time.time() - os.path.getmtime(self.lock_path)
-                    if age > _LOCK_STALE_SECONDS:
-                        os.remove(self.lock_path)
-                        continue
-                except OSError:
-                    continue  # lock file vanished between exists and getmtime -- retry
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        f"could not acquire lock {self.lock_path} within "
-                        f"{_LOCK_TIMEOUT_SECONDS}s"
-                    )
-                time.sleep(_LOCK_RETRY_INTERVAL)
-
-    def __exit__(self, exc_type, exc, tb):
-        if self._fd is not None:
-            os.close(self._fd)
-            self._fd = None
-        try:
-            os.remove(self.lock_path)
-        except OSError:
-            pass
-        return False
+def _FileLock(target_path):
+    """Compatibility constructor for the shared store lock."""
+    return _store.FileLock(
+        target_path,
+        stale_seconds=_LOCK_STALE_SECONDS,
+        timeout_seconds=_LOCK_TIMEOUT_SECONDS,
+        retry_interval=_LOCK_RETRY_INTERVAL,
+    )
 
 
 def _ensure_private_dir(path):
-    """Create path's parent directory, chmod'd 0700, if it doesn't already exist.
-
-    mkdir(mode=...) alone is masked by the process umask and doesn't fix a
-    directory that already exists with looser permissions, so chmod
-    explicitly every time rather than relying on the mkdir call.
-
-    The path is passed through ``_validate_store_path`` at every entry so
-    even a stale ``LEARNED_PATH`` predating the module-load validator, or a
-    future caller that constructs a path from untrusted input, cannot mkdir
-    or chmod outside a clean absolute location.
-    """
-    safe = _validate_store_path(path, "store")
-    safe.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(safe.parent, 0o700)
+    return _store.ensure_private_dir(path, logger=log)
 
 
 def load_json_list(path):
-    try:
-        safe = _validate_store_path(path, "store")
-    except StorePathError as e:
-        log(f"load_json_list refused: {e}")
-        return []
-    try:
-        with open(safe, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, list) else []
-    except FileNotFoundError:
-        return []
-    except (OSError, json.JSONDecodeError) as e:
-        log(f"load_json_list({safe}): {type(e).__name__}: {e}")
-        return []
+    return _store.load_json_list(path, logger=log)
 
 
-def _unique_tmp_path(safe):
-    """Per-writer temp filename (F-007): a shared fixed '.tmp' path let two
-    concurrent writers targeting the same store collide on the SAME temp
-    file (one truncating what the other just wrote, or a FileNotFoundError
-    when one process's os.replace removed the file the other still had
-    open). Unique names close the file-IO race; callers additionally wrap
-    the whole load-modify-save cycle in _FileLock to close the LOGICAL
-    lost-update race that unique names alone don't fix."""
-    return f"{safe}.{os.getpid()}.{threading.get_ident()}.tmp"
-
-
-def _atomic_replace(tmp, safe):
-    """os.replace with a bounded retry for a known Windows flake: unlike
-    POSIX rename, MoveFileEx (what os.replace uses under the hood on
-    Windows) can transiently fail with PermissionError if another handle
-    -- Defender's on-access scanner, an indexer -- briefly has the
-    just-written temp file open. Retries a handful of times with a short
-    backoff; still raises if the permission error persists, so a genuine
-    permissions problem is not silently swallowed."""
-    attempts = 5
-    for i in range(attempts):
-        try:
-            os.replace(tmp, safe)
-            return
-        except PermissionError:
-            if i == attempts - 1:
-                raise
-            time.sleep(0.05)
+_unique_tmp_path = _store.unique_tmp_path
+_atomic_replace = _store.atomic_replace
 
 
 def save_json_list(path, items):
-    safe = _validate_store_path(path, "store")
-    _ensure_private_dir(safe)
-    tmp = _unique_tmp_path(safe)
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(items, f, indent=2)
-    os.chmod(tmp, 0o600)
-    _atomic_replace(tmp, safe)
+    return _store.save_json_list(path, items, logger=log)
 
 
 # ---------- verified queries (do not edit field names; they are confirmed
@@ -826,11 +760,20 @@ def q_cc_search(term: str) -> str:
     )
 
 
-_SERVICE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-_TEXT_GUARD_RE = re.compile(r"['\"|\\`]")
+MAX_INTERPOLATED_NAME_CHARS = 128
+MAX_TRACE_ID_CHARS = 64
+MAX_SEARCH_TERM_CHARS = 500
+_SERVICE_RE = re.compile(r"[A-Za-z0-9._-]+")
+_TRACE_ID_RE = re.compile(r"[A-Za-z0-9]+")
+_TEXT_GUARD_RE = re.compile(r"['\"|\\`\x00-\x1f\x7f]")
 _FORECAST_METRICS = frozenset({
     "system.memory.usage", "system.filesystem.usage", "system.disk.io",
 })
+
+
+def _valid_interpolated_name(value, max_chars=MAX_INTERPOLATED_NAME_CHARS):
+    text = str(value or "")
+    return len(text) <= max_chars and bool(_SERVICE_RE.fullmatch(text))
 
 
 def q_detect_anomalies(service=None):
@@ -912,38 +855,118 @@ _AUTH_FAILURE_RE = re.compile(
 
 AUTH_FAILURE_MESSAGE = "bzrk authentication failed; run `bzrk login` and retry"
 
-# F-005: bound the DIAGNOSTIC text returned on a non-zero exit -- this text
-# is always error/status output, never the actual data a caller asked for,
-# so capping it has no effect on legitimate large query results. The
-# success path (p.returncode == 0) is intentionally left unbounded here:
-# real KQL result sets are wanted output, and tool queries already bound
-# row counts via `take N`. This does not bound subprocess.run's own
-# in-memory buffering while bzrk is running -- bzrk is an operator-
-# installed, trusted local CLI, and the existing `timeout` already bounds
-# worst-case duration; a full rewrite to streamed/spooled capture was
-# judged disproportionate to that residual risk.
+# F-005/SR-17: bound both diagnostics and successful output while the child
+# is still running. Row limits do not bound wide rows, and capture_output
+# buffers an entire stream before this process can inspect it.
 MAX_BZRK_DIAGNOSTIC_CHARS = 100_000
+_PROCESS_READ_CHUNK = 64 * 1024
+
+
+def _run_argv_bounded(argv, timeout, stdout_cap=MAX_BZRK_RESULT_BYTES,
+                      stderr_cap=MAX_BZRK_DIAGNOSTIC_CHARS):
+    """Run argv without a shell, bounding captured bytes before decoding.
+
+    Two readers drain stdout and stderr concurrently to avoid pipe deadlocks.
+    stdout overflow terminates and reaps the child; stderr is retained only up
+    to its diagnostic cap while the remainder is discarded until completion.
+    """
+    process = subprocess.Popen(
+        list(argv), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=False,
+    )
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    caps = {"stdout": max(1, int(stdout_cap)), "stderr": max(1, int(stderr_cap))}
+    stdout_overflow = threading.Event()
+    stderr_overflow = threading.Event()
+    reader_errors = []
+
+    def drain(name, stream):
+        try:
+            with stream:
+                while True:
+                    chunk = stream.read(_PROCESS_READ_CHUNK)
+                    if not chunk:
+                        break
+                    remaining = caps[name] - len(buffers[name])
+                    if remaining > 0:
+                        buffers[name].extend(chunk[:remaining])
+                    if len(chunk) > max(0, remaining):
+                        if name == "stdout":
+                            stdout_overflow.set()
+                        else:
+                            stderr_overflow.set()
+        except Exception as exc:  # pragma: no cover - defensive OS pipe failure
+            reader_errors.append(exc)
+
+    threads = [
+        threading.Thread(target=drain, args=("stdout", process.stdout), daemon=True),
+        threading.Thread(target=drain, args=("stderr", process.stderr), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    timed_out = False
+    while process.poll() is None:
+        if stdout_overflow.is_set():
+            try:
+                process.kill()
+            except OSError:  # pragma: no cover - child exited between poll and kill
+                pass
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            try:
+                process.kill()
+            except OSError:  # pragma: no cover - child exited between poll and kill
+                pass
+            break
+        stdout_overflow.wait(min(0.05, remaining))
+    process.wait()
+    for thread in threads:
+        thread.join(timeout=2)
+    if reader_errors:
+        raise reader_errors[0]
+    if timed_out:
+        raise subprocess.TimeoutExpired(list(argv), timeout)
+    return {
+        "returncode": process.returncode,
+        "stdout": bytes(buffers["stdout"]),
+        "stderr": bytes(buffers["stderr"]),
+        "stdout_overflow": stdout_overflow.is_set(),
+        "stderr_overflow": stderr_overflow.is_set(),
+    }
 
 
 def run_bzrk(args, timeout=DEFAULT_TIMEOUT):
     """Run the bzrk CLI with the given argument list. Returns (text, is_error)."""
+    if _RESOLVED_BZRK_BIN is None:
+        return (
+            f"error: '{_BZRK_BIN_CONFIG}' not found on PATH. Install the Berserk CLI or set "
+            "BZRK_BIN to its full path."
+        ), True
     try:
-        p = subprocess.run(
-            [BZRK_BIN] + args, capture_output=True, text=True, timeout=timeout
-        )
-        out = (p.stdout or "").strip()
-        err = (p.stderr or "").strip()
+        result = _run_argv_bounded([_RESOLVED_BZRK_BIN] + list(args), timeout)
+        out = result["stdout"].decode("utf-8", errors="replace").strip()
+        err = result["stderr"].decode("utf-8", errors="replace").strip()
         if err and _AUTH_FAILURE_RE.search(err):
             return AUTH_FAILURE_MESSAGE, True
-        if p.returncode != 0:
-            diagnostic = (out + "\n" + err).strip() or f"bzrk exited {p.returncode}"
-            if len(diagnostic) > MAX_BZRK_DIAGNOSTIC_CHARS:
+        if result["stdout_overflow"]:
+            return (
+                f"bzrk result exceeded BERSERK_MCP_MAX_RESULT_BYTES="
+                f"{MAX_BZRK_RESULT_BYTES}; narrow the time window, project fewer "
+                "columns, or add a smaller take/top/tail bound."
+            ), True
+        if result["returncode"] != 0:
+            diagnostic = (out + "\n" + err).strip() or f"bzrk exited {result['returncode']}"
+            if len(diagnostic) > MAX_BZRK_DIAGNOSTIC_CHARS or result.get("stderr_overflow"):
                 diagnostic = diagnostic[:MAX_BZRK_DIAGNOSTIC_CHARS] + "\n...[truncated]"
             return diagnostic, True
         return (out or "(no rows)"), False
     except FileNotFoundError:
         return (
-            f"error: '{BZRK_BIN}' not found on PATH. Install the Berserk CLI or set "
+            f"error: '{_BZRK_BIN_CONFIG}' not found on PATH. Install the Berserk CLI or set "
             f"BZRK_BIN to its full path."
         ), True
     except subprocess.TimeoutExpired:
@@ -990,6 +1013,7 @@ def valid_since(s):
 # the query (e.g. a stray "--profile x"), silently changing what runs. Require
 # every query to actually start with the configured table.
 _KQL_PREFIX_RE = re.compile(r"^\s*" + re.escape(TABLE) + r"\b")
+_KQL_CONTROL_RE = re.compile(r"^\s*\.")
 
 
 _BZRK_TIMEOUT_TEXT_RE = re.compile(r"^bzrk timed out after ", re.IGNORECASE)
@@ -998,10 +1022,15 @@ _BZRK_TIMEOUT_TEXT_RE = re.compile(r"^bzrk timed out after ", re.IGNORECASE)
 def bzrk_search(kql, since, extra=None):
     """Run a KQL search on the configured profile and time window. `extra` adds
     trailing CLI flags (e.g. ['--json']) without duplicating the guards."""
-    if not _KQL_PREFIX_RE.match(str(kql)):
+    query = str(kql)
+    if ";" in query:
+        return "invalid KQL: semicolons are not allowed in user queries", True
+    if _KQL_CONTROL_RE.match(query):
+        return "invalid KQL: control commands are not allowed in user queries", True
+    if not _KQL_PREFIX_RE.match(query):
         return (
             f"invalid KQL: query must start with '{TABLE} | ...' "
-            f"(got: {str(kql)[:40]!r})"
+            f"(got: {query[:40]!r})"
         ), True
     if not valid_since(since):
         return (
@@ -1014,26 +1043,23 @@ def bzrk_search(kql, since, extra=None):
         timeout = _window_budget(_FLEET_CONTEXT.get("budget"), since)
         tool_name = _FLEET_CONTEXT.get("tool")
     effective_timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
-    acquired = _query_semaphore_acquire(effective_timeout)
-    if not acquired:
-        return (
-            "Local MCP query queue is full. Retry later, use a narrower 'since' "
-            "window, or raise BERSERK_MCP_MAX_CONCURRENT_QUERIES if this process "
-            "is intentionally serving more parallel callers.",
-            True,
-        )
-    try:
+    with _query_semaphore_slot(effective_timeout) as acquired:
+        if not acquired:
+            return (
+                "Local MCP query queue is full. Retry later, use a narrower 'since' "
+                "window, or raise BERSERK_MCP_MAX_CONCURRENT_QUERIES if this process "
+                "is intentionally serving more parallel callers.",
+                True,
+            )
         if timeout is None:
             out, is_err = run_bzrk(
-                ["-P", PROFILE, "search", kql, "--since", since] + list(extra or [])
+                ["-P", PROFILE, "search", query, "--since", since] + list(extra or [])
             )
         else:
             out, is_err = run_bzrk(
-                ["-P", PROFILE, "search", kql, "--since", since] + list(extra or []),
+                ["-P", PROFILE, "search", query, "--since", since] + list(extra or []),
                 timeout=timeout,
             )
-    finally:
-        _query_semaphore_release(acquired)
     if is_err and _BZRK_TIMEOUT_TEXT_RE.match(str(out or "")) and tool_name:
         return (
             f"{tool_name} exceeded its {timeout:g}s query budget for window {since!r}. "
@@ -1171,7 +1197,7 @@ def _format_validation_warnings(report):
 
 
 def _query_semaphore_acquire(timeout):
-    if KQL_VALIDATION_MODE == "off" or _QUERY_SEMAPHORE is None:
+    if _QUERY_SEMAPHORE is None:
         return True
     try:
         wait = max(0.0, float(timeout if timeout is not None else DEFAULT_TIMEOUT))
@@ -1183,6 +1209,15 @@ def _query_semaphore_acquire(timeout):
 def _query_semaphore_release(acquired):
     if acquired and _QUERY_SEMAPHORE is not None:
         _QUERY_SEMAPHORE.release()
+
+
+@contextmanager
+def _query_semaphore_slot(timeout):
+    acquired = _query_semaphore_acquire(timeout)
+    try:
+        yield acquired
+    finally:
+        _query_semaphore_release(acquired)
 
 
 def _parser_static_validation(kql, since):
@@ -1200,30 +1235,12 @@ def _parser_schema_context():
 
 # ---------- learned-query store ----------
 def load_learned():
-    try:
-        safe = _validate_store_path(LEARNED_PATH, "LEARNED_PATH")
-    except StorePathError as e:
-        log(f"load_learned refused: {e}")
-        return []
-    try:
-        with open(safe, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, list) else []
-    except FileNotFoundError:
-        return []
-    except (OSError, json.JSONDecodeError) as e:
-        log(f"load_learned({safe}): {type(e).__name__}: {e}")
-        return []
+    return _store.load_json_list(LEARNED_PATH, logger=log)
 
 
 def save_learned(items):
-    safe = _validate_store_path(LEARNED_PATH, "LEARNED_PATH")
-    _ensure_private_dir(safe)
-    tmp = _unique_tmp_path(safe)
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(items, f, indent=2)
-    os.chmod(tmp, 0o600)
-    _atomic_replace(tmp, safe)
+    _validate_store_path(LEARNED_PATH, "LEARNED_PATH")
+    return _store.save_json_list(LEARNED_PATH, items, logger=log)
 
 
 def sanitize_name(n):
@@ -1379,7 +1396,11 @@ ai_finops.configure(
     search=bzrk_search_json,
     table=TABLE,
     redact=lambda text: secret_scan.redact(
-        text, include_entropy=True, pii_types=secret_scan.ALL_PII_TYPES,
+        text, include_entropy=False, pii_types=secret_scan.ALL_PII_TYPES,
+    )[0],
+    redact_aggressive=lambda text: secret_scan.redact(
+        text, include_entropy=FINOPS_REDACT_ENTROPY,
+        pii_types=secret_scan.ALL_PII_TYPES,
     )[0],
     catalog_path=FINOPS_PRICING_CATALOG_PATH,
     business_store_path=FINOPS_BUSINESS_STORE_PATH,
@@ -1442,44 +1463,44 @@ TOOLS = [
     {"name": "host_cpu", "description": "Average CPU load (1-minute load average) per host. Use for per-host CPU AND as the DEFAULT for ambiguous whole-machine questions — 'the box', 'the system', 'the server', 'the machine', 'what's hammering/running hot' are about the hosts, not containers (top_cpu is per-CONTAINER).", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "host_memory", "description": "Used memory in GB per host. Use for per-host memory AND as the DEFAULT for ambiguous whole-machine memory questions ('the box', 'the system', 'the server') — these are about the hosts, not containers (top_memory is per-CONTAINER).", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "container_hosts", "description": "Map each container to the host/VM it runs on. Use to answer 'which host runs container X' or to JOIN per-container metrics (top_cpu/top_memory) with per-host metrics (host_cpu/host_memory) — don't infer the host from the container's name.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "logs_for_service", "description": "Recent log lines for a specific service e.g. 'nginx', 'postgres'. Use for 'show me the errors/logs from X' — returns actual log text. For error COUNTS across all services, use errors_by_service first, then drill into a specific service here.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "service.name value"}}, **_since()), "required": ["service"]}},
+    {"name": "logs_for_service", "description": "Recent log lines for a specific service e.g. 'nginx', 'postgres'. Use for 'show me the errors/logs from X' — returns actual log text. For error COUNTS across all services, use errors_by_service first, then drill into a specific service here.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "service.name value"}}, **_since()), "required": ["service"]}},
     {"name": "schema", "description": "Show Berserk tables + column schema (live introspection).", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "list_metrics", "description": "List every metric name currently being ingested, with sample counts + last-seen. Use to DISCOVER what telemetry exists before writing a `search` query.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "bzrk_query_perf", "description": "Berserk query engine latency percentiles: p50, p95, p99 in µs. Use for 'how fast is Berserk?', 'query latency', or 'p50/p95/p99 execution time'. Uses otel_histogram_percentile($raw, N) — the native Berserk histogram aggregate.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "discover_schema", "description": "Discover the shape of a data source: returns (1) every key present under `resource` with row counts, AND (2) a small structural sample with resource/attribute keys and body/metric presence flags. It never exports raw resource, attributes, or body values. Use to learn an unknown or newly-ingested source before querying it. Optional `service` filter. Pair with list_services / list_metrics. Once you work out a query with `search`, persist it with save_query so it becomes reusable.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "optional: limit to one service.name"}}, **_since())}},
+    {"name": "discover_schema", "description": "Discover the shape of a data source: returns (1) every key present under `resource` with row counts, AND (2) a small structural sample with resource/attribute keys and body/metric presence flags. It never exports raw resource, attributes, or body values. Use to learn an unknown or newly-ingested source before querying it. Optional `service` filter. Pair with list_services / list_metrics. Once you work out a query with `search`, persist it with save_query so it becomes reusable.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "optional: limit to one service.name"}}, **_since())}},
     {"name": "validate_kql", "roles": ["sre", "soc", "claude", "ops"], "description": "Validate custom Berserk KQL before saving or running it. Static mode does not contact Berserk except for cached schema context; live mode is opt-in, executes a bounded read-only query, and may consume query budget.", "inputSchema": {"type": "object", "properties": dict({"kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'."}, "mode": {"type": "string", "enum": ["static", "live"], "default": "static"}, "use_schema": {"type": "boolean", "default": True, "description": "Use cached/discovered schema for unknown-field checks."}}, **_since()), "required": ["kql"]}},
     {"name": "search", "description": "Run an arbitrary Kusto/KQL query against the Berserk table. Use when the other tools do not fit; once it works, persist it with save_query. Fields are nested OTLP resource/log attributes, NOT flat columns — access as resource['service.name'], resource['host.name'], attributes['systemd.unit'], etc. (bare service_name/host_name do not exist and silently match zero rows instead of erroring). If you don't already know the exact field names for this source, call discover_schema first instead of guessing.", "inputSchema": {"type": "object", "properties": dict({"kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'. Field access is resource['key'] / attributes['key'], never a bare column name."}}, **_since()), "required": ["kql"]}},
-    {"name": "detect_anomalies", "roles": ["sre", "soc"], "description": "Statistical anomaly detection for service event volume over time. Uses zero-filled make-series and series_decompose_anomalies; use for 'is anything behaving abnormally?' rather than guessing a threshold. Optional service filter.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "optional service.name filter"}}, **_since())}},
-    {"name": "find_similar", "roles": ["sre", "soc"], "description": "Find log messages by meaning rather than exact text, for example 'database timeouts' or 'authentication failures'. Semantic indexing must be enabled on the Berserk cluster; use search with has for exact terms. Optional service filter and k (1-50).", "inputSchema": {"type": "object", "properties": dict({"description": {"type": "string", "maxLength": 500, "description": "natural-language description; quotes, pipes, backslashes, and backticks are rejected"}, "service": {"type": "string", "description": "optional service.name filter"}, "k": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10}}, **_since()), "required": ["description"]}},
+    {"name": "detect_anomalies", "roles": ["sre", "soc"], "description": "Statistical anomaly detection for service event volume over time. Uses zero-filled make-series and series_decompose_anomalies; use for 'is anything behaving abnormally?' rather than guessing a threshold. Optional service filter.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "optional service.name filter"}}, **_since())}},
+    {"name": "find_similar", "roles": ["sre", "soc"], "description": "Find log messages by meaning rather than exact text, for example 'database timeouts' or 'authentication failures'. Semantic indexing must be enabled on the Berserk cluster; use search with has for exact terms. Optional service filter and k (1-50).", "inputSchema": {"type": "object", "properties": dict({"description": {"type": "string", "maxLength": 500, "description": "natural-language description; quotes, pipes, backslashes, backticks, and controls are rejected"}, "service": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "optional service.name filter"}, "k": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10}}, **_since()), "required": ["description"]}},
     # --- Trace tools (span-level latency/error triage; UNVERIFIED field names — see the
     # comment above Q_TRACE_FIND_SLOW. Descriptions below flag this to the model too.) ---
     {"name": "trace_find_slow", "description": "Find the highest-duration root spans in the time window. Use for 'what's slow', 'find the slowest requests', or as the entry point before trace_analyze.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "trace_find_errors", "description": "Find spans whose status indicates an error. Use for 'which requests failed' or as the entry point before trace_analyze.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "trace_analyze", "description": "Full breakdown of one trace by trace_id — every span in time order plus correlated log lines from the same trace_id. Use after trace_find_slow/trace_find_errors surface a trace_id worth investigating.", "inputSchema": {"type": "object", "properties": {"trace_id": {"type": "string", "description": "trace_id from trace_find_slow/trace_find_errors/search"}}, "required": ["trace_id"]}},
+    {"name": "trace_analyze", "description": "Full breakdown of one trace by trace_id — every span in time order plus correlated log lines from the same trace_id. Use after trace_find_slow/trace_find_errors surface a trace_id worth investigating.", "inputSchema": {"type": "object", "properties": {"trace_id": {"type": "string", "maxLength": MAX_TRACE_ID_CHARS, "description": "trace_id from trace_find_slow/trace_find_errors/search"}}, "required": ["trace_id"]}},
     # --- SRE role tools (reliability, headroom, saturation, error rates, rollback signals) ---
     {"name": "sre_error_rate", "roles": ["sre"], "description": "SRE view of ERROR log events grouped by service and minute. Use for 'is the error rate climbing', 'which service is burning error budget', or 'what should we rollback first'.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "forecast_capacity", "roles": ["sre"], "description": "Forecast when an allowlisted host gauge may reach its ceiling using a native series fit. Use for 'when will memory fill?' or 'at this trend when does capacity run out?'. Refuses unreliable trends instead of inventing a date.", "inputSchema": {"type": "object", "properties": dict({"metric": {"type": "string", "enum": sorted(_FORECAST_METRICS)}, "host": {"type": "string", "description": "optional host.name filter"}}, **_since()), "required": ["metric"]}},
+    {"name": "forecast_capacity", "roles": ["sre"], "description": "Forecast when an allowlisted host gauge may reach its ceiling using a native series fit. Use for 'when will memory fill?' or 'at this trend when does capacity run out?'. Refuses unreliable trends instead of inventing a date.", "inputSchema": {"type": "object", "properties": dict({"metric": {"type": "string", "enum": sorted(_FORECAST_METRICS)}, "host": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "optional host.name filter"}}, **_since()), "required": ["metric"]}},
     {"name": "sre_host_headroom", "roles": ["sre"], "description": "SRE view of host CPU load and memory used side-by-side. Use for 'which host is hottest', 'where is headroom lowest', or 'which VM is nearest saturation'.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "sre_ingest_health", "roles": ["sre"], "description": "SRE view of Berserk ingest lag and dropped-data signals per host. Use for 'is ingest healthy', 'are we dropping telemetry', or 'is observability lagging'.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "sre_service_health", "roles": ["sre"], "description": "SRE health rollup for one service: total events, error count, logs, metrics, last seen. Use for 'is service X healthy' or 'rollback signal for X'.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "service.name value"}}, **_since()), "required": ["service"]}},
+    {"name": "sre_service_health", "roles": ["sre"], "description": "SRE health rollup for one service: total events, error count, logs, metrics, last seen. Use for 'is service X healthy' or 'rollback signal for X'.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "service.name value"}}, **_since()), "required": ["service"]}},
     {"name": "sre_top_error_messages", "roles": ["sre"], "description": "SRE summary of the most repeated error messages by service. Use for 'what error is dominating', 'top error signatures', or 'which message to investigate first'.", "inputSchema": {"type": "object", "properties": _since()}},
     # --- SOC role tools (anomalies, spikes, first-seen, repeated failures, incident timelines) ---
     {"name": "soc_high_severity_logs", "roles": ["soc"], "description": "SOC view of recent CRITICAL/FATAL/ERROR logs with service and message text. Use for 'show critical events', 'recent incident logs', or 'what looks severe right now'.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "soc_log_spike", "roles": ["soc"], "description": "SOC view of services with the largest log volume per minute. Use for 'anything anomalous', 'which source is spiking', or 'suspicious burst of logs'.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "soc_new_services", "roles": ["soc"], "description": "SOC view of services ordered by first-seen time. Use for 'what is new', 'anything first-seen', or 'did a new source appear'.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "soc_repeated_errors", "roles": ["soc"], "description": "SOC view of error messages that appear more than 5 times — potential probes, loops, or persistent incidents. Use for 'what keeps repeating' or 'show recurring failures'.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "soc_timeline", "roles": ["soc"], "description": "SOC incident timeline for one service: timestamps, severity, metric names, and message snippets. Use for 'timeline for service X' or 'reconstruct incident for X'.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "description": "service.name value"}}, **_since()), "required": ["service"]}},
+    {"name": "soc_timeline", "roles": ["soc"], "description": "SOC incident timeline for one service: timestamps, severity, metric names, and message snippets. Use for 'timeline for service X' or 'reconstruct incident for X'.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "service.name value"}}, **_since()), "required": ["service"]}},
     # --- Claude Code activity (service.name == 'claude-code'); low-volume, keep windows bounded ---
     {"name": "claude_recent", "roles": ["claude"], "description": "Recent Claude Code activity (timestamp, type, role, model, tool names, error flag), newest first. Default window 1h.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "claude_sessions", "roles": ["claude"], "description": "Claude Code sessions rollup: events, first/last seen, assistant turns, tool turns, and error count per session. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "claude_tools", "roles": ["claude"], "description": "Claude Code tool-use histogram — how many times each tool (Bash, Edit, Read, ...) was used. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "claude_errors", "roles": ["claude"], "description": "Claude Code tool errors — failed tool results (is_error=true) with a body snippet. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "claude_search", "roles": ["claude"], "description": "Full-text search across Claude Code message and tool bodies for a substring. Default 6h.", "inputSchema": {"type": "object", "properties": dict({"term": {"type": "string", "description": "substring to find; may not contain quotes, pipe, backslash, or backtick"}}, **_since()), "required": ["term"]}},
+    {"name": "claude_search", "roles": ["claude"], "description": "Full-text search across Claude Code message and tool bodies for a substring. Default 6h.", "inputSchema": {"type": "object", "properties": dict({"term": {"type": "string", "maxLength": MAX_SEARCH_TERM_CHARS, "description": "substring to find; may not contain quotes, pipe, backslash, backtick, or controls"}}, **_since()), "required": ["term"]}},
     {"name": "claude_loop_check", "roles": ["claude"], "description": "Claude Code loop detector. Heuristically flags sessions that repeat the same tool/target, retry errors, or oscillate between the same calls. Bodies are truncated; output is diagnostic, not raw transcript replay. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "claude_model_fit", "roles": ["claude"], "description": "Claude Code model-fit heuristic. Uses observed tool count, errors, duration, and loop signals to flag frontier models on trivial work or cheap models on complex/repetitive work. Not a billing statement. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "claude_token_burn", "roles": ["claude"], "description": "Claude Code token-burn analysis. Uses exact claude.tokens_input/output usage when present, falls back to a labeled body-length estimate per session, computes burn per distinct tool/file target, and joins high burn with loop signals. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "claude_cost_report", "roles": ["claude"], "description": "Claude Code multi-day cost report: per-day token burn with exact/estimated labeling, per-model split, optional per-project attribution from file paths, and a burn-growing/flat/declining trend verdict. Default 7d.", "inputSchema": {"type": "object", "properties": dict({"group_by": {"type": "string", "enum": ["day", "model", "project"], "description": "Aggregation: by day (default), model, or inferred project."}}, **_since())}},
-    {"name": "claude_session_deep_dive", "roles": ["claude"], "description": "Timeline drilldown for one Claude Code session: contiguous tool phases with error counts, activity gaps over 5 minutes, cumulative token burn (exact/estimated), and a loop verdict. Requires session_id (find them via claude_sessions).", "inputSchema": {"type": "object", "properties": dict({"session_id": {"type": "string", "description": "claude.session_id value"}}, **_since()), "required": ["session_id"]}},
+    {"name": "claude_session_deep_dive", "roles": ["claude"], "description": "Timeline drilldown for one Claude Code session: contiguous tool phases with error counts, activity gaps over 5 minutes, cumulative token burn (exact/estimated), and a loop verdict. Requires session_id (find them via claude_sessions).", "inputSchema": {"type": "object", "properties": dict({"session_id": {"type": "string", "maxLength": agent_analytics.MAX_SESSION_ID_CHARS, "description": "claude.session_id value"}}, **_since()), "required": ["session_id"]}},
     {"name": "claude_workflow_insights", "roles": ["claude"], "description": "Cross-session Claude Code workflow patterns: most common tool sequences, error hotspots by tool+target, and top-decile burn-per-target sessions. Use for 'how is my agent working overall?'. Default 7d.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "claude_spend_overview", "roles": ["claude"], "description": "Enterprise Claude spend overview using exact native/legacy token classes and a versioned public pricing catalog. Groups by day, team, portfolio, project, repository, feature, work item, agent, harness, or model and always reports pricing/attribution coverage.", "inputSchema": {"type": "object", "properties": {"since": _since()["since"], "group_by": {"type": "string", "enum": ["day", "team", "portfolio", "project", "repository", "feature", "work_item", "agent", "harness", "model"], "default": "day"}, "team": {"type": "string"}, "project": {"type": "string"}, "repository": {"type": "string"}, "feature": {"type": "string"}, "agent": {"type": "string"}, "harness": {"type": "string"}, "model": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}}}},
     {"name": "claude_feature_cost", "roles": ["claude"], "description": "Feature delivery economics: planned/actual developer hours, planned/actual AI API-equivalent cost, forecast, attribution, and delivery signals for one governed feature.", "inputSchema": {"type": "object", "properties": {"feature_id": {"type": "string"}, "since": _since()["since"]}, "required": ["feature_id"]}},
@@ -1498,10 +1519,10 @@ MGMT_TOOLS = [
     {"name": "list_saved", "description": "List previously-saved custom queries (name + description). For a non-standard question, CHECK HERE FIRST before writing new KQL.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "run_saved", "description": "Run a previously-saved query by name (see list_saved). Deterministic - no KQL authoring.", "inputSchema": {"type": "object", "properties": dict({"name": {"type": "string", "description": "saved query name"}}, **_since()), "required": ["name"]}},
     {"name": "save_query", "description": "Persist a WORKING KQL query as a reusable named query so it never has to be figured out again. Call this after you answer a non-standard question with a custom search query. The query is run once to verify it works; if it errors it is NOT saved. Replacing an existing saved query of the same name requires overwrite=true.", "inputSchema": {"type": "object", "properties": dict({"name": {"type": "string", "description": "short snake_case name"}, "description": {"type": "string", "description": "what the query answers"}, "kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'"}, "roles": {"type": ["array", "string"], "description": "optional role(s) this query serves: sre, soc, claude, ops"}, "overwrite": {"type": "boolean", "description": "must be true to replace an existing saved query of the same name"}}, **_since()), "required": ["name", "description", "kql"]}},
-    {"name": "request_discovery", "description": "Queue a newly-added service or metric for author-lane integration. Validates the source is currently visible in Berserk, then records a job for the discovery worker to drain. Use when a user says 'I added / connected / started shipping SOURCE'.", "inputSchema": {"type": "object", "properties": {"service": {"type": "string", "description": "service.name to integrate"}, "metric": {"type": "string", "description": "metric name to integrate"}, "role_hint": {"type": "string", "description": "optional target role: sre, soc, claude, ops"}, "requested_by": {"type": "string", "description": "optional requester label"}, **_since()}}},
+    {"name": "request_discovery", "description": "Queue a newly-added service or metric for author-lane integration. Validates the source is currently visible in Berserk, then records a job for the discovery worker to drain. Use when a user says 'I added / connected / started shipping SOURCE'.", "inputSchema": {"type": "object", "properties": {"service": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "service.name to integrate"}, "metric": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "metric name to integrate"}, "role_hint": {"type": "string", "description": "optional target role: sre, soc, claude, ops"}, "requested_by": {"type": "string", "description": "optional requester label"}, **_since()}}},
     {"name": "discovery_status", "description": "List pending and completed discovery jobs for new services or metrics.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "detect_new_sources", "description": "Scan Berserk for services/metrics never seen before (and optionally schema drift on known ones). Use for 'anything new reporting?', or run with auto_queue=true to queue newcomers for parser generation.", "inputSchema": {"type": "object", "properties": {"since": {"type": "string", "description": "Time window e.g. '24h ago'."}, "auto_queue": {"type": "boolean", "description": "queue newly-detected sources for parser generation"}, "check_drift": {"type": "boolean", "description": "also check known services for resource-key schema drift"}}}},
-    {"name": "generate_parser", "description": "Generate and verify a query pack for one source right now (synchronous; may take minutes). An LLM authors 2-4 KQL queries from a live schema profile, validates each against Berserk, and saves the survivors. Requires at least one configured LLM provider (HERMES_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY).", "inputSchema": {"type": "object", "properties": {"service": {"type": "string", "description": "service.name to generate a parser for"}, "metric": {"type": "string", "description": "metric_name to generate a parser for"}, "role_hint": {"type": "string", "description": "optional target role: sre, soc, claude, ops"}}}},
+    {"name": "generate_parser", "description": "Generate and verify a query pack for one source right now (synchronous; may take minutes). An LLM authors 2-4 KQL queries from a live schema profile, validates each against Berserk, and saves the survivors. Requires at least one configured LLM provider (HERMES_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY).", "inputSchema": {"type": "object", "properties": {"service": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "service.name to generate a parser for"}, "metric": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "metric_name to generate a parser for"}, "role_hint": {"type": "string", "description": "optional target role: sre, soc, claude, ops"}}}},
     {"name": "run_discovery_worker", "description": "Drain queued discovery jobs: for each one, an LLM authors a verified query pack for the new source. Requires at least one configured LLM provider; may take minutes per job.", "inputSchema": {"type": "object", "properties": {"max_jobs": {"type": "integer", "description": "max jobs to process this call, default 1, capped at 5"}}}},
     {"name": "review_generated", "description": "List or inspect LLM-generated saved queries for audit before trusting them. No arg: list all generated queries with their provider/model/timestamp. With name: full entry including the KQL.", "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "description": "optional: a specific generated query name to inspect in full"}}}},
 ]
@@ -1748,7 +1769,7 @@ def _handle_call_uncached(name, arguments):
         if bool(service) == bool(metric):
             return "request_discovery needs exactly one of 'service' or 'metric'.", True
         target = service or metric
-        if not re.match(r"^[A-Za-z0-9._-]+$", target):
+        if not _valid_interpolated_name(target):
             return "invalid source name (allowed: letters, digits, '.', '_', '-')", True
         kind = "service" if service else "metric"
         since = arguments.get("since") or "1h ago"
@@ -1814,7 +1835,7 @@ def _handle_call_uncached(name, arguments):
         if bool(service) == bool(metric):
             return "generate_parser needs exactly one of 'service' or 'metric'.", True
         target = service or metric
-        if not re.match(r"^[A-Za-z0-9._-]+$", target):
+        if not _valid_interpolated_name(target):
             return "invalid source name (allowed: letters, digits, '.', '_', '-')", True
         kind = "service" if service else "metric"
         role_hint = normalize_roles(arguments.get("role_hint"))
@@ -1882,15 +1903,12 @@ def _handle_call_uncached(name, arguments):
             argv = ["-P", PROFILE, "search", str(kql), "--since", since]
             if KQL_STATS_MODE != "off":
                 argv.append("--stats")
-            acquired = _query_semaphore_acquire(budget)
-            if not acquired:
-                return "Local MCP query queue is full; retry later or narrow the time window.", True
             start = time.monotonic()
-            try:
+            with _query_semaphore_slot(budget) as acquired:
+                if not acquired:
+                    return "Local MCP query queue is full; retry later or narrow the time window.", True
                 out, err = run_bzrk(argv, timeout=budget)
-            finally:
-                duration_ms = int((time.monotonic() - start) * 1000)
-                _query_semaphore_release(acquired)
+            duration_ms = int((time.monotonic() - start) * 1000)
             stats = kql_validation.parse_cli_stats(out if not err else "")
             runtime = {
                 "duration_ms": duration_ms,
@@ -1919,7 +1937,7 @@ def _handle_call_uncached(name, arguments):
 
     if name == "detect_anomalies":
         service = str(arguments.get("service") or "").strip()
-        if service and not _SERVICE_RE.match(service):
+        if service and not _valid_interpolated_name(service):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "6h ago"
         out, err = bzrk_search(q_detect_anomalies(service or None), since)
@@ -1934,7 +1952,7 @@ def _handle_call_uncached(name, arguments):
         if metric not in _FORECAST_METRICS:
             return "metric is not allowlisted; use system.memory.usage, system.filesystem.usage, or system.disk.io", True
         host = str(arguments.get("host") or "").strip()
-        if host and not _SERVICE_RE.match(host):
+        if host and not _valid_interpolated_name(host):
             return "invalid host name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "7d ago"
         out, err = bzrk_search_json(q_forecast_capacity(metric, host or None), since)
@@ -1975,7 +1993,7 @@ def _handle_call_uncached(name, arguments):
         if _TEXT_GUARD_RE.search(description):
             return "description may not contain quotes, pipe, backslash, or backtick", True
         service = str(arguments.get("service") or "").strip()
-        if service and not _SERVICE_RE.match(service):
+        if service and not _valid_interpolated_name(service):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         try:
             k = max(1, min(50, int(arguments.get("k", 10))))
@@ -2033,7 +2051,7 @@ def _handle_call_uncached(name, arguments):
         return do_schema()
     if name == "discover_schema":
         svc = arguments.get("service")
-        if svc and not re.match(r"^[A-Za-z0-9._-]+$", str(svc)):
+        if svc and not _valid_interpolated_name(svc):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "1h ago"
         svc_str = str(svc) if svc else None
@@ -2047,7 +2065,7 @@ def _handle_call_uncached(name, arguments):
         svc = arguments.get("service")
         if not svc:
             return "missing required 'service'", True
-        if not re.match(r"^[A-Za-z0-9._-]+$", str(svc)):
+        if not _valid_interpolated_name(svc):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "1h ago"
         return bzrk_search(q_logs(str(svc)), since)
@@ -2055,7 +2073,7 @@ def _handle_call_uncached(name, arguments):
         svc = arguments.get("service")
         if not svc:
             return "missing required 'service'", True
-        if not re.match(r"^[A-Za-z0-9._-]+$", str(svc)):
+        if not _valid_interpolated_name(svc):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "1h ago"
         return bzrk_search(q_sre_service_health(str(svc)), since)
@@ -2063,7 +2081,7 @@ def _handle_call_uncached(name, arguments):
         svc = arguments.get("service")
         if not svc:
             return "missing required 'service'", True
-        if not re.match(r"^[A-Za-z0-9._-]+$", str(svc)):
+        if not _valid_interpolated_name(svc):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "6h ago"
         return bzrk_search(q_soc_timeline(str(svc)), since)
@@ -2071,7 +2089,8 @@ def _handle_call_uncached(name, arguments):
         trace_id = arguments.get("trace_id")
         if not trace_id:
             return "missing required 'trace_id'", True
-        if not re.match(r"^[A-Za-z0-9]+$", str(trace_id)):
+        if (len(str(trace_id)) > MAX_TRACE_ID_CHARS
+                or not _TRACE_ID_RE.fullmatch(str(trace_id))):
             return "invalid trace_id (allowed: letters and digits only)", True
         # No time window on either half: a trace_id already scopes the query
         # tightly, and the trace could be older than any reasonable default
@@ -2101,7 +2120,9 @@ def _handle_call_uncached(name, arguments):
         term = arguments.get("term")
         if not term:
             return "missing required 'term'", True
-        if re.search(r"['\"|\\`]", str(term)):
+        if len(str(term)) > MAX_SEARCH_TERM_CHARS:
+            return f"term is too long (maximum {MAX_SEARCH_TERM_CHARS} characters)", True
+        if _TEXT_GUARD_RE.search(str(term)):
             return "term may not contain quotes, pipe, backslash, or backtick", True
         since = arguments.get("since") or "6h ago"
         return bzrk_search(q_cc_search(str(term)), since)
@@ -2667,21 +2688,23 @@ def _post_discord_alert(text):
     if not text:
         return False
     try:
-        parser_factory._validate_llm_url(DISCORD_ALERT_URL)
-    except parser_factory.LlmUrlError as e:
+        _http.validate_http_url(DISCORD_ALERT_URL, label="discord alert endpoint")
+    except _http.UrlPolicyError as e:
         log(f"discord alert: endpoint rejected: {e}")
         return False
     payload = json.dumps({"text": text[:DISCORD_ALERT_MAX_CHARS]}).encode("utf-8")
-    req = urllib.request.Request(
-        DISCORD_ALERT_URL, data=payload, method="POST",
-        headers={
+    try:
+        status = _http.post_bytes_status(
+            DISCORD_ALERT_URL,
+            {
             "Content-Type": "application/json",
             "X-Auth-Token": DISCORD_ALERT_SECRET,
-        },
-    )
-    try:
-        with parser_factory._NO_REDIRECT_OPENER.open(req, timeout=10) as resp:
-            return 200 <= resp.status < 300
+            },
+            payload,
+            timeout=10,
+            label="discord alert endpoint",
+        )
+        return 200 <= status < 300
     except urllib.error.HTTPError as e:
         code = e.code
         e.close()

@@ -9,13 +9,13 @@ stored.
 import difflib
 import hashlib
 import json
-import os
 import re
-import tempfile
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+import _store
 
 
 DEFAULT_TTL_SECONDS = 3600
@@ -222,27 +222,12 @@ def _cache_file(config_dir, table):
 
 
 def _read_cache(path):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else None
-    except (OSError, ValueError, json.JSONDecodeError):
-        return None
+    data = _store.load_json_dict(path)
+    return data or None
 
 
 def _write_cache(path, snapshot):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=Path(path).name + ".", suffix=".tmp", dir=str(Path(path).parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(snapshot, f, indent=2, sort_keys=True)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+    _store.atomic_write_json(path, snapshot, private=True, sort_keys=True)
 
 
 def _fresh(snapshot, ttl_seconds):

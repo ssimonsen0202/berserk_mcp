@@ -31,12 +31,14 @@ import statistics
 import subprocess
 import sys
 import time
-import urllib.request
 import urllib.error
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SERVER = HERE.parent / "berserk_mcp.py"
+sys.path.insert(0, str(HERE.parent))
+
+import _http  # noqa: E402
 
 
 # ---------- MCP stdio handshake ----------
@@ -44,7 +46,7 @@ def get_mcp_tools_and_instructions():
     """Launch berserk_mcp.py, do the MCP handshake, return (tools, instructions)."""
     proc = subprocess.Popen(
         [sys.executable, str(SERVER)],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, bufsize=1,
     )
 
@@ -53,7 +55,19 @@ def get_mcp_tools_and_instructions():
         proc.stdin.flush()
 
     def recv():
-        return json.loads(proc.stdout.readline())
+        line = proc.stdout.readline()
+        if not line:
+            try:
+                _, stderr = proc.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                _, stderr = proc.communicate(timeout=2)
+            detail = str(stderr or "").strip()[:2000]
+            raise RuntimeError(
+                "MCP server exited before completing the handshake"
+                + (f": {detail}" if detail else "")
+            )
+        return json.loads(line)
 
     send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
           "params": {"protocolVersion": "2025-06-18", "capabilities": {},
@@ -65,9 +79,16 @@ def get_mcp_tools_and_instructions():
     tools = recv()["result"]["tools"]
     try:
         proc.stdin.close()
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
         proc.terminate()
-    except Exception:
-        pass
+        proc.wait(timeout=2)
+    finally:
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                stream.close()
+            except Exception:
+                pass
     return tools, instructions
 
 
@@ -84,12 +105,22 @@ def to_anthropic_tools(tools):
 
 # ---------- backends: return (tool_name, args, latency_s, usage) ----------
 def _post(url, headers, body, timeout=120):
-    req = urllib.request.Request(url, data=json.dumps(body).encode(),
-                                 headers=headers, method="POST")
     t0 = time.time()
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = json.load(r)
+    data = _http.request_json(
+        url,
+        headers,
+        body,
+        timeout=timeout,
+        label="eval backend endpoint",
+    )
     return data, time.time() - t0
+
+
+def _http_error_message(error):
+    """Return a bounded credential-safe provider error without reading its body."""
+    code = error.code
+    error.close()
+    return f"HTTP {code} from backend"
 
 
 def call_openai_compatible(base_url, api_key, model, system, user, tools, tool_choice):
@@ -252,7 +283,7 @@ def main():
             try:
                 name, cargs, dt, usage = run_one(case["prompt"])
             except urllib.error.HTTPError as e:
-                sys.exit(f"\nHTTP {e.code} from backend: {e.read().decode()[:300]}")
+                sys.exit("\n" + _http_error_message(e))
             except Exception as e:
                 sys.exit(f"\nbackend call failed: {e}")
             tool_ok, arg_ok = score_case(case, name, cargs)

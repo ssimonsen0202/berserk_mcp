@@ -71,6 +71,30 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertFalse(err)
         self.assertEqual(self.calls[-1][3], f"{bm.TABLE} | take 1")
 
+    def test_execution_boundary_rejects_semicolons_in_every_validation_mode(self):
+        original = bm.KQL_VALIDATION_MODE
+        try:
+            for mode in ("off", "warn", "strict"):
+                for query in (
+                    f"{bm.TABLE} | take 1; .show tables",
+                    f"{bm.TABLE} | where body contains 'a;b' | take 1",
+                ):
+                    with self.subTest(mode=mode, query=query):
+                        bm.KQL_VALIDATION_MODE = mode
+                        self.calls.clear()
+                        text, err = bm.handle_call("search", {"kql": query})
+                        self.assertTrue(err)
+                        self.assertIn("semicolon", text.lower())
+                        self.assertEqual(self.calls, [])
+        finally:
+            bm.KQL_VALIDATION_MODE = original
+
+    def test_execution_boundary_rejects_control_command_directly(self):
+        text, err = bm.bzrk_search(".show tables", "15m ago")
+        self.assertTrue(err)
+        self.assertIn("control command", text)
+        self.assertEqual(self.calls, [])
+
     def test_since_various_valid(self):
         for s in ("now", "15m ago", "2 hours ago", "1d", "30 minutes ago", "3w ago"):
             self.calls.clear()
@@ -971,6 +995,47 @@ class BerserkMcpTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_validation_off_fresh_process_does_not_overrelease_semaphore(self):
+        env = dict(os.environ)
+        env["BERSERK_MCP_KQL_VALIDATION"] = "off"
+        code = (
+            "import json, berserk_mcp as b\n"
+            "b.run_bzrk=lambda args, timeout=b.DEFAULT_TIMEOUT: ('OK', False)\n"
+            "req={'jsonrpc':'2.0','id':1,'method':'tools/call','params':"
+            "{'name':'search','arguments':{'kql':'default | take 1'}}}\n"
+            "print(json.dumps(b.dispatch(req)))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True,
+            timeout=10, cwd=str(Path(bm.__file__).resolve().parent), env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        response = json.loads(result.stdout)
+        self.assertIn("result", response)
+        self.assertNotIn("error", response)
+
+    def test_semaphore_is_independent_of_validation_mode_and_balanced(self):
+        original_mode = bm.KQL_VALIDATION_MODE
+        original_semaphore = bm._QUERY_SEMAPHORE
+        try:
+            for mode in ("off", "warn", "strict"):
+                with self.subTest(mode=mode):
+                    bm.KQL_VALIDATION_MODE = mode
+                    semaphore = bm.threading.BoundedSemaphore(1)
+                    bm._QUERY_SEMAPHORE = semaphore
+                    for _ in range(5):
+                        with bm._query_semaphore_slot(0) as acquired:
+                            self.assertTrue(acquired)
+                    self.assertTrue(semaphore.acquire(timeout=0))
+                    semaphore.release()
+            bm._QUERY_SEMAPHORE = None
+            for _ in range(5):
+                with bm._query_semaphore_slot(0) as acquired:
+                    self.assertTrue(acquired)
+        finally:
+            bm.KQL_VALIDATION_MODE = original_mode
+            bm._QUERY_SEMAPHORE = original_semaphore
+
     # ---- F-009: default REDACT mode is fail-closed ----
     def _redact_mode_of_fresh_process(self, env_value=None):
         env = dict(os.environ)
@@ -1192,21 +1257,33 @@ class BerserkMcpTest(unittest.TestCase):
 class RunBzrkAuthTest(unittest.TestCase):
     """SEC-003: an exit-0 bzrk process with an auth failure on stderr must be
     treated as an error, not a successful empty result. Tests the real
-    run_bzrk() against a mocked subprocess.run, unlike BerserkMcpTest which
+    run_bzrk() against a mocked bounded runner, unlike BerserkMcpTest which
     monkeypatches run_bzrk itself and so never exercises this logic."""
 
     def setUp(self):
-        self._orig = subprocess.run
+        self._orig = bm._run_argv_bounded
+        self._orig_resolved = bm._RESOLVED_BZRK_BIN
         self.calls = []
+        bm._RESOLVED_BZRK_BIN = sys.executable
 
     def tearDown(self):
-        subprocess.run = self._orig
+        bm._run_argv_bounded = self._orig
+        bm._RESOLVED_BZRK_BIN = self._orig_resolved
 
     def _mock_run(self, returncode, stdout, stderr):
-        def fake(args, **kwargs):
+        def fake(args, timeout, stdout_cap=bm.MAX_BZRK_RESULT_BYTES,
+                 stderr_cap=bm.MAX_BZRK_DIAGNOSTIC_CHARS):
             self.calls.append(args)
-            return subprocess.CompletedProcess(args, returncode, stdout, stderr)
-        subprocess.run = fake
+            out = stdout.encode("utf-8")
+            err = stderr.encode("utf-8")
+            return {
+                "returncode": returncode,
+                "stdout": out[:stdout_cap],
+                "stderr": err[:stderr_cap],
+                "stdout_overflow": len(out) > stdout_cap,
+                "stderr_overflow": len(err) > stderr_cap,
+            }
+        bm._run_argv_bounded = fake
 
     def test_exit_zero_with_auth_error_on_stderr_returns_controlled_message(self):
         """DR-005: auth failure returns constant message, no raw stderr."""
@@ -1237,6 +1314,8 @@ class RunBzrkAuthTest(unittest.TestCase):
         text, is_err = bm.run_bzrk(["search", "default | take 1"])
         self.assertFalse(is_err)
         self.assertEqual(text, "(no rows)")
+        self.assertEqual(self.calls[0][0], bm._RESOLVED_BZRK_BIN)
+        self.assertTrue(Path(self.calls[0][0]).is_absolute())
 
     def test_exit_zero_harmless_warning_stderr_success(self):
         """DR-005: non-auth stderr warnings don't trigger auth failure."""
@@ -1276,15 +1355,74 @@ class RunBzrkAuthTest(unittest.TestCase):
         self.assertLessEqual(len(text), bm.MAX_BZRK_DIAGNOSTIC_CHARS + len("\n...[truncated]"))
         self.assertIn("truncated", text)
 
-    def test_large_successful_result_is_never_truncated(self):
-        """F-005: the diagnostic cap must never affect legitimate large
-        query RESULTS on a successful (returncode 0) run."""
+    def test_large_successful_result_below_result_cap_is_not_truncated(self):
+        """The diagnostic cap does not affect a result below the result cap."""
         huge_but_legitimate = "row\n" + "\n".join(f"val{i} {i}" for i in range(50000))
         self.assertGreater(len(huge_but_legitimate), bm.MAX_BZRK_DIAGNOSTIC_CHARS)
         self._mock_run(0, huge_but_legitimate, "")
         text, is_err = bm.run_bzrk(["search", "default | take 50000"])
         self.assertFalse(is_err)
         self.assertEqual(text, huge_but_legitimate)
+
+    def test_successful_result_above_cap_is_rejected(self):
+        huge = "x" * (bm.MAX_BZRK_RESULT_BYTES + 1)
+        self._mock_run(0, huge, "")
+        text, is_err = bm.run_bzrk(["search", "default | take 1"])
+        self.assertTrue(is_err)
+        self.assertIn("BERSERK_MCP_MAX_RESULT_BYTES", text)
+
+
+class BoundedProcessTest(unittest.TestCase):
+    def test_bounded_runner_preserves_output_below_limit(self):
+        result = bm._run_argv_bounded(
+            [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'hello')"],
+            timeout=5,
+            stdout_cap=32,
+        )
+        self.assertEqual(result["returncode"], 0)
+        self.assertEqual(result["stdout"], b"hello")
+        self.assertFalse(result["stdout_overflow"])
+        self.assertFalse(result["stderr_overflow"])
+
+    def test_bounded_runner_kills_and_reaps_on_overflow(self):
+        result = bm._run_argv_bounded(
+            [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x'*4096); sys.stdout.flush()"],
+            timeout=5,
+            stdout_cap=128,
+        )
+        self.assertTrue(result["stdout_overflow"])
+        self.assertLessEqual(len(result["stdout"]), 128)
+        self.assertIsInstance(result["returncode"], int)
+
+    def test_bounded_runner_times_out_and_reaps(self):
+        with self.assertRaises(subprocess.TimeoutExpired):
+            bm._run_argv_bounded(
+                [sys.executable, "-c", "import time; time.sleep(2)"],
+                timeout=0.05,
+                stdout_cap=128,
+            )
+
+
+class BinaryResolutionTest(unittest.TestCase):
+    def test_bare_windows_binary_resolving_inside_cwd_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            planted = Path(directory) / "bzrk.exe"
+            planted.write_bytes(b"not-an-executable")
+            with self.assertRaisesRegex(ValueError, "current working directory"):
+                bm._resolve_bzrk_binary(
+                    "bzrk", os_name="nt", which=lambda _: str(planted), cwd=directory,
+                )
+
+    def test_absolute_binary_outside_cwd_is_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            resolved = bm._resolve_bzrk_binary(
+                sys.executable, os_name="nt", which=lambda _: None, cwd=directory,
+            )
+        self.assertEqual(resolved, str(Path(sys.executable).resolve()))
+
+    def test_relative_binary_path_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "absolute path or a bare"):
+            bm._resolve_bzrk_binary("./tools/bzrk", which=lambda _: None)
 
 
 class RoleFilterTest(unittest.TestCase):

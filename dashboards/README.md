@@ -65,10 +65,15 @@ query window, pricing catalog, row count, and SHA-256 checksum for every
 dataset. Preserve the previous successful directory or ingest transactionally
 in the downstream BI platform if snapshot history is required.
 
+The output directory is an intentional publication boundary. berserk-mcp does
+not chmod or replace the ACL on an existing directory, and it preserves an
+existing POSIX file mode when replacing a file. Configure access for the BI
+service account as part of deployment.
+
 ## Claude Code snapshots
 
 `claude_generate_dashboard` and the matching CLI mode generate aggregate
 Markdown or self-contained HTML with inline SVG. Set
 `BERSERK_MCP_REPORT_DIR` to an absolute, access-controlled directory. Output
-filenames are simple basenames and cannot escape that directory.
-
+filenames are simple basenames and cannot escape that directory. Existing
+directory permissions remain operator-owned.

@@ -35,6 +35,39 @@ class KqlValidationTest(unittest.TestCase):
         self.assertFalse(r["valid"])
         self.assertIn("CONTROL_COMMAND", self.codes(r))
 
+    def test_semicolon_is_rejected_even_inside_a_string_literal(self):
+        for query in (
+            "default | take 1; default | take 1",
+            "default | where body contains 'a;b' | take 1",
+        ):
+            with self.subTest(query=query):
+                report = self.report(query)
+                self.assertFalse(report["valid"])
+                self.assertIn("MULTI_STATEMENT_USER_QUERY", self.codes(report))
+
+    def test_source_introducing_operators_are_blocked_outside_literals(self):
+        queries = {
+            "union": "default | union default | take 1",
+            "externaldata": "default | where value in (externaldata(x:string)['https://example.invalid']) | take 1",
+            "evaluate": "default | evaluate plugin() | take 1",
+            "find": "default | find withsource=s in (*) where body has 'x' | take 1",
+            "search": "default | search 'needle' | take 1",
+        }
+        for operator, query in queries.items():
+            with self.subTest(operator=operator):
+                report = self.report(query, schema_fields=None)
+                self.assertFalse(report["valid"])
+                self.assertIn("SOURCE_INTRODUCING_OPERATOR", self.codes(report))
+
+    def test_source_operator_words_inside_literals_do_not_trigger(self):
+        for query in (
+            "default | where body contains 'union externaldata evaluate find search' | take 1",
+            "default | where metric_name == 'x' // | union externaldata evaluate find search\n| take 1",
+        ):
+            with self.subTest(query=query):
+                report = self.report(query, schema_fields=None)
+                self.assertNotIn("SOURCE_INTRODUCING_OPERATOR", self.codes(report))
+
     def test_missing_and_oversized_bounds(self):
         self.assertIn("UNBOUNDED_RESULT", self.codes(self.report("default | where metric_name == 'x'")))
         self.assertIn(

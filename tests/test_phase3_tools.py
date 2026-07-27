@@ -50,6 +50,42 @@ class Phase3ToolsTest(unittest.TestCase):
                 self.assertTrue(is_err)
                 self.assertEqual(self.calls, [])
 
+    def test_control_characters_and_overlong_interpolated_inputs_are_rejected(self):
+        cases = (
+            ("find_similar", {"description": "timeout\nretry"}),
+            ("claude_search", {"term": "timeout\t"}),
+            ("claude_search", {"term": "x" * 501}),
+            ("trace_analyze", {"trace_id": "a" * 65}),
+            ("logs_for_service", {"service": "s" * 129}),
+            ("detect_anomalies", {"service": "s" * 129}),
+            ("forecast_capacity", {
+                "metric": "system.memory.usage", "host": "h" * 129,
+            }),
+            ("request_discovery", {"service": "s" * 129}),
+            ("generate_parser", {"service": "s" * 129}),
+        )
+        for name, args in cases:
+            with self.subTest(name=name):
+                self.calls.clear()
+                _, is_err = bm.handle_call(name, args)
+                self.assertTrue(is_err)
+                self.assertEqual(self.calls, [])
+
+    def test_interpolated_tool_schemas_publish_length_bounds(self):
+        tools = {tool["name"]: tool for tool in bm.TOOLS}
+        self.assertEqual(
+            tools["claude_search"]["inputSchema"]["properties"]["term"]["maxLength"],
+            bm.MAX_SEARCH_TERM_CHARS,
+        )
+        self.assertEqual(
+            tools["trace_analyze"]["inputSchema"]["properties"]["trace_id"]["maxLength"],
+            bm.MAX_TRACE_ID_CHARS,
+        )
+        self.assertEqual(
+            tools["logs_for_service"]["inputSchema"]["properties"]["service"]["maxLength"],
+            bm.MAX_INTERPOLATED_NAME_CHARS,
+        )
+
     def test_similarity_parser_error_is_graceful(self):
         def parser_error(args, timeout=bm.DEFAULT_TIMEOUT):
             self.calls.append((list(args), timeout))

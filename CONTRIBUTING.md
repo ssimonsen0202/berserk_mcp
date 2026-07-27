@@ -1,8 +1,8 @@
 # Contributing
 
-Thanks for taking a look. This project is intentionally small and easy to change —
-one Python file, zero dependencies, an offline test suite. Drive-by improvements
-are welcome.
+Thanks for taking a look. This project is intentionally small and easy to change:
+focused standard-library-only Python modules and an offline test suite. Drive-by
+improvements are welcome.
 
 If you're not sure whether something fits, **open an issue first** — quick "would
 you take a PR for X?" works fine. Better to talk for five minutes than burn an
@@ -54,8 +54,12 @@ the [`bzrk`](https://docs.bzrk.dev) CLI and log in to a profile — see the
   (per-host vs. per-container) so a small model can disambiguate without context.
 - **Annotations are honest.** A tool that only reads gets `readOnlyHint=true`; one
   that doesn't touch the network gets `openWorldHint=false`. Don't lie.
-- **Don't store secrets.** The Berserk bearer token lives in `bzrk`'s own 0600
-  config; that's intentional. Don't add code that reads, logs, or proxies it.
+- **Don't store secrets.** The Berserk bearer token lives in `bzrk`'s own private
+  configuration (POSIX mode or Windows ACL); that's intentional. Don't add code
+  that reads, logs, or proxies it.
+- **Reuse security boundaries.** Filesystem code goes through `_store.py` and
+  outbound HTTP goes through `_http.py`. Do not add a local `urlopen`, redirect
+  policy, chmod helper, path validator, or atomic-write variant in another module.
 - **No `print` to stdout from the server.** stdio is the MCP transport — log to
   stderr via `log()`.
 
@@ -70,6 +74,12 @@ python -m unittest discover -s tests # full suite (all test_*.py files) -- run t
 
 New tools should add a locked-string KQL test and a callable test (see the existing
 `test_*` methods for templates).
+
+Security regressions must be offline and fail before the fix. Loopback
+`HTTPServer` instances are allowed for redirect and credential-forwarding tests.
+Private-file tests are platform split: POSIX checks modes and Windows checks the
+current-user-only DACL. Keep `tests/test_security_invariants.py` green; it enforces
+the no-shell/no-eval process contract across tracked Python files.
 
 ## Security
 

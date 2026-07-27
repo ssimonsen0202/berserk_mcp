@@ -412,8 +412,10 @@ class SourceProfileTest(ParserFactoryTestBase):
         self.assertIsNone(err2)
         self.assertEqual(profile2["resource_keys"], ["service.name", "host.name"])
         # Each profile needs fieldstats + one sample query; getschema is
-        # reused and the redundant per-source keys query is never issued.
-        self.assertEqual(len(self.calls) - first_call_count, 3)
+        # reused and no multi-statement batch is sent through the user-query
+        # execution boundary.
+        self.assertEqual(len(self.calls) - first_call_count, 2)
+        self.assertFalse(any(";" in call[3] for call in self.calls))
         self.assertNotIn("project k=bag_keys(resource)", "\n".join(c[3] for c in self.calls))
 
     def test_build_source_profile_truncates_and_persists_private_files(self):
@@ -1292,3 +1294,10 @@ class SourceNameGuardTest(ParserFactoryTestBase):
         self.assertIsNone(profile)
         self.assertIn("invalid source name", err)
         self.assertEqual(self.calls, [])  # no query was executed
+
+    def test_build_source_profile_rejects_overlong_source(self):
+        self.default_response = ("SHOULD-NOT-RUN", False)
+        profile, err = pf.build_source_profile("x" * 129, "service", "1h ago")
+        self.assertIsNone(profile)
+        self.assertIn("invalid source name", err)
+        self.assertEqual(self.calls, [])

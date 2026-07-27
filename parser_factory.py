@@ -15,16 +15,15 @@ callables (run_bzrk-backed `bzrk_search`, store helpers, TABLE, etc.) rather
 than this module importing berserk_mcp, which would create a cycle.
 """
 import hashlib
-import ipaddress
 import json
 import os
 import re
 import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from pathlib import Path
+
+import _http
+import _store
 
 LLM_TIMEOUT = int(os.environ.get("BERSERK_LLM_TIMEOUT", "120"))
 
@@ -267,282 +266,47 @@ def _parse_max_autoqueue():
 MAX_AUTOQUEUE_PER_RUN = _parse_max_autoqueue()
 
 
-# ---------- dict-store helpers (mirror berserk_mcp's list-store helpers) ----------
-class StorePathError(ValueError):
-    """Raised when a path fails safety validation. Mirrors berserk_mcp.StorePathError
-    (duplicated here to avoid a circular import; keep the semantics aligned)."""
-
-
-def _safe_path(path, purpose):
-    """Validate that ``path`` is an absolute path with no ``..`` segments or
-    control characters. Returns the resolved absolute Path on success."""
-    if not path:
-        raise StorePathError(f"{purpose} path is empty")
-    if not isinstance(path, (str, Path)):
-        raise StorePathError(f"{purpose} path must be a string or Path")
-    text = str(path)
-    if any(ord(c) < 32 for c in text):
-        raise StorePathError(f"{purpose} path contains control characters")
-    p = Path(text)
-    if not p.is_absolute():
-        raise StorePathError(f"{purpose} path must be absolute (got {text!r})")
-    if ".." in p.parts:
-        raise StorePathError(f"{purpose} path must not contain '..' segments")
-    resolved = p.resolve(strict=False)
-    if ".." in resolved.parts:
-        raise StorePathError(f"{purpose} path resolves through '..'")
-    return resolved
-
-
-# F-007: portable (POSIX + Windows) advisory lock, mirrors berserk_mcp's
-# _FileLock (duplicated here to avoid a circular import; keep the
-# semantics aligned). Guards a load-modify-save critical section so two
-# concurrent writers can't both read stale state and have the second
-# writer's atomic replace silently discard the first writer's update.
-_LOCK_STALE_SECONDS = 30
-_LOCK_TIMEOUT_SECONDS = 10
-_LOCK_RETRY_INTERVAL = 0.05
-
-
-class _FileLock:
-    def __init__(self, target_path):
-        self.lock_path = str(target_path) + ".lock"
-        self._fd = None
-
-    def __enter__(self):
-        deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
-        while True:
-            try:
-                self._fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(self._fd, str(os.getpid()).encode("ascii"))
-                return self
-            except (FileExistsError, PermissionError):
-                # Windows can raise PermissionError instead of FileExistsError
-                # here -- see berserk_mcp._FileLock.__enter__ for why. Treated
-                # the same as lock contention; still times out below if the
-                # path is genuinely inaccessible rather than mid-churn.
-                try:
-                    age = time.time() - os.path.getmtime(self.lock_path)
-                    if age > _LOCK_STALE_SECONDS:
-                        os.remove(self.lock_path)
-                        continue
-                except OSError:
-                    continue
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        f"could not acquire lock {self.lock_path} within "
-                        f"{_LOCK_TIMEOUT_SECONDS}s"
-                    )
-                time.sleep(_LOCK_RETRY_INTERVAL)
-
-    def __exit__(self, exc_type, exc, tb):
-        if self._fd is not None:
-            os.close(self._fd)
-            self._fd = None
-        try:
-            os.remove(self.lock_path)
-        except OSError:
-            pass
-        return False
-
-
-def _unique_tmp_path(safe):
-    """Per-writer temp filename (F-007) -- see berserk_mcp._unique_tmp_path."""
-    return f"{safe}.{os.getpid()}.{threading.get_ident()}.tmp"
-
-
-def _atomic_replace(tmp, safe):
-    """os.replace with a bounded retry -- see berserk_mcp._atomic_replace.
-    Guards against a transient Windows PermissionError when another
-    handle briefly has the just-written temp file open."""
-    attempts = 5
-    for i in range(attempts):
-        try:
-            os.replace(tmp, safe)
-            return
-        except PermissionError:
-            if i == attempts - 1:
-                raise
-            time.sleep(0.05)
+# ---------- shared dict-store helpers ----------
+StorePathError = _store.StorePathError
+_safe_path = _store.validate_store_path
+_FileLock = _store.FileLock
+_unique_tmp_path = _store.unique_tmp_path
+_atomic_replace = _store.atomic_replace
 
 
 def load_json_dict(path):
-    try:
-        safe = _safe_path(path, "store")
-    except StorePathError as e:
-        if _log:
-            _log(f"load_json_dict refused: {e}")
-        return {}
-    try:
-        with open(safe, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except FileNotFoundError:
-        return {}
-    except (OSError, json.JSONDecodeError) as e:
-        if _log:
-            _log(f"load_json_dict({safe}): {type(e).__name__}: {e}")
-        return {}
+    return _store.load_json_dict(path, logger=_log)
 
 
 def save_json_dict(path, data):
-    safe = _safe_path(path, "store")
-    _ensure_private_dir(safe)
-    tmp = _unique_tmp_path(safe)
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    os.chmod(tmp, 0o600)
-    _atomic_replace(tmp, safe)
+    return _store.save_json_dict(path, data, logger=_log)
 
 
 # ---------- P1: LLM client with escalation ladder ----------
-_ALLOWED_LLM_SCHEMES = frozenset({"http", "https"})
-
-
-class LlmUrlError(ValueError):
-    """Raised when an LLM endpoint URL fails scheme/format validation."""
-
-
-def _is_loopback_host(host):
-    """True for localhost / 127.0.0.0/8 / ::1 — the only hosts plaintext
-    HTTP is allowed to reach without an explicit operator override."""
-    if not host:
-        return False
-    if host.lower() == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
+_ALLOWED_LLM_SCHEMES = _http.ALLOWED_SCHEMES
+LlmUrlError = _http.UrlPolicyError
+_is_loopback_host = _http.is_loopback_host
 
 
 def _validate_llm_url(url):
-    """Defense-in-depth guard for the LLM endpoint URL.
-
-    The operator sets this via --set-hermes-url or BERSERK_LLM_HERMES_URL on
-    their own machine, so classic SSRF (remote-attacker-controlled URL) does
-    not apply at the point of *initial configuration*. This validator still
-    rejects non-http(s) schemes and control characters so a malformed config
-    file, an environment misconfiguration, or a typo can never let
-    urllib.request open a file://, gopher://, ftp:// or similar unusual
-    protocol handler.
-
-    Plaintext http:// is only permitted to a loopback host by default (the
-    bearer token would otherwise cross the network in the clear). Operators
-    running an LLM gateway on a private/VPN network they trust (e.g. a
-    Tailscale endpoint) can opt in with
-    BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE=1 — this is a deliberate, explicit
-    choice, not a silent default (F-013).
-
-    Returns the URL unchanged on success; raises LlmUrlError otherwise.
-    """
-    if not isinstance(url, str) or not url.strip():
-        raise LlmUrlError("llm endpoint url must be a non-empty string")
-    # Control characters, whitespace, or embedded newlines are invalid in URLs
-    # and would allow request smuggling or header injection tricks.
-    if any(ord(c) < 32 or c in " \t\r\n\x7f" for c in url):
-        raise LlmUrlError("llm endpoint url contains invalid control characters")
-    parsed = urllib.parse.urlsplit(url)
-    scheme = parsed.scheme.lower()
-    if scheme not in _ALLOWED_LLM_SCHEMES:
-        raise LlmUrlError(
-            f"llm endpoint url scheme must be one of {sorted(_ALLOWED_LLM_SCHEMES)}"
-        )
-    if not parsed.netloc:
-        raise LlmUrlError("llm endpoint url missing host")
-    if scheme == "http" and not _is_loopback_host(parsed.hostname):
-        if os.environ.get("BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE") != "1":
-            raise LlmUrlError(
-                "plaintext http to a non-loopback host is rejected by default "
-                "(the bearer token would cross the network unencrypted); use "
-                "https, point at localhost/127.0.0.1, or set "
-                "BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE=1 to explicitly allow it "
-                "on a trusted private network"
-            )
-    return url
+    return _http.validate_http_url(url, label="llm endpoint")
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Never follow a redirect. The LLM endpoint is a single operator-fixed
-    URL; there is no legitimate reason for it to 3xx, and the stdlib default
-    handler would otherwise re-send our Authorization header to whatever
-    Location a compromised or misbehaving endpoint returns — including a
-    different origin, a downgraded http:// scheme, or a link-local metadata
-    address (F-002). redirect_request returning None makes urllib fall
-    through to a plain HTTPError for the 3xx status, which the existing
-    `except urllib.error.HTTPError` branch below already handles."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler)
-
-# F-005: an LLM/gateway endpoint response is network-controlled by whatever
-# is on the other end of the configured URL; without a cap, resp.read()
-# would buffer an arbitrarily large body into memory before json.loads even
-# gets a chance to reject it. Read one byte past the cap so an exactly-
-# capped legitimate response isn't misclassified as oversized.
-MAX_PROVIDER_RESPONSE_BYTES = 2 * 1024 * 1024  # 2 MB; generous for a chat-completions JSON body
+_NoRedirectHandler = _http.NoRedirectHandler
+_NO_REDIRECT_OPENER = _http.NO_REDIRECT_OPENER
+MAX_PROVIDER_RESPONSE_BYTES = _http.MAX_RESPONSE_BYTES
 
 
 def _read_bounded_json(resp, cap=MAX_PROVIDER_RESPONSE_BYTES):
-    """Read at most cap+1 bytes from an HTTP response and json.loads it.
-    Raises ValueError if the body exceeds cap -- never silently truncates
-    a response and hands truncated bytes to json.loads (which could parse
-    to a subtly-wrong, still-valid-looking JSON value in edge cases)."""
-    body = resp.read(cap + 1)
-    if len(body) > cap:
-        raise ValueError(f"response body exceeds {cap} bytes")
-    return json.loads(body.decode("utf-8"))
+    return _http.read_bounded_json(resp, cap)
 
 
 def _http_post_json(url, headers, payload, timeout=LLM_TIMEOUT):
-    """POST JSON, return (parsed_json, None) or (None, error_string).
-
-    error_string must never contain header values (keys live there).
-    """
-    try:
-        _validate_llm_url(url)
-    except LlmUrlError as e:
-        return None, f"invalid endpoint: {e}"
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data, method="POST",
-        headers={**headers, "Content-Type": "application/json"},
-    )
-    try:
-        with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
-            return _read_bounded_json(resp), None
-    except urllib.error.HTTPError as e:
-        code = e.code
-        e.close()
-        return None, f"HTTP {code}"
-    except urllib.error.URLError:
-        return None, "connection failed"
-    except ValueError as e:
-        return None, str(e)
-    except Exception as e:
-        return None, f"{type(e).__name__}"
+    return _http.http_post_json(url, headers, payload, timeout=timeout)
 
 
 def _http_get_json(url, headers, timeout=LLM_TIMEOUT):
-    try:
-        _validate_llm_url(url)
-    except LlmUrlError as e:
-        return None, f"invalid endpoint: {e}"
-    req = urllib.request.Request(url, headers=headers, method="GET")
-    try:
-        with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
-            return _read_bounded_json(resp), None
-    except urllib.error.HTTPError as e:
-        code = e.code
-        e.close()
-        return None, f"HTTP {code}"
-    except ValueError as e:
-        return None, str(e)
-    except Exception as e:
-        return None, f"{type(e).__name__}"
+    return _http.http_get_json(url, headers, timeout=timeout)
 
 
 # Privacy-safe default: never hardcode a private endpoint in the repo. The
@@ -566,12 +330,7 @@ def _llm_config():
     path = _llm_config_path()
     if path is None:
         return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
+    return _store.load_json_dict(path, logger=_log)
 
 
 def _hermes_url():
@@ -587,20 +346,15 @@ def save_hermes_url(url):
     lives on the operator's machine, not in the repo. Returns the path.
 
     Validates scheme/format before writing so a bad URL can never be
-    persisted to the config file that later feeds urllib.request.urlopen.
+    persisted to the config file that later feeds the shared hardened HTTP client.
     """
     _validate_llm_url(url)
     path = _llm_config_path()
     if path is None:
         raise RuntimeError("parser_factory is not configured (no store dir)")
-    _ensure_private_dir(path)
     data = _llm_config()
     data["hermes_url"] = url
-    tmp = str(path) + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    os.chmod(tmp, 0o600)
-    _atomic_replace(tmp, path)
+    _store.save_json_dict(path, data, logger=_log)
     return path
 
 
@@ -869,26 +623,14 @@ def build_source_profile(source, kind, since):
     # Defense-in-depth: `source` is interpolated into single-quoted KQL
     # literals below. Every caller already allowlists it, but validate here
     # too so this interpolation site is self-defending regardless of route.
-    if not re.match(r"^[A-Za-z0-9._-]+$", str(source)):
+    source = str(source)
+    if len(source) > 128 or not re.fullmatch(r"[A-Za-z0-9._-]+", source):
         return None, "invalid source name (allowed: letters, digits, '.', '_', '-')"
     parts = {}
     errors = []
-    batch_parts = None
-    batch_out, batch_err = _bzrk_search(_q_profile_batch(source, kind), since)
-    if not batch_err:
-        batch_parts = _split_profile_batch(batch_out)
-        if batch_parts is None:
-            # Older bzrk builds or test doubles may not expose per-statement
-            # JSON tables. Keep the proven sequential path in that case.
-            batch_parts = None
 
     if kind == "service":
-        if batch_parts is not None:
-            stats_out, sample_out, schema_out = batch_parts
-            stats_err = sample_err = schema_err = False
-        else:
-            stats_out, stats_err = _bzrk_search(_q_fieldstats(source, kind), since)
-            sample_out = sample_err = schema_out = schema_err = None
+        stats_out, stats_err = _bzrk_search(_q_fieldstats(source, kind), since)
         if stats_err:
             errors.append(f"fieldstats: {_safe_diag_text(stats_out)}")
         else:
@@ -899,8 +641,7 @@ def build_source_profile(source, kind, since):
             stats_keys = _parse_fieldstats_keys(stats_out)
             if stats_keys:
                 parts["resource_keys"] = stats_keys
-        if batch_parts is None:
-            sample_out, sample_err = _bzrk_search(_q_discover_sample(source), since)
+        sample_out, sample_err = _bzrk_search(_q_discover_sample(source), since)
         if sample_err:
             errors.append(f"sample: {_safe_diag_text(sample_out)}")
         else:
@@ -927,12 +668,7 @@ def build_source_profile(source, kind, since):
             else:
                 parts["resource_keys_raw"] = keys_out
     else:
-        if batch_parts is not None:
-            stats_out, sample_out, schema_out = batch_parts
-            stats_err = sample_err = schema_err = False
-        else:
-            stats_out, stats_err = _bzrk_search(_q_fieldstats(source, kind), since)
-            sample_out = sample_err = schema_out = schema_err = None
+        stats_out, stats_err = _bzrk_search(_q_fieldstats(source, kind), since)
         if stats_err:
             errors.append(f"fieldstats: {_safe_diag_text(stats_out)}")
         else:
@@ -940,8 +676,7 @@ def build_source_profile(source, kind, since):
                 parts["fieldstats_excerpt"] = _safe_excerpt(stats_out, GETSCHEMA_EXCERPT_CAP)
             except (RuntimeError, TypeError) as exc:
                 return None, f"redaction failed for fieldstats: {type(exc).__name__}"
-        if batch_parts is None:
-            sample_out, sample_err = _bzrk_search(_q_metric_sample(source), since)
+        sample_out, sample_err = _bzrk_search(_q_metric_sample(source), since)
         if sample_err:
             errors.append(f"sample: {_safe_diag_text(sample_out)}")
         else:
@@ -950,8 +685,7 @@ def build_source_profile(source, kind, since):
             except (RuntimeError, TypeError) as exc:
                 return None, f"redaction failed for sample: {type(exc).__name__}"
 
-    if batch_parts is None:
-        schema_out, schema_err = _cached_getschema(since)
+    schema_out, schema_err = _cached_getschema(since)
     if schema_err:
         errors.append(f"getschema: {_safe_diag_text(schema_out)}")
     else:
