@@ -83,6 +83,8 @@ def _burn_events_query():
         f"body_chars=strlen(tostring(body)) "
         f", tokens_in=tostring(attributes['{_TOKENS_IN_ATTR}']) "
         f", tokens_out=tostring(attributes['{_TOKENS_OUT_ATTR}']) "
+        f", message_id=tostring(attributes['claude.message_id']) "
+        f", uuid=tostring(attributes['claude.uuid']) "
         f"| take 2000"
     )
 
@@ -176,7 +178,50 @@ def _normalize_row(obj):
         "tokens_in": _nonnegative_int(tokens_in),
         "tokens_out": _nonnegative_int(tokens_out),
         "has_token_usage": _valid_token_value(tokens_in) or _valid_token_value(tokens_out),
+        "message_id": str(obj.get("message_id") or obj.get("messageId") or ""),
+        "uuid": str(obj.get("uuid") or ""),
     }
+
+
+def _message_groups(events):
+    """Group content-block rows by the real API call they belong to.
+
+    Claude Code logs one JSONL line per content block of a response
+    (thinking/text/tool_use/...); every block carries an identical copy of
+    that response's token usage, but tool/file info (``tools``,
+    ``file_targets``) may only be populated on whichever block actually
+    carries it (e.g. the ``tool_use`` row). Grouping (rather than picking one
+    representative row) lets callers sum tokens once per group while still
+    scanning every row in the group for tool/file attribution.
+
+    Rows with no ``message_id`` (data ingested before the forwarder captured
+    it) form their own singleton groups rather than being grouped by any
+    other key — a content/timestamp fingerprint would risk collapsing
+    genuinely distinct calls that happen to share token counts. Historical
+    backfill is a separate, explicitly-approximate concern (see
+    PROPER_FIX_PLAN.md step 3)."""
+    groups = []
+    index_by_key = {}
+    for ev in events:
+        mid = str(ev.get("message_id") or "").strip()
+        if not mid:
+            groups.append([ev])
+            continue
+        key = (ev.get("session"), mid)
+        idx = index_by_key.get(key)
+        if idx is None:
+            index_by_key[key] = len(groups)
+            groups.append([ev])
+        else:
+            groups[idx].append(ev)
+    return groups
+
+
+def _collapse_by_message(events):
+    """One representative row per real API call — for callers that only need
+    token/usage fields (identical across a group) and don't need per-row
+    tool/file attribution. See ``_message_groups`` for the full grouping."""
+    return [group[0] for group in _message_groups(events)]
 
 
 def _valid_token_value(value):
@@ -447,14 +492,15 @@ def analyze_token_burn_events(events):
 
     reports = []
     for session, session_events in sorted(by_session.items()):
+        billed_events = _collapse_by_message(session_events)
         body_chars = sum(
             _nonnegative_int(ev.get("body_chars")) or len(str(ev.get("body") or ""))
             for ev in session_events
         )
-        has_exact_usage = any(ev.get("has_token_usage") for ev in session_events)
+        has_exact_usage = any(ev.get("has_token_usage") for ev in billed_events)
         exact_tokens = sum(
             _nonnegative_int(ev.get("tokens_in")) + _nonnegative_int(ev.get("tokens_out"))
-            for ev in session_events
+            for ev in billed_events
         )
         token_count = exact_tokens if has_exact_usage else int(math.ceil(body_chars / 4.0))
         calls = _calls_for_events(session_events)
@@ -496,15 +542,36 @@ def analyze_token_burn_events(events):
     return reports
 
 
+_MESSAGE_GROUP_KEY_KQL = (
+    "gkey=iff(isnotempty(tostring(attributes['claude.message_id'])), "
+    "strcat(tostring(attributes['claude.session_id']), '|', "
+    "tostring(attributes['claude.message_id'])), "
+    "strcat('u|', tostring(attributes['claude.session_id']), '|', "
+    "tostring(attributes['claude.uuid'])))"
+)
+
+
 def _cost_daily_query():
+    # Two-stage aggregation: first collapse rows sharing one message_id (one
+    # billable API call) down to one row per call, then sum per day/model.
+    # Rows with no message_id (pre-fix historical data) get a per-row-unique
+    # fallback key via uuid, so they pass through ungrouped rather than
+    # silently collapsing into one bucket — see _collapse_by_message's
+    # docstring for why an empty grouping key must never merge rows.
     return (
         f"{_table} | where resource['service.name'] == 'claude-code' "
-        f"| summarize events=count(), "
-        f"errors=countif(tostring(attributes['claude.error']) == 'true'), "
-        f"tokens_in_sum=sum(toint(attributes['{_TOKENS_IN_ATTR}'])), "
-        f"tokens_out_sum=sum(toint(attributes['{_TOKENS_OUT_ATTR}'])), "
-        f"body_chars_sum=sum(strlen(tostring(body))) "
-        f"by day=bin(timestamp, 1d), model=tostring(attributes['claude.message_model']) "
+        f"| extend {_MESSAGE_GROUP_KEY_KQL} "
+        f"| extend day=bin(timestamp, 1d), "
+        f"model=tostring(attributes['claude.message_model']), "
+        f"errf=iff(tostring(attributes['claude.error']) == 'true', 1, 0), "
+        f"tin=toint(attributes['{_TOKENS_IN_ATTR}']), "
+        f"tout=toint(attributes['{_TOKENS_OUT_ATTR}']), "
+        f"bchars=strlen(tostring(body)) "
+        f"| summarize day=max(day), model=max(model), errf=max(errf), "
+        f"tin=max(tin), tout=max(tout), bchars=max(bchars) by gkey "
+        f"| summarize events=count(), errors=sum(errf), "
+        f"tokens_in_sum=sum(tin), tokens_out_sum=sum(tout), "
+        f"body_chars_sum=sum(bchars) by day, model "
         f"| sort by day asc"
     )
 
@@ -518,10 +585,12 @@ def _cost_trend_query():
     """
     return (
         f"{_table} | where resource['service.name'] == 'claude-code' "
+        f"| extend {_MESSAGE_GROUP_KEY_KQL} "
         f"| extend burn=iff(isnotnull(attributes['{_TOKENS_IN_ATTR}']) "
         f"or isnotnull(attributes['{_TOKENS_OUT_ATTR}']), "
         f"toint(attributes['{_TOKENS_IN_ATTR}']) + toint(attributes['{_TOKENS_OUT_ATTR}']), "
         f"strlen(tostring(body)) / 4.0) "
+        f"| summarize burn=max(burn), timestamp=max(timestamp) by gkey "
         f"| make-series burn=sum(burn) default=0 on timestamp step 1d "
         f"| extend fit=series_fit_line(burn) | take 1"
     )
@@ -673,12 +742,13 @@ def claude_cost_report(since="7d ago", group_by="day"):
         if not events:
             return "No Claude Code events found in this window.", False
         by_project = {}
-        for ev in events:
+        for group in _message_groups(events):
+            ev = group[0]
             tokens = (
                 _nonnegative_int(ev.get("tokens_in")) + _nonnegative_int(ev.get("tokens_out"))
             ) if ev.get("has_token_usage") else len(ev.get("body", "")) // 4
             project = "(unattributed)"
-            for tgt in _file_targets([ev]):
+            for tgt in _file_targets(group):
                 inferred = _infer_project(tgt)
                 if inferred != "(unattributed)":
                     project = inferred
@@ -746,6 +816,8 @@ def _session_events_query(session_id):
         f"body_chars=strlen(tostring(body)) "
         f", tokens_in=tostring(attributes['{_TOKENS_IN_ATTR}']) "
         f", tokens_out=tostring(attributes['{_TOKENS_OUT_ATTR}']) "
+        f", message_id=tostring(attributes['claude.message_id']) "
+        f", uuid=tostring(attributes['claude.uuid']) "
         f"| sort by ts asc | take 2000"
     )
 
@@ -774,8 +846,9 @@ def analyze_session_events(events):
         else:
             phases.append({"tool": tool, "count": 1, "errors": err,
                            "first_ts": ts, "last_ts": ts})
+    billed_events = _collapse_by_message(events)
     exact = sum(_nonnegative_int(ev.get("tokens_in")) + _nonnegative_int(ev.get("tokens_out"))
-                for ev in events if ev.get("has_token_usage"))
+                for ev in billed_events if ev.get("has_token_usage"))
     if exact > 0:
         burn = {"tokens": exact, "source": "exact"}
     else:

@@ -262,6 +262,7 @@ def normalize_usage_row(obj):
         "interaction_id": str(_first(obj.get("interaction_id"), attrs.get("interaction.id"))),
         "request_id": str(_first(obj.get("request_id"), attrs.get("request_id"),
                                   attrs.get("gen_ai.response.id"))),
+        "message_id": str(_first(obj.get("message_id"), attrs.get("claude.message_id"))),
         "organization_id": str(_first(obj.get("organization"), obj.get("organization_id"),
                                        attrs.get("organization.id"), resource.get("organization.id"))),
         "team_id": str(_first(obj.get("team"), obj.get("team_id"),
@@ -431,8 +432,8 @@ def deduplicate_usage_rows(raw_rows):
             row.get("cache_read_tokens"), row.get("cache_creation_tokens"),
         ))
 
-    result = []
-    for raw, row, _, aggregate in prepared:
+    after_fingerprint = []
+    for raw, row, priority, aggregate in prepared:
         timestamp = str(row.get("timestamp") or "")
         fingerprint = (
             row.get("session_id"), timestamp, row.get("model"),
@@ -442,8 +443,49 @@ def deduplicate_usage_rows(raw_rows):
         if (not aggregate and row.get("telemetry_source") == "legacy"
                 and len(timestamp) > 10 and fingerprint in native_fingerprints):
             continue
+        after_fingerprint.append((raw, row, priority, aggregate))
+
+    # Second, distinct dedup pass: collapse content-block rows that share one
+    # claude.message_id (one real, billable API call) down to a single row.
+    # Unrelated to the native_fingerprints pass above (which resolves two
+    # telemetry *sources* describing the same request) -- do not merge the
+    # two mechanisms. Rows with no message_id (aggregate rows, already
+    # collapsed upstream in usage_aggregate_query, or data predating the
+    # forwarder capturing it) are never grouped with each other on any other
+    # key, so they pass through untouched.
+    seen_messages = set()
+    result = []
+    for raw, row, _, aggregate in after_fingerprint:
+        message_id = str(row.get("message_id") or "").strip()
+        if not aggregate and message_id:
+            key = (row.get("session_id"), message_id)
+            if key in seen_messages:
+                continue
+            seen_messages.add(key)
         result.append(raw)
     return result
+
+
+# Columns carried through both post-row-level dedup stages of
+# usage_aggregate_query (request_id/timestamp-fingerprint dedup, then the
+# separate message_id collapse for per-content-block over-counting). Built
+# as a list and joined into "col=max(col)" clauses so the two summarize
+# stages can't drift out of sync with each other by hand-edit.
+_USAGE_ROW_FIELDS = (
+    "timestamp", "event_name", "legacy_type", "model", "speed", "tool_name",
+    "tokens_in", "tokens_out", "cache_read", "cache_create", "cache_create_1h",
+    "context_tokens", "organization", "team", "portfolio", "project", "feature",
+    "work_item", "cost_center", "repository", "branch", "pull_request", "agent",
+    "harness", "recommendation_id", "query_source", "source_priority",
+    "result_tokens", "active_seconds", "lines_added", "lines_removed", "commits",
+    "pull_requests", "token_exact", "estimated_body_chars", "error_flag",
+    "success_flag", "request_attempts", "reported_cost", "web_search_requests",
+    "code_execution_seconds", "duration_seconds",
+)
+
+
+def _max_agg_clause(fields):
+    return ", ".join(f"{f}=max({f})" for f in fields)
 
 
 def usage_aggregate_query():
@@ -470,6 +512,7 @@ def usage_aggregate_query():
         "cache_create=toint(tostring(raw_attributes['cache_creation_tokens'])), "
         "cache_create_1h=toint(tostring(raw_attributes['cache_creation_1h_tokens'])), "
         "request_id=tostring(raw_attributes['request_id']), "
+        "message_id=tostring(raw_attributes['claude.message_id']), "
         "session_id=iff(isnotempty(tostring(raw_attributes['session.id'])), "
         "tostring(raw_attributes['session.id']), "
         "tostring(raw_attributes['claude.session_id'])), "
@@ -569,28 +612,22 @@ def usage_aggregate_query():
         "portfolio, project, feature, work_item, cost_center, repository, branch, "
         "pull_request, agent, harness, recommendation_id, query_source, source_priority, "
         "result_tokens, active_seconds, lines_added, lines_removed, commits, pull_requests, "
-        "token_exact, estimated_body_chars, dedupe_key, error_flag, success_flag, "
+        "token_exact, estimated_body_chars, dedupe_key, message_id, error_flag, success_flag, "
         "request_attempts, reported_cost, web_search_requests, code_execution_seconds, "
         "duration_seconds "
-        "| summarize timestamp=max(timestamp), event_name=max(event_name), "
-        "legacy_type=max(legacy_type), model=max(model), speed=max(speed), "
-        "tool_name=max(tool_name), tokens_in=max(tokens_in), tokens_out=max(tokens_out), "
-        "cache_read=max(cache_read), cache_create=max(cache_create), "
-        "cache_create_1h=max(cache_create_1h), context_tokens=max(context_tokens), "
-        "organization=max(organization), team=max(team), portfolio=max(portfolio), "
-        "project=max(project), feature=max(feature), work_item=max(work_item), "
-        "cost_center=max(cost_center), repository=max(repository), branch=max(branch), "
-        "pull_request=max(pull_request), agent=max(agent), harness=max(harness), "
-        "recommendation_id=max(recommendation_id), query_source=max(query_source), "
-        "source_priority=max(source_priority), result_tokens=max(result_tokens), "
-        "active_seconds=max(active_seconds), lines_added=max(lines_added), "
-        "lines_removed=max(lines_removed), commits=max(commits), "
-        "pull_requests=max(pull_requests), token_exact=max(token_exact), "
-        "estimated_body_chars=max(estimated_body_chars), error_flag=max(error_flag), "
-        "success_flag=max(success_flag), request_attempts=max(request_attempts), "
-        "reported_cost=max(reported_cost), web_search_requests=max(web_search_requests), "
-        "code_execution_seconds=max(code_execution_seconds), "
-        "duration_seconds=max(duration_seconds) by dedupe_key "
+        f"| summarize {_max_agg_clause(_USAGE_ROW_FIELDS)}, "
+        "message_id=max(message_id) by dedupe_key "
+        # Second, distinct dedup pass: collapse content-block rows that share
+        # one claude.message_id (one real, billable API call) down to a
+        # single row. This is unrelated to dedupe_key above (which resolves
+        # native-vs-legacy telemetry describing the *same request*) — do not
+        # merge the two mechanisms. Rows with no message_id (data predating
+        # the forwarder capturing it, or non-Claude-Code native events) fall
+        # back to dedupe_key itself as the grouping key, which is already
+        # unique per distinct event at this point, so they pass through
+        # ungrouped rather than risking a content/timestamp-based collapse.
+        "| extend msg_gkey=iff(isnotempty(message_id), strcat('m|', message_id), dedupe_key) "
+        f"| summarize {_max_agg_clause(_USAGE_ROW_FIELDS)} by msg_gkey "
         "| summarize events=countif(event_name in ('api_request','claude_code.api_request') "
         "or event_name == 'api_error' or legacy_type == 'assistant'), "
         "tool_calls=countif(event_name == 'tool_result'), "

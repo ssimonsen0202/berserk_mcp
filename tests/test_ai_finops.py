@@ -123,6 +123,59 @@ class NormalizationAndPricingTest(FinopsTestCase):
         rows = af.deduplicate_usage_rows([legacy, native, dict(native)])
         self.assertEqual(rows, [native])
 
+    def test_message_id_content_blocks_collapse_to_one_row(self):
+        # Distinct, unrelated mechanism from native/legacy fingerprinting
+        # above: Claude Code logs one JSONL row per content block
+        # (thinking/text/tool_use) of a response, and every block carries an
+        # identical copy of that response's usage. See
+        # DUPLICATE_INGESTION_BUG_HANDOFF.md / PROPER_FIX_PLAN.md.
+        thinking = {
+            "timestamp": "2026-07-25T10:00:00.000Z",
+            "attributes": {"claude.type": "assistant", "claude.session_id": "s1",
+                           "claude.message_id": "msg_A", "claude.message_model": "claude-sonnet-4-6",
+                           "claude.tokens_input": 0, "claude.tokens_output": 200},
+        }
+        tool_use = {
+            "timestamp": "2026-07-25T10:00:00.003Z",
+            "attributes": {"claude.type": "assistant", "claude.session_id": "s1",
+                           "claude.message_id": "msg_A", "claude.message_model": "claude-sonnet-4-6",
+                           "claude.tokens_input": 0, "claude.tokens_output": 200},
+        }
+        rows = af.deduplicate_usage_rows([thinking, tool_use])
+        self.assertEqual(rows, [thinking])
+
+    def test_message_id_different_ids_do_not_collapse(self):
+        # Regression test for the wrong (content-fingerprint) design the plan
+        # explicitly warns against: two genuinely distinct calls sharing a
+        # token count and landing close together must not merge.
+        first = {
+            "timestamp": "2026-07-25T10:00:00.000Z",
+            "attributes": {"claude.type": "assistant", "claude.session_id": "s1",
+                           "claude.message_id": "msg_C", "claude.message_model": "claude-sonnet-4-6",
+                           "claude.tokens_input": 10, "claude.tokens_output": 20},
+        }
+        second = {
+            "timestamp": "2026-07-25T10:00:01.000Z",
+            "attributes": {"claude.type": "assistant", "claude.session_id": "s1",
+                           "claude.message_id": "msg_D", "claude.message_model": "claude-sonnet-4-6",
+                           "claude.tokens_input": 10, "claude.tokens_output": 20},
+        }
+        rows = af.deduplicate_usage_rows([first, second])
+        self.assertEqual(rows, [first, second])
+
+    def test_message_id_absent_rows_never_collapse_into_each_other(self):
+        # Historical data predates message_id capture -- an absent id must
+        # never be treated as a shared grouping key across rows, or distinct
+        # historical events would silently vanish.
+        rows_in = [{
+            "timestamp": f"2026-07-25T10:00:0{i}.000Z",
+            "attributes": {"claude.type": "assistant", "claude.session_id": "s1",
+                           "claude.message_model": "claude-sonnet-4-6",
+                           "claude.tokens_input": 10, "claude.tokens_output": 20},
+        } for i in range(3)]
+        rows = af.deduplicate_usage_rows(rows_in)
+        self.assertEqual(rows, rows_in)
+
     def test_mixed_exact_and_estimated_aggregate_preserves_coverage(self):
         row = af.normalize_usage_row({
             "day": "2026-07-25", "events": 10, "tokens_in_sum": 100,
@@ -285,6 +338,13 @@ class NormalizationAndPricingTest(FinopsTestCase):
             "| summarize timestamp=max(timestamp)", 1
         )[0]
         self.assertIn("tool_name", projected)
+        # Third, distinct stage: collapse content-block rows sharing one
+        # claude.message_id before the final day/model rollup, so duplicate
+        # per-content-block rows aren't summed more than once. Separate from
+        # the request_id/timestamp-fingerprint dedupe_key stage above it.
+        self.assertEqual(query.count("| summarize timestamp=max(timestamp)"), 2)
+        self.assertIn("claude.message_id", query)
+        self.assertIn("by msg_gkey", query)
 
 
 class BusinessDataAndAttributionTest(FinopsTestCase):
