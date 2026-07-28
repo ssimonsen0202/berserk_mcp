@@ -114,6 +114,12 @@ eval harness use one stdlib-only HTTP implementation. It:
 API keys are read from the environment only. The optional Hermes endpoint is
 stored in the private local configuration; keys are never written there.
 
+The Berserk cluster endpoint is outside this HTTP client boundary. It is owned
+by the `bzrk` CLI profile configured with `bzrk login`; berserk-mcp shells out
+to `bzrk` and does not read the stored profile URL or bearer token. Production
+operators should configure the CLI profile with an HTTPS Berserk endpoint and
+avoid plaintext cluster access except on loopback-only test deployments.
+
 ## Filesystem stores and publication outputs
 
 All store paths are absolute, traversal-free, and control-character-free. The

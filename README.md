@@ -716,7 +716,9 @@ JSON body `{"text": "..."}`, and return 2xx on success. If the bridge runs on
 a different host than berserk-mcp's `--worker` cron job, the same
 loopback-only-by-default policy applies as for the LLM endpoint. Set
 `BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE=1` to allow a non-loopback `http://` URL,
-or point at an `https://` bridge instead. Alerts are sent only from the
+or point at an `https://` bridge instead. Prefer HTTPS for any bridge that is
+not bound to loopback; the shared secret is sent as an HTTP header and should
+not cross an unencrypted network. Alerts are sent only from the
 headless `--worker` CLI path. Interactive MCP tool calls (for example
 `run_discovery_worker`) already surface their result directly to the caller
 and never post to Discord — this avoids duplicate, noisy notifications.
@@ -1119,6 +1121,31 @@ All configuration is via environment variables. All are optional:
 Parser-factory (LLM parser generation) has its own env vars — see
 [Parser factory](#parser-factory-llm-generated-query-packs) above.
 
+### Transport security guidance
+
+Use HTTPS/TLS for every non-loopback endpoint that carries a token, API key, or
+telemetry payload:
+
+- `BERSERK_LLM_HERMES_URL` may use `http://localhost` or `http://127.0.0.1`
+  for a local model gateway. Non-loopback `http://` is rejected unless
+  `BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE=1` is explicitly set. Treat that flag as
+  a temporary private-network exception, not an enterprise default.
+- `BERSERK_DISCORD_ALERT_URL` follows the same loopback/plaintext policy. Use
+  `https://` when the bridge runs on another host, because
+  `BERSERK_DISCORD_ALERT_SECRET` is sent as `X-Auth-Token`.
+- `BERSERK_MCP_OTLP_LOGS_ENDPOINT` is stricter: non-loopback OTLP endpoints
+  must use HTTPS. Plain HTTP is accepted only for loopback collectors.
+- The Berserk cluster endpoint itself is configured inside the `bzrk` CLI
+  profile via `bzrk login`. berserk-mcp shells out to `bzrk` and never reads
+  the stored bearer token or profile URL, so operators must ensure the CLI
+  profile points at an HTTPS Berserk endpoint in shared or production
+  deployments.
+
+Code enforcement already covers the endpoints owned by berserk-mcp: URL
+schemes are allowlisted, embedded credentials and control characters are
+rejected, redirects are not followed, response bodies are bounded, and remote
+OTLP requires HTTPS.
+
 ## Connect it to a client
 
 **Compatibility.** berserk-mcp implements MCP protocol version `2025-06-18`
@@ -1263,9 +1290,10 @@ The security-relevant surface has been through a multi-round audit and an
 external scanner pass:
 
 - **Hand audit.** This covered 15 findings — 7 blocking security/DR issues,
-  plus 8 deferred behavioral/documentation issues — each with an
-  adversarial regression test. Internal review reports are not published in
-  this repo; closure evidence lives in the test suite's regression coverage.
+  plus 8 behavioral/documentation issues that were initially deferred and are
+  now closed — each with an adversarial regression test. Internal review
+  reports are not published in this repo; closure evidence lives in the test
+  suite's regression coverage.
 - **Differential re-review.** This produced 6 additional findings (`FVR-001`
   through `FVR-006`). All 6 are closed, with regression tests in the suite.
 - **External scanner pass.** Three scanners ran against the code: Cisco AI
