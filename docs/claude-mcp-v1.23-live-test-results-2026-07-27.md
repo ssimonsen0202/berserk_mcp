@@ -19,7 +19,7 @@ disk backing all three VMs on this ESXi host. That saturated disk I/O (84.6% iow
 16–21 on 2 vCPUs) and starved the query engine's own segment reads, causing the timeouts below.
 
 Fix applied: corrected `merger_interval_seconds: 300` and `max_segments_per_batch: 100` in
-`/opt/assistant/berserk/docker-compose.yaml` (flat top-level keys, not nested), janitor restarted.
+the deployment `docker-compose.yaml` (flat top-level keys, not nested), janitor restarted.
 `download_config.max_concurrent_downloads` did not take effect via YAML for this binary (stays at
 its default of 20) and was left as a follow-up rather than blocking on it, since the other two
 changes already resolved the symptom.

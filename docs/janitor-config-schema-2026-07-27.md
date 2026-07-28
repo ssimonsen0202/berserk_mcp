@@ -18,8 +18,8 @@ Observed impact:
 - MinIO itself logged no matching service errors.
 
 The effect was query-engine starvation from shared disk I/O, not an MCP regression
-and not the idle-worker wedge described in
-[`triage-2026-07-26-homelab-query-timeouts.md`](triage-2026-07-26-homelab-query-timeouts.md).
+and not the idle-worker wedge described in the earlier 2026-07-26 data-plane
+timeout triage note.
 
 ## Schema finding
 
@@ -63,8 +63,8 @@ continuous back-to-back compaction and exposed the storage bottleneck.
 
 ## Applied production change
 
-Changed `/opt/assistant/berserk/docker-compose.yaml` in the inline
-`janitor-config` content block:
+Changed the deployment `docker-compose.yaml` in the inline `janitor-config`
+content block:
 
 ```diff
 -      merger:
