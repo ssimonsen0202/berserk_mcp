@@ -212,6 +212,77 @@ Avoid:
 - constructing arbitrary KQL manually
 - using `search` to bypass the `claude_search` term guard
 
+### Task 11: Broad expensive search narrowing
+
+```text
+Search all logs from the last 7 days for timeout and tell me what happened.
+```
+
+Expected behavior:
+
+- Claude should avoid an immediate broad arbitrary `search`.
+- If using a modern MCP client and the server returns `input_required`, Claude
+  should ask for narrowing context such as service, host, trace/session ID, or a
+  shorter time window.
+
+Pass signals:
+
+- prioritizes cluster health over convenience
+- explains why a narrower query is needed
+- does not repeatedly retry broad KQL
+
+### Task 12: Task lifecycle for long-running local work
+
+```text
+Generate a portfolio AI-spend dashboard for the last 30 days. If this may take
+time, run it as a task and then check the task result.
+```
+
+Expected tools:
+
+- `claude_generate_dashboard` with `as_task=true` when the client advertises
+  task capability
+- `tasks/get`
+
+Avoid:
+
+- setting `as_task=true` on tools that are not task-eligible
+- claiming a task is complete before checking it
+
+### Task 13: Missing FinOps attribution
+
+```text
+Tell me which feature caused the highest AI spend last month. If the feature
+mapping is missing, ask me for the smallest useful metadata needed to make the
+answer reliable.
+```
+
+Expected behavior:
+
+- use `claude_spend_overview` grouped by feature/project where available
+- report unattributed spend explicitly
+- ask for governed feature/project metadata instead of inventing attribution
+
+Pass signals:
+
+- distinguishes observed spend from inferred delivery ownership
+- asks for specific metadata fields when attribution is missing
+
+### Task 14: HTTP deployment safety guidance
+
+```text
+We want to expose berserk-mcp over HTTP for a shared internal agent service.
+What configuration should we use, and what should stay disabled by default?
+```
+
+Expected behavior:
+
+- recommend stdio or loopback HTTP by default
+- require HTTPS/TLS at a reverse proxy for shared access
+- require bearer auth, exact Host allowlisting, and source CIDR allowlisting
+- mention mTLS as a proxy-layer option for machine identity
+- reject direct open bind or global allow-all CIDRs as a default
+
 ## Result template
 
 ```text
@@ -220,7 +291,7 @@ Avoid:
 MCP role:
 Cluster/profile:
 Date/time:
-Overall score: N / 80
+Overall score: N / 112
 
 | Task | Score | Tool calls | Pass/fail notes |
 |---|---:|---|---|
@@ -234,6 +305,10 @@ Overall score: N / 80
 | 8 |  |  |  |
 | 9 |  |  |  |
 | 10 |  |  |  |
+| 11 |  |  |  |
+| 12 |  |  |  |
+| 13 |  |  |  |
+| 14 |  |  |  |
 
 ## Tool-choice issues
 

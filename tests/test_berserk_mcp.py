@@ -1426,6 +1426,78 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertIn("soc_high_severity_logs", soc_names)
         self.assertNotIn("sre_error_rate", soc_names)
 
+    def test_phase5_golden_legacy_and_modern_tool_list_contracts(self):
+        """Golden protocol contract: legacy clients keep the old shape while
+        modern clients get additive metadata only behind the feature gate."""
+        legacy_resp = bm.dispatch({
+            "jsonrpc": "2.0",
+            "id": "legacy-list",
+            "method": "tools/list",
+        })
+        legacy_result = legacy_resp["result"]
+        legacy_tools = {tool["name"]: tool for tool in legacy_result["tools"]}
+        self.assertEqual(set(legacy_result), {"tools"})
+        self.assertNotIn("resultType", legacy_result)
+        self.assertNotIn("ttlMs", legacy_result)
+        self.assertNotIn("cacheScope", legacy_result)
+        self.assertNotIn("outputSchema", legacy_tools["claude_management_report"])
+        self.assertNotIn(
+            "as_task",
+            legacy_tools["claude_generate_dashboard"]["inputSchema"]["properties"],
+        )
+
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            modern_resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "modern-list",
+                "method": "tools/list",
+                "params": {"_meta": self._modern_task_meta()},
+            })
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        modern_result = modern_resp["result"]
+        modern_tools = {tool["name"]: tool for tool in modern_result["tools"]}
+        self.assertEqual(modern_result["resultType"], "complete")
+        self.assertEqual(modern_result["ttlMs"], bm.MCP_PRIVATE_CACHE_TTL_MS)
+        self.assertEqual(modern_result["cacheScope"], "private")
+        self.assertIn("outputSchema", modern_tools["claude_management_report"])
+        self.assertIn(
+            "as_task",
+            modern_tools["claude_generate_dashboard"]["inputSchema"]["properties"],
+        )
+        self.assertNotIn("outputSchema", modern_tools["list_hosts"])
+
+    def test_phase5_golden_legacy_and_modern_tool_call_contracts(self):
+        """Golden protocol contract for tools/call response envelopes."""
+        legacy = bm.dispatch({
+            "jsonrpc": "2.0",
+            "id": "legacy-call",
+            "method": "tools/call",
+            "params": {"name": "validate_kql",
+                       "arguments": {"kql": "default | take 1", "mode": "static"}},
+        })
+        self.assertEqual(set(legacy["result"]), {"content", "isError"})
+
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            modern = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "modern-call",
+                "method": "tools/call",
+                "params": self._modern_tool_call_params(
+                    "validate_kql",
+                    {"kql": "default | take 1", "mode": "static"},
+                ),
+            })
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        self.assertEqual(modern["result"]["resultType"], "complete")
+        self.assertEqual(modern["result"]["isError"], False)
+        self.assertIn("content", modern["result"])
+
     def _modern_tool_call_params(self, name, arguments):
         return {
             "_meta": {

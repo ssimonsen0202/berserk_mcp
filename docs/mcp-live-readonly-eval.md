@@ -6,6 +6,23 @@ Claude feature set, and can execute safe read-only tools against the cluster.
 
 This eval should not write to Berserk or local MCP stores.
 
+For install/package smoke before live Berserk access is available, run the
+offline protocol smoke first. It validates the modern MCP envelope, gated
+`server/discover`, task lifecycle plumbing, and optional loopback HTTP transport
+without requiring cluster authentication.
+
+```bash
+python3 evals/mcp_protocol_smoke.py --include-http \
+  --json-out /tmp/berserk-mcp-protocol-smoke.json
+```
+
+To test the installed console script instead of the checkout:
+
+```bash
+python3 evals/mcp_protocol_smoke.py --server-command berserk-mcp --include-http \
+  --json-out /tmp/berserk-mcp-protocol-smoke-installed.json
+```
+
 ## Command-line eval
 
 From the repository checkout:
