@@ -1232,6 +1232,128 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertNotIn("resultType", result)
         self.assertNotIn("structuredContent", result)
 
+    def test_phase4_modern_tools_list_exposes_output_schema_for_reporting_tools(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "list-1",
+                "method": "tools/list",
+                "params": {"_meta": {
+                    bm.MCP_META_PROTOCOL_VERSION: bm.MCP_PROTOCOL_MODERN,
+                    bm.MCP_META_CLIENT_INFO: {"name": "phase4-test", "version": "1"},
+                    bm.MCP_META_CLIENT_CAPABILITIES: {},
+                }},
+            })
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        result = resp["result"]
+        self.assertEqual(result["resultType"], "complete")
+        tools = {tool["name"]: tool for tool in result["tools"]}
+        for name in (
+            "claude_spend_overview",
+            "claude_management_report",
+            "claude_generate_dashboard",
+        ):
+            self.assertIn("outputSchema", tools[name])
+            self.assertEqual(tools[name]["outputSchema"]["type"], "object")
+            self.assertIn("schema_version", tools[name]["outputSchema"]["required"])
+        self.assertNotIn("outputSchema", tools["list_hosts"])
+
+    def test_phase4_legacy_tools_list_does_not_expose_output_schema_yet(self):
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": "list-1", "method": "tools/list"})
+        tools = {tool["name"]: tool for tool in resp["result"]["tools"]}
+        self.assertNotIn("resultType", resp["result"])
+        self.assertNotIn("outputSchema", tools["claude_management_report"])
+
+    def test_phase4_modern_tools_call_adds_structured_content_from_json_envelope(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        orig_handle = bm.handle_call
+        text = (
+            "Claude enterprise spend overview\n"
+            "Window: 7d ago\n"
+            "\nStructured data:\n"
+            "```json\n"
+            "{\n"
+            '  "schema_version": "1.0",\n'
+            '  "generated_at": "2026-07-31T00:00:00Z",\n'
+            '  "overall": {"public_api_equivalent_usd": 1.23},\n'
+            '  "source_window": "7d ago"\n'
+            "}\n"
+            "```"
+        )
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            bm.handle_call = lambda name, arguments: (text, False)
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "call-1",
+                "method": "tools/call",
+                "params": {
+                    "_meta": {
+                        bm.MCP_META_PROTOCOL_VERSION: bm.MCP_PROTOCOL_MODERN,
+                        bm.MCP_META_CLIENT_INFO: {"name": "phase4-test", "version": "1"},
+                        bm.MCP_META_CLIENT_CAPABILITIES: {},
+                    },
+                    "name": "claude_spend_overview",
+                    "arguments": {},
+                },
+            })
+        finally:
+            bm.handle_call = orig_handle
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        result = resp["result"]
+        self.assertEqual(result["resultType"], "complete")
+        self.assertEqual(result["structuredContent"]["schema_version"], "1.0")
+        self.assertEqual(
+            result["structuredContent"]["overall"]["public_api_equivalent_usd"],
+            1.23,
+        )
+        self.assertEqual(result["content"][0]["text"], text)
+
+    def test_phase4_structured_content_not_added_for_errors_or_non_reporting_tools(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        orig_handle = bm.handle_call
+        text = 'Structured data:\n```json\n{"schema_version":"1.0"}\n```'
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            bm.handle_call = lambda name, arguments: (text, False)
+            non_reporting = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "call-1",
+                "method": "tools/call",
+                "params": {
+                    "_meta": {
+                        bm.MCP_META_PROTOCOL_VERSION: bm.MCP_PROTOCOL_MODERN,
+                        bm.MCP_META_CLIENT_INFO: {"name": "phase4-test", "version": "1"},
+                        bm.MCP_META_CLIENT_CAPABILITIES: {},
+                    },
+                    "name": "list_hosts",
+                    "arguments": {},
+                },
+            })
+            bm.handle_call = lambda name, arguments: (text, True)
+            erroring = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "call-2",
+                "method": "tools/call",
+                "params": {
+                    "_meta": {
+                        bm.MCP_META_PROTOCOL_VERSION: bm.MCP_PROTOCOL_MODERN,
+                        bm.MCP_META_CLIENT_INFO: {"name": "phase4-test", "version": "1"},
+                        bm.MCP_META_CLIENT_CAPABILITIES: {},
+                    },
+                    "name": "claude_spend_overview",
+                    "arguments": {},
+                },
+            })
+        finally:
+            bm.handle_call = orig_handle
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        self.assertNotIn("structuredContent", non_reporting["result"])
+        self.assertNotIn("structuredContent", erroring["result"])
+
     def test_initialize_requires_protocol_version(self):
         """FVR-004: initialize without a protocolVersion must return -32602,
         not silently succeed with a default. Prior behavior returned a

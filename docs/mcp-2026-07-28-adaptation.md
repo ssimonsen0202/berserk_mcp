@@ -111,3 +111,27 @@ Legacy `tools/call` responses do not include `resultType`. Phase 3 also does
 not add `structuredContent`; that remains the Phase 4 task so structured output
 can be designed per high-value reporting tool rather than bolted onto every
 tool generically.
+
+## Phase 4 structured reporting output
+
+Phase 4 adds modern structured output for high-value AI FinOps and management
+reporting tools while preserving text compatibility.
+
+In modern mode, `tools/list` accepts valid modern `_meta` and includes
+`outputSchema` for these reporting tools:
+
+- `claude_spend_overview`
+- `claude_feature_cost`
+- `claude_project_economics`
+- `claude_efficiency_insights`
+- `claude_harness_recommendations`
+- `claude_optimization_impact`
+- `claude_management_report`
+- `claude_generate_dashboard`
+
+In modern `tools/call`, successful results from those tools include
+`structuredContent` when the existing sanitized text envelope contains valid
+fenced JSON with a `schema_version`. The text `content` remains present and
+unchanged for Claude Desktop, Claude Code, and other legacy/text-first clients.
+
+Errors and non-reporting tools do not receive synthetic structured content.

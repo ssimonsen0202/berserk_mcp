@@ -1438,6 +1438,38 @@ def _since():
     return {"since": {"type": "string", "description": "Time window e.g. '15m ago', '1h ago', '2d ago'."}}
 
 
+_REPORT_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "schema_version": {"type": "string"},
+        "generated_at": {"type": "string"},
+        "source_window": {"type": "string"},
+    },
+    "required": ["schema_version"],
+    "additionalProperties": True,
+}
+
+
+_STRUCTURED_OUTPUT_TOOLS = frozenset({
+    "claude_spend_overview",
+    "claude_feature_cost",
+    "claude_project_economics",
+    "claude_efficiency_insights",
+    "claude_harness_recommendations",
+    "claude_optimization_impact",
+    "claude_management_report",
+    "claude_generate_dashboard",
+})
+
+
+def _with_output_schema(tool):
+    if tool.get("name") in _STRUCTURED_OUTPUT_TOOLS:
+        enriched = dict(tool)
+        enriched["outputSchema"] = _REPORT_OUTPUT_SCHEMA
+        return enriched
+    return tool
+
+
 # Each entry: name -> (kql, default_since). Tools requiring user input or extra
 # calls (logs, search, cc_search, schema) are handled explicitly in handle_call.
 SIMPLE = {
@@ -2529,13 +2561,52 @@ def _discover_result():
     }
 
 
-def _tool_call_result(text, is_error, mode):
+def _tool_list_result(mode):
+    allt = [t for t in TOOLS + MGMT_TOOLS if tool_visible(t)]
+    tl = []
+    for t in allt:
+        visible_tool = _with_output_schema(t) if mode == PROTOCOL_MODE_MODERN else t
+        item = {
+            "name": visible_tool["name"],
+            "title": TITLES.get(visible_tool["name"], visible_tool["name"]),
+            "description": visible_tool["description"],
+            "inputSchema": visible_tool["inputSchema"],
+            "annotations": annotations_for(visible_tool["name"]),
+        }
+        if "outputSchema" in visible_tool:
+            item["outputSchema"] = visible_tool["outputSchema"]
+        tl.append(item)
+    result = {"tools": tl}
+    if mode == PROTOCOL_MODE_MODERN:
+        result["resultType"] = "complete"
+    return result
+
+
+def _extract_structured_content(name, text, is_error):
+    if is_error or name not in _STRUCTURED_OUTPUT_TOOLS:
+        return None
+    match = re.search(r"```json\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+    if not match:
+        return None
+    try:
+        payload = json.loads(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    if isinstance(payload, dict) and isinstance(payload.get("schema_version"), str):
+        return payload
+    return None
+
+
+def _tool_call_result(name, text, is_error, mode):
     result = {
         "content": [{"type": "text", "text": text}],
         "isError": is_error,
     }
     if mode == PROTOCOL_MODE_MODERN:
         result["resultType"] = "complete"
+        structured = _extract_structured_content(name, text, is_error)
+        if structured is not None:
+            result["structuredContent"] = structured
     return result
 
 
@@ -2631,21 +2702,21 @@ def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE
             return _jsonrpc_error(-32602, "Invalid params", id_)
         return _reply({})
     if method == "tools/list":
+        if mode == PROTOCOL_MODE_MODERN:
+            if set(params) - {"_meta"}:
+                if is_notification:
+                    return None
+                return _jsonrpc_error(-32602, "Invalid params", id_)
+            if not _valid_modern_meta(params):
+                if is_notification:
+                    return None
+                return _jsonrpc_error(-32602, "Invalid params", id_)
+            return _reply(_tool_list_result(mode))
         if params:
             if is_notification:
                 return None
             return _jsonrpc_error(-32602, "Invalid params", id_)
-        allt = [t for t in TOOLS + MGMT_TOOLS if tool_visible(t)]
-        tl = []
-        for t in allt:
-            tl.append({
-                "name": t["name"],
-                "title": TITLES.get(t["name"], t["name"]),
-                "description": t["description"],
-                "inputSchema": t["inputSchema"],
-                "annotations": annotations_for(t["name"]),
-            })
-        return _reply({"tools": tl})
+        return _reply(_tool_list_result(mode))
     if method == "tools/call":
         if is_notification:
             return None
@@ -2675,7 +2746,7 @@ def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE
             include_entropy=REDACT_ENTROPY,
             pii_types=REDACT_PII_TYPES,
         )
-        return _jsonrpc_result(id_, _tool_call_result(text, is_err, mode))
+        return _jsonrpc_result(id_, _tool_call_result(name, text, is_err, mode))
 
     if is_notification:
         return None
