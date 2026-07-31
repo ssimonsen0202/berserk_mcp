@@ -172,3 +172,37 @@ user accepts the tradeoff.
 The guidance is modern-only. Legacy `2025-06-18` calls keep the previous
 text-result/error behavior. Hidden role tools still return the same
 `unknown tool` response and never reveal a tool-specific input-required reason.
+
+## Phase 7 task lifecycle
+
+Phase 7 adds a minimal modern-only task lifecycle for selected long-running
+operations:
+
+- `generate_parser`
+- `run_discovery_worker`
+- `claude_generate_dashboard`
+
+Task creation is explicit. A modern client must:
+
+1. enable MCP `2026-07-28`;
+2. advertise task capability in `_meta["io.modelcontextprotocol/clientCapabilities"]`;
+3. call an eligible tool with `arguments.as_task=true`.
+
+The server then returns `resultType: "task"` with a task id. Clients can poll
+with `tasks/get` and request cancellation with `tasks/cancel`.
+
+Current task constraints are intentionally conservative:
+
+- tasks are in-memory only and are not persisted across process restarts;
+- tasks expire after one hour;
+- at most 64 task records are retained;
+- task results are filtered through the same MCP output redaction path before
+  being stored;
+- task lookup is role-scoped, so a task created in one active role is not
+  visible from another role;
+- cancellation is best-effort: pending/running task state is marked cancelled,
+  but Python cannot safely terminate an already-running parser/dashboard worker
+  thread.
+
+Legacy clients and modern clients without task capability keep synchronous
+behavior even if they pass `as_task=true`.

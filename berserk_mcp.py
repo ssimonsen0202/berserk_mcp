@@ -58,6 +58,7 @@ import os
 import shutil
 import threading
 import time
+import uuid
 import urllib.error
 import random
 from contextlib import contextmanager
@@ -349,6 +350,9 @@ PROTOCOL_MODE_MODERN = "modern"
 PROTOCOL_VERSION = MCP_PROTOCOL_LEGACY
 MCP_PRIVATE_CACHE_TTL_MS = 300000
 MCP_EXPENSIVE_SEARCH_WINDOW_HOURS = 24
+MCP_TASK_TTL_SECONDS = 3600
+MCP_MAX_TASKS = 64
+MCP_TASK_EXTENSION_URI = "https://tasks.extensions.modelcontextprotocol.io"
 MCP_META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion"
 MCP_META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo"
 MCP_META_CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities"
@@ -1464,12 +1468,27 @@ _STRUCTURED_OUTPUT_TOOLS = frozenset({
 })
 
 
+_TASK_ELIGIBLE_TOOLS = frozenset({
+    "generate_parser",
+    "run_discovery_worker",
+    "claude_generate_dashboard",
+})
+
+
 def _with_output_schema(tool):
+    enriched = dict(tool)
     if tool.get("name") in _STRUCTURED_OUTPUT_TOOLS:
-        enriched = dict(tool)
         enriched["outputSchema"] = _REPORT_OUTPUT_SCHEMA
-        return enriched
-    return tool
+    if tool.get("name") in _TASK_ELIGIBLE_TOOLS:
+        schema = dict(enriched["inputSchema"])
+        properties = dict(schema.get("properties", {}))
+        properties["as_task"] = {
+            "type": "boolean",
+            "description": "Modern MCP only: return a task immediately and run the tool asynchronously.",
+        }
+        schema["properties"] = properties
+        enriched["inputSchema"] = schema
+    return enriched
 
 
 # Each entry: name -> (kql, default_since). Tools requiring user input or extra
@@ -2546,12 +2565,20 @@ def _valid_modern_meta(params):
 
 
 def _discover_result():
+    capabilities = {
+        "tools": {"listChanged": False},
+        "extensions": {
+            "tasks": {
+                "uri": MCP_TASK_EXTENSION_URI,
+                "methods": ["tasks/get", "tasks/cancel"],
+                "createHint": "Set arguments.as_task=true on eligible long-running tools.",
+            }
+        },
+    }
     return {
         "resultType": "complete",
         "supportedVersions": [MCP_PROTOCOL_MODERN, MCP_PROTOCOL_LEGACY],
-        "capabilities": {
-            "tools": {"listChanged": False},
-        },
+        "capabilities": capabilities,
         "_meta": {
             MCP_META_SERVER_INFO: SERVER_INFO,
         },
@@ -2561,6 +2588,154 @@ def _discover_result():
         "ttlMs": MCP_PRIVATE_CACHE_TTL_MS,
         "cacheScope": "private",
     }
+
+
+_TASKS = {}
+_TASK_LOCK = threading.RLock()
+
+
+def _task_now():
+    return time.time()
+
+
+def _task_public(record):
+    return {
+        "id": record["id"],
+        "status": record["status"],
+        "tool": record["tool"],
+        "createdAt": record["created_at"],
+        "updatedAt": record["updated_at"],
+        "expiresAt": record["expires_at"],
+    }
+
+
+def _task_result(record):
+    payload = {"resultType": "complete", "task": _task_public(record)}
+    if record.get("result") is not None:
+        payload["result"] = record["result"]
+    if record.get("error"):
+        payload["error"] = record["error"]
+    return payload
+
+
+def _task_prune_locked(now=None):
+    now = _task_now() if now is None else now
+    expired = [task_id for task_id, record in _TASKS.items()
+               if record.get("expires_ts", 0) <= now]
+    for task_id in expired:
+        _TASKS.pop(task_id, None)
+    if len(_TASKS) > MCP_MAX_TASKS:
+        removable = sorted(
+            (
+                (record.get("updated_ts", 0), task_id)
+                for task_id, record in _TASKS.items()
+                if record.get("status") in {"complete", "failed", "cancelled"}
+            )
+        )
+        for _, task_id in removable[:len(_TASKS) - MCP_MAX_TASKS]:
+            _TASKS.pop(task_id, None)
+
+
+def _launch_task_worker(target):
+    worker = threading.Thread(target=target, daemon=True)
+    worker.start()
+    return worker
+
+
+def _execute_task_tool(name, arguments, mode):
+    text, is_err = handle_call(name, arguments)
+    text = secret_scan.apply_output_filter(
+        text,
+        mode=REDACT_MODE,
+        include_entropy=REDACT_ENTROPY,
+        pii_types=REDACT_PII_TYPES,
+    )
+    return _tool_call_result(name, text, is_err, mode)
+
+
+def _run_task(task_id, name, arguments, mode):
+    with _TASK_LOCK:
+        record = _TASKS.get(task_id)
+        if record is None or record.get("status") == "cancelled":
+            return
+        record["status"] = "running"
+        record["updated_ts"] = _task_now()
+        record["updated_at"] = now_iso()
+    try:
+        result = _execute_task_tool(name, arguments, mode)
+        status = "complete"
+        error = ""
+    except Exception as exc:  # pragma: no cover - defensive boundary
+        result = None
+        status = "failed"
+        error = type(exc).__name__
+    with _TASK_LOCK:
+        record = _TASKS.get(task_id)
+        if record is None or record.get("status") == "cancelled":
+            return
+        record["status"] = status
+        record["result"] = result
+        record["error"] = error
+        record["updated_ts"] = _task_now()
+        record["updated_at"] = now_iso()
+
+
+def _create_task(name, arguments, mode):
+    now = _task_now()
+    task_id = "task_" + uuid.uuid4().hex
+    record = {
+        "id": task_id,
+        "status": "pending",
+        "tool": name,
+        "role": ACTIVE_ROLE,
+        "created_ts": now,
+        "updated_ts": now,
+        "expires_ts": now + MCP_TASK_TTL_SECONDS,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + MCP_TASK_TTL_SECONDS)),
+        "result": None,
+        "error": "",
+    }
+    with _TASK_LOCK:
+        _task_prune_locked(now)
+        if len(_TASKS) >= MCP_MAX_TASKS:
+            return None
+        _TASKS[task_id] = record
+    _launch_task_worker(lambda: _run_task(task_id, name, dict(arguments), mode))
+    return {"resultType": "task", "task": _task_public(record)}
+
+
+def _task_lookup(task_id):
+    with _TASK_LOCK:
+        _task_prune_locked()
+        record = _TASKS.get(task_id)
+        if record is None or record.get("role") != ACTIVE_ROLE:
+            return None
+        return dict(record)
+
+
+def _client_supports_tasks(params):
+    meta = _request_meta(params)
+    if meta is None:
+        return False
+    caps = meta.get(MCP_META_CLIENT_CAPABILITIES)
+    if not isinstance(caps, dict):
+        return False
+    extensions = caps.get("extensions")
+    return (
+        isinstance(caps.get("tasks"), dict)
+        or (isinstance(extensions, dict) and (
+            "tasks" in extensions or MCP_TASK_EXTENSION_URI in extensions
+        ))
+    )
+
+
+def _task_id_from_params(params):
+    task_id = params.get("taskId") or params.get("id")
+    if not isinstance(task_id, str) or not re.fullmatch(r"task_[a-f0-9]{32}", task_id):
+        return None
+    return task_id
 
 
 def _tool_list_result(mode):
@@ -2749,6 +2924,33 @@ def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE
             return _jsonrpc_error(-32602, "Invalid params", id_)
         return _jsonrpc_result(id_, _discover_result())
 
+    if method in {"tasks/get", "tasks/cancel"}:
+        if is_notification:
+            return None
+        if mode != PROTOCOL_MODE_MODERN:
+            return _jsonrpc_error(-32601, "Method not found", id_)
+        if set(params) - {"_meta", "taskId", "id"}:
+            return _jsonrpc_error(-32602, "Invalid params", id_)
+        if not _valid_modern_meta(params):
+            return _jsonrpc_error(-32602, "Invalid params", id_)
+        task_id = _task_id_from_params(params)
+        if task_id is None:
+            return _jsonrpc_error(-32602, "Invalid params", id_)
+        record = _task_lookup(task_id)
+        if record is None:
+            return _jsonrpc_error(-32602, "Unknown task", id_)
+        if method == "tasks/cancel":
+            with _TASK_LOCK:
+                current = _TASKS.get(task_id)
+                if current is None or current.get("role") != ACTIVE_ROLE:
+                    return _jsonrpc_error(-32602, "Unknown task", id_)
+                if current.get("status") in {"pending", "running"}:
+                    current["status"] = "cancelled"
+                    current["updated_ts"] = _task_now()
+                    current["updated_at"] = now_iso()
+                record = dict(current)
+        return _jsonrpc_result(id_, _task_result(record))
+
     if method == "initialize":
         if is_notification:
             return None
@@ -2821,6 +3023,17 @@ def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE
                 input_required = _modern_preflight_input_required(name, arguments)
                 if input_required is not None:
                     return _jsonrpc_result(id_, input_required)
+                if (
+                    name in _TASK_ELIGIBLE_TOOLS
+                    and arguments.get("as_task") is True
+                    and _client_supports_tasks(params)
+                ):
+                    task_args = dict(arguments)
+                    task_args.pop("as_task", None)
+                    task_result = _create_task(name, task_args, mode)
+                    if task_result is None:
+                        return _jsonrpc_error(-32000, "Task limit reached", id_)
+                    return _jsonrpc_result(id_, task_result)
             text, is_err = handle_call(name, arguments)
         text = secret_scan.apply_output_filter(
             text,

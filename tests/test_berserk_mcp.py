@@ -1057,7 +1057,7 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertEqual(result["resultType"], "complete")
         self.assertEqual(result["supportedVersions"],
                          [bm.MCP_PROTOCOL_MODERN, bm.MCP_PROTOCOL_LEGACY])
-        self.assertEqual(result["capabilities"], {"tools": {"listChanged": False}})
+        self.assertEqual(result["capabilities"]["tools"], {"listChanged": False})
         self.assertEqual(result["_meta"][bm.MCP_META_SERVER_INFO]["name"], "berserk-q")
         self.assertEqual(result["cacheScope"], "private")
         self.assertGreater(result["ttlMs"], 0)
@@ -1434,6 +1434,13 @@ class BerserkMcpTest(unittest.TestCase):
             "arguments": arguments,
         }
 
+    def _modern_task_meta(self):
+        return {
+            bm.MCP_META_PROTOCOL_VERSION: bm.MCP_PROTOCOL_MODERN,
+            bm.MCP_META_CLIENT_INFO: {"name": "phase-test", "version": "1"},
+            bm.MCP_META_CLIENT_CAPABILITIES: {"tasks": {}},
+        }
+
     def test_phase6_modern_expensive_search_returns_input_required_without_bzrk(self):
         orig_enabled = bm.ENABLE_MCP_2026_07_28
         try:
@@ -1568,6 +1575,239 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertTrue(resp["result"]["isError"])
         self.assertIn("unknown tool", resp["result"]["content"][0]["text"])
         self.assertNotEqual(resp["result"].get("reason"), "missing_finops_attribution")
+
+    def test_phase7_modern_discover_advertises_tasks_extension(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "discover-1",
+                "method": "server/discover",
+                "params": {"_meta": self._modern_task_meta()},
+            })
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        tasks = resp["result"]["capabilities"]["extensions"]["tasks"]
+        self.assertEqual(tasks["uri"], bm.MCP_TASK_EXTENSION_URI)
+        self.assertEqual(tasks["methods"], ["tasks/get", "tasks/cancel"])
+
+    def test_phase7_modern_tools_list_marks_task_eligible_tools(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "list-1",
+                "method": "tools/list",
+                "params": {"_meta": self._modern_task_meta()},
+            })
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        tools = {tool["name"]: tool for tool in resp["result"]["tools"]}
+        for name in ("generate_parser", "run_discovery_worker", "claude_generate_dashboard"):
+            self.assertIn("as_task", tools[name]["inputSchema"]["properties"])
+        self.assertNotIn("as_task", tools["list_hosts"]["inputSchema"]["properties"])
+
+    def test_phase7_legacy_tools_list_does_not_mark_task_tools(self):
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": "list-1", "method": "tools/list"})
+        tools = {tool["name"]: tool for tool in resp["result"]["tools"]}
+        self.assertNotIn("as_task", tools["generate_parser"]["inputSchema"]["properties"])
+
+    def test_phase7_task_create_and_get_completed_result(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        orig_handle = bm.handle_call
+        orig_launch = bm._launch_task_worker
+        try:
+            bm._TASKS.clear()
+            bm.ENABLE_MCP_2026_07_28 = True
+            bm.handle_call = lambda name, arguments: (
+                'Structured data:\n```json\n{"schema_version":"1.0"}\n```', False
+            )
+            bm._launch_task_worker = lambda target: target()
+            create = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "call-1",
+                "method": "tools/call",
+                "params": {
+                    "_meta": self._modern_task_meta(),
+                    "name": "claude_generate_dashboard",
+                    "arguments": {"as_task": True, "dashboard": "portfolio"},
+                },
+            })
+            task_id = create["result"]["task"]["id"]
+            get = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "task-1",
+                "method": "tasks/get",
+                "params": {"_meta": self._modern_task_meta(), "taskId": task_id},
+            })
+        finally:
+            bm._TASKS.clear()
+            bm._launch_task_worker = orig_launch
+            bm.handle_call = orig_handle
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        self.assertEqual(create["result"]["resultType"], "task")
+        self.assertRegex(task_id, r"^task_[a-f0-9]{32}$")
+        self.assertEqual(get["result"]["task"]["status"], "complete")
+        self.assertEqual(get["result"]["result"]["resultType"], "complete")
+        self.assertEqual(get["result"]["result"]["structuredContent"]["schema_version"], "1.0")
+
+    def test_phase7_task_cancel_pending_and_get_cancelled(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        orig_handle = bm.handle_call
+        orig_launch = bm._launch_task_worker
+        try:
+            bm._TASKS.clear()
+            bm.ENABLE_MCP_2026_07_28 = True
+            bm.handle_call = lambda name, arguments: ("OK", False)
+            bm._launch_task_worker = lambda target: None
+            create = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "call-1",
+                "method": "tools/call",
+                "params": {
+                    "_meta": self._modern_task_meta(),
+                    "name": "generate_parser",
+                    "arguments": {"as_task": True, "service": "svc"},
+                },
+            })
+            task_id = create["result"]["task"]["id"]
+            cancel = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "task-1",
+                "method": "tasks/cancel",
+                "params": {"_meta": self._modern_task_meta(), "taskId": task_id},
+            })
+            get = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "task-2",
+                "method": "tasks/get",
+                "params": {"_meta": self._modern_task_meta(), "taskId": task_id},
+            })
+        finally:
+            bm._TASKS.clear()
+            bm._launch_task_worker = orig_launch
+            bm.handle_call = orig_handle
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        self.assertEqual(cancel["result"]["task"]["status"], "cancelled")
+        self.assertEqual(get["result"]["task"]["status"], "cancelled")
+        self.assertNotIn("result", get["result"])
+
+    def test_phase7_task_result_is_redacted_before_storage(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        orig_handle = bm.handle_call
+        orig_launch = bm._launch_task_worker
+        secret = "AKIAIOSFODNN7EXAMPLE"
+        try:
+            bm._TASKS.clear()
+            bm.ENABLE_MCP_2026_07_28 = True
+            bm.handle_call = lambda name, arguments: (f"leaked {secret}", False)
+            bm._launch_task_worker = lambda target: target()
+            create = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "call-1",
+                "method": "tools/call",
+                "params": {
+                    "_meta": self._modern_task_meta(),
+                    "name": "run_discovery_worker",
+                    "arguments": {"as_task": True, "max_jobs": 1},
+                },
+            })
+            task_id = create["result"]["task"]["id"]
+            get = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "task-1",
+                "method": "tasks/get",
+                "params": {"_meta": self._modern_task_meta(), "taskId": task_id},
+            })
+        finally:
+            bm._TASKS.clear()
+            bm._launch_task_worker = orig_launch
+            bm.handle_call = orig_handle
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        payload = json.dumps(get["result"], sort_keys=True)
+        self.assertNotIn(secret, payload)
+        self.assertIn("[REDACTED:", payload)
+
+    def test_phase7_as_task_requires_client_task_capability(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        orig_handle = bm.handle_call
+        orig_launch = bm._launch_task_worker
+        launched = []
+        try:
+            bm._TASKS.clear()
+            bm.ENABLE_MCP_2026_07_28 = True
+            bm.handle_call = lambda name, arguments: ("OK", False)
+            bm._launch_task_worker = lambda target: launched.append(True)
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "call-1",
+                "method": "tools/call",
+                "params": self._modern_tool_call_params(
+                    "generate_parser", {"as_task": True, "service": "svc"}
+                ),
+            })
+        finally:
+            bm._TASKS.clear()
+            bm._launch_task_worker = orig_launch
+            bm.handle_call = orig_handle
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        self.assertEqual(resp["result"]["resultType"], "complete")
+        self.assertEqual(resp["result"]["content"][0]["text"], "OK")
+        self.assertEqual(launched, [])
+
+    def test_phase7_tasks_methods_are_modern_only(self):
+        resp = bm.dispatch({
+            "jsonrpc": "2.0",
+            "id": "task-1",
+            "method": "tasks/get",
+            "params": {"taskId": "task_" + "0" * 32},
+        })
+        self.assertEqual(resp["error"]["code"], -32601)
+
+    def test_phase7_task_expiry_and_role_isolation_return_unknown(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        orig_role = bm.ACTIVE_ROLE
+        try:
+            bm._TASKS.clear()
+            bm.ENABLE_MCP_2026_07_28 = True
+            task_id = "task_" + "1" * 32
+            bm._TASKS[task_id] = {
+                "id": task_id,
+                "status": "complete",
+                "tool": "generate_parser",
+                "role": "sre",
+                "created_ts": 1,
+                "updated_ts": 1,
+                "expires_ts": bm._task_now() + 1000,
+                "created_at": "2026-07-31T00:00:00Z",
+                "updated_at": "2026-07-31T00:00:00Z",
+                "expires_at": "2026-07-31T01:00:00Z",
+                "result": {"resultType": "complete", "content": [{"type": "text", "text": "OK"}], "isError": False},
+                "error": "",
+            }
+            bm.ACTIVE_ROLE = "soc"
+            wrong_role = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "task-1",
+                "method": "tasks/get",
+                "params": {"_meta": self._modern_task_meta(), "taskId": task_id},
+            })
+            bm.ACTIVE_ROLE = "sre"
+            bm._TASKS[task_id]["expires_ts"] = bm._task_now() - 1
+            expired = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "task-2",
+                "method": "tasks/get",
+                "params": {"_meta": self._modern_task_meta(), "taskId": task_id},
+            })
+        finally:
+            bm.ACTIVE_ROLE = orig_role
+            bm._TASKS.clear()
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        self.assertEqual(wrong_role["error"]["code"], -32602)
+        self.assertEqual(expired["error"]["code"], -32602)
 
     def test_initialize_requires_protocol_version(self):
         """FVR-004: initialize without a protocolVersion must return -32602,
