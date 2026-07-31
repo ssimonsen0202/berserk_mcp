@@ -278,8 +278,10 @@ def run_http_smoke(command):
     env["BERSERK_MCP_HTTP_BIND"] = f"127.0.0.1:{port}"
     env["BERSERK_MCP_HTTP_AUTH_TOKEN"] = token
     env.setdefault("BERSERK_MCP_ROLE", "claude")
+    http_command = list(command)
+    http_command.append("--http")
     proc = subprocess.Popen(
-        command + ["--http"],
+        http_command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
