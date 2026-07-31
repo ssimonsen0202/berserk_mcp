@@ -954,6 +954,7 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertEqual(bm.MCP_PROTOCOL_LEGACY, "2025-06-18")
         self.assertEqual(bm.MCP_PROTOCOL_MODERN, "2026-07-28")
         self.assertEqual(bm.PROTOCOL_VERSION, bm.MCP_PROTOCOL_LEGACY)
+        self.assertEqual(bm.MCP_PRIVATE_CACHE_TTL_MS, 300000)
         self.assertEqual(
             bm.MCP_META_PROTOCOL_VERSION,
             "io.modelcontextprotocol/protocolVersion",
@@ -1353,6 +1354,73 @@ class BerserkMcpTest(unittest.TestCase):
             bm.ENABLE_MCP_2026_07_28 = orig_enabled
         self.assertNotIn("structuredContent", non_reporting["result"])
         self.assertNotIn("structuredContent", erroring["result"])
+
+    def test_phase5_modern_tools_list_has_private_cache_hints(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "list-1",
+                "method": "tools/list",
+                "params": {"_meta": {
+                    bm.MCP_META_PROTOCOL_VERSION: bm.MCP_PROTOCOL_MODERN,
+                    bm.MCP_META_CLIENT_INFO: {"name": "phase5-test", "version": "1"},
+                    bm.MCP_META_CLIENT_CAPABILITIES: {},
+                }},
+            })
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        result = resp["result"]
+        self.assertEqual(result["resultType"], "complete")
+        self.assertEqual(result["ttlMs"], bm.MCP_PRIVATE_CACHE_TTL_MS)
+        self.assertEqual(result["cacheScope"], "private")
+
+    def test_phase5_legacy_tools_list_has_no_cache_hints(self):
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": "list-1", "method": "tools/list"})
+        self.assertNotIn("ttlMs", resp["result"])
+        self.assertNotIn("cacheScope", resp["result"])
+
+    def test_phase5_modern_tools_list_cache_is_role_private(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        orig_role = bm.ACTIVE_ROLE
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            bm.ACTIVE_ROLE = "sre"
+            sre_resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "list-sre",
+                "method": "tools/list",
+                "params": {"_meta": {
+                    bm.MCP_META_PROTOCOL_VERSION: bm.MCP_PROTOCOL_MODERN,
+                    bm.MCP_META_CLIENT_INFO: {"name": "phase5-test", "version": "1"},
+                    bm.MCP_META_CLIENT_CAPABILITIES: {},
+                }},
+            })
+            bm.ACTIVE_ROLE = "soc"
+            soc_resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "list-soc",
+                "method": "tools/list",
+                "params": {"_meta": {
+                    bm.MCP_META_PROTOCOL_VERSION: bm.MCP_PROTOCOL_MODERN,
+                    bm.MCP_META_CLIENT_INFO: {"name": "phase5-test", "version": "1"},
+                    bm.MCP_META_CLIENT_CAPABILITIES: {},
+                }},
+            })
+        finally:
+            bm.ACTIVE_ROLE = orig_role
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        sre = sre_resp["result"]
+        soc = soc_resp["result"]
+        self.assertEqual(sre["cacheScope"], "private")
+        self.assertEqual(soc["cacheScope"], "private")
+        sre_names = {tool["name"] for tool in sre["tools"]}
+        soc_names = {tool["name"] for tool in soc["tools"]}
+        self.assertIn("sre_error_rate", sre_names)
+        self.assertNotIn("soc_high_severity_logs", sre_names)
+        self.assertIn("soc_high_severity_logs", soc_names)
+        self.assertNotIn("sre_error_rate", soc_names)
 
     def test_initialize_requires_protocol_version(self):
         """FVR-004: initialize without a protocolVersion must return -32602,

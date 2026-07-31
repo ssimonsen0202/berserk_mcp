@@ -347,6 +347,7 @@ SUPPORTED_PROTOCOL_VERSIONS = (MCP_PROTOCOL_LEGACY, MCP_PROTOCOL_MODERN)
 PROTOCOL_MODE_LEGACY = "legacy"
 PROTOCOL_MODE_MODERN = "modern"
 PROTOCOL_VERSION = MCP_PROTOCOL_LEGACY
+MCP_PRIVATE_CACHE_TTL_MS = 300000
 MCP_META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion"
 MCP_META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo"
 MCP_META_CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities"
@@ -2556,7 +2557,7 @@ def _discover_result():
         "instructions": INSTRUCTIONS,
         # Role and environment can change tool visibility/instructions, so this
         # is cacheable only for the current caller/deployment context.
-        "ttlMs": 300000,
+        "ttlMs": MCP_PRIVATE_CACHE_TTL_MS,
         "cacheScope": "private",
     }
 
@@ -2579,6 +2580,8 @@ def _tool_list_result(mode):
     result = {"tools": tl}
     if mode == PROTOCOL_MODE_MODERN:
         result["resultType"] = "complete"
+        result["ttlMs"] = MCP_PRIVATE_CACHE_TTL_MS
+        result["cacheScope"] = "private"
     return result
 
 

@@ -135,3 +135,16 @@ fenced JSON with a `schema_version`. The text `content` remains present and
 unchanged for Claude Desktop, Claude Code, and other legacy/text-first clients.
 
 Errors and non-reporting tools do not receive synthetic structured content.
+
+## Phase 5 tool-list cache hints
+
+Phase 5 adds conservative modern cache hints to `tools/list`:
+
+- `resultType: "complete"`;
+- `ttlMs: 300000`;
+- `cacheScope: "private"`.
+
+The cache scope is intentionally private. Tool visibility and instructions are
+role-aware and deployment-aware, so clients must not share one role's cached
+tool list with another role or user context. Legacy `tools/list` remains
+unchanged and does not include cache hints.
