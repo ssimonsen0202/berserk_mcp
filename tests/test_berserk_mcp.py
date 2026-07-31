@@ -10,6 +10,9 @@ import sys
 import json
 import subprocess
 import tempfile
+import threading
+import urllib.error
+import urllib.request
 import unittest
 from pathlib import Path
 
@@ -1808,6 +1811,218 @@ class BerserkMcpTest(unittest.TestCase):
             bm.ENABLE_MCP_2026_07_28 = orig_enabled
         self.assertEqual(wrong_role["error"]["code"], -32602)
         self.assertEqual(expired["error"]["code"], -32602)
+
+    def _http_config(self, **overrides):
+        base = {
+            "enable": True,
+            "bind": "127.0.0.1:8765",
+            "allow_remote": False,
+            "auth_token": "",
+            "allowed_hosts": "",
+            "allow_cidrs": "127.0.0.1/32",
+            "max_request_bytes": 1024 * 1024,
+            "max_concurrent_requests": 4,
+            "use_forwarded_for": False,
+            "trusted_proxy_cidrs": "",
+        }
+        base.update(overrides)
+        return bm._build_http_config(**base)
+
+    def _serve_http_for_test(self, config):
+        handler = bm._make_http_handler(config)
+        server = bm.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    def _http_post(self, base_url, payload, headers=None):
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            base_url + "/mcp",
+            data=body,
+            headers=dict({"Content-Type": "application/json"}, **(headers or {})),
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+
+    def test_phase8_http_config_defaults_are_disabled_and_loopback(self):
+        config = bm._build_http_config(
+            enable=False,
+            bind="127.0.0.1:8765",
+            allow_remote=False,
+            auth_token="",
+            allowed_hosts="",
+            allow_cidrs="127.0.0.1/32,::1/128",
+            max_request_bytes=1048576,
+            max_concurrent_requests=8,
+            use_forwarded_for=False,
+            trusted_proxy_cidrs="",
+        )
+        self.assertFalse(config["enabled"])
+        self.assertFalse(config["remote"])
+        self.assertEqual(config["host"], "127.0.0.1")
+        self.assertEqual(config["port"], 8765)
+        self.assertEqual(config["allowed_hosts"], set())
+
+    def test_phase8_remote_bind_fails_closed_without_explicit_controls(self):
+        with self.assertRaisesRegex(bm.HttpConfigError, "ALLOW_REMOTE"):
+            self._http_config(bind="0.0.0.0:8765")
+        with self.assertRaisesRegex(bm.HttpConfigError, "AUTH_TOKEN"):
+            self._http_config(bind="0.0.0.0:8765", allow_remote=True)
+        with self.assertRaisesRegex(bm.HttpConfigError, "ALLOWED_HOSTS"):
+            self._http_config(
+                bind="0.0.0.0:8765",
+                allow_remote=True,
+                auth_token="token",
+            )
+
+    def test_phase8_remote_bind_rejects_global_cidr(self):
+        with self.assertRaisesRegex(bm.HttpConfigError, "global allow-all"):
+            self._http_config(
+                bind="0.0.0.0:8765",
+                allow_remote=True,
+                auth_token="token",
+                allowed_hosts="mcp.internal.example.com",
+                allow_cidrs="0.0.0.0/0",
+            )
+
+    def test_phase8_forwarded_for_requires_trusted_proxy_cidrs(self):
+        with self.assertRaisesRegex(bm.HttpConfigError, "TRUSTED_PROXY_CIDRS"):
+            self._http_config(use_forwarded_for=True, trusted_proxy_cidrs="")
+
+    def test_phase8_http_loopback_post_dispatches_jsonrpc(self):
+        config = self._http_config()
+        base = self._serve_http_for_test(config)
+        status, body = self._http_post(base, {
+            "jsonrpc": "2.0",
+            "id": "ping-1",
+            "method": "ping",
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(body["result"], {})
+
+    def test_phase8_http_healthz_is_minimal(self):
+        config = self._http_config()
+        base = self._serve_http_for_test(config)
+        with urllib.request.urlopen(base + "/healthz", timeout=5) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        self.assertEqual(body, {"status": "ok"})
+
+    def test_phase8_http_auth_required_when_configured(self):
+        config = self._http_config(auth_token="secret-token")
+        base = self._serve_http_for_test(config)
+        request = urllib.request.Request(
+            base + "/mcp",
+            data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(ctx.exception.code, 401)
+        ctx.exception.close()
+        status, body = self._http_post(
+            base,
+            {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            headers={"Authorization": "Bearer secret-token"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["result"], {})
+
+    def test_phase8_http_host_allowlist_rejects_unexpected_host(self):
+        config = self._http_config(allowed_hosts="mcp.internal.example.com")
+        base = self._serve_http_for_test(config)
+        request = urllib.request.Request(
+            base + "/mcp",
+            data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Host": "evil.example.com"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(ctx.exception.code, 403)
+        ctx.exception.close()
+
+    def test_phase8_http_cidr_allowlist_rejects_disallowed_peer(self):
+        config = self._http_config(allow_cidrs="192.0.2.0/24")
+        base = self._serve_http_for_test(config)
+        request = urllib.request.Request(
+            base + "/mcp",
+            data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(ctx.exception.code, 403)
+        ctx.exception.close()
+
+    def test_phase8_http_oversized_request_rejected(self):
+        config = self._http_config(max_request_bytes=8)
+        base = self._serve_http_for_test(config)
+        request = urllib.request.Request(
+            base + "/mcp",
+            data=b'{"jsonrpc":"2.0","id":1,"method":"ping"}',
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(ctx.exception.code, 413)
+        ctx.exception.close()
+
+    def test_phase8_http_rejects_cors_preflight_and_get_mcp(self):
+        config = self._http_config()
+        base = self._serve_http_for_test(config)
+        options = urllib.request.Request(base + "/mcp", method="OPTIONS")
+        with self.assertRaises(urllib.error.HTTPError) as opt_ctx:
+            urllib.request.urlopen(options, timeout=5)
+        self.assertEqual(opt_ctx.exception.code, 405)
+        opt_ctx.exception.close()
+        with self.assertRaises(urllib.error.HTTPError) as get_ctx:
+            urllib.request.urlopen(base + "/mcp", timeout=5)
+        self.assertEqual(get_ctx.exception.code, 404)
+        get_ctx.exception.close()
+
+    def test_phase8_http_concurrency_limit_rejects_when_full(self):
+        config = self._http_config(max_concurrent_requests=1)
+        self.assertTrue(config["semaphore"].acquire(blocking=False))
+        try:
+            base = self._serve_http_for_test(config)
+            request = urllib.request.Request(
+                base + "/mcp",
+                data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(request, timeout=5)
+            self.assertEqual(ctx.exception.code, 429)
+            ctx.exception.close()
+        finally:
+            config["semaphore"].release()
+
+    def test_phase8_forwarded_for_spoofing_ignored_unless_proxy_trusted(self):
+        config = self._http_config(
+            use_forwarded_for=True,
+            trusted_proxy_cidrs="192.0.2.0/24",
+        )
+
+        class FakeHandler:
+            client_address = ("127.0.0.1", 12345)
+            headers = {"X-Forwarded-For": "198.51.100.9"}
+
+        self.assertEqual(bm._http_effective_client_ip(FakeHandler(), config), "127.0.0.1")
+
+        trusted = self._http_config(
+            use_forwarded_for=True,
+            trusted_proxy_cidrs="127.0.0.1/32",
+        )
+        self.assertEqual(bm._http_effective_client_ip(FakeHandler(), trusted), "198.51.100.9")
 
     def test_initialize_requires_protocol_version(self):
         """FVR-004: initialize without a protocolVersion must return -32602,

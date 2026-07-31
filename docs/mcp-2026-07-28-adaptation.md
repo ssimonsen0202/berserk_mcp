@@ -206,3 +206,28 @@ Current task constraints are intentionally conservative:
 
 Legacy clients and modern clients without task capability keep synchronous
 behavior even if they pass `as_task=true`.
+
+## Phase 8 HTTP transport safe defaults
+
+Phase 8 adds an optional stdlib HTTP transport while preserving stdio as the
+default.
+
+Safe defaults:
+
+- HTTP is disabled unless `BERSERK_MCP_HTTP_ENABLE=1` or `--http` is used with
+  that environment setting;
+- the default bind is `127.0.0.1:8765`;
+- non-loopback bind requires `BERSERK_MCP_HTTP_ALLOW_REMOTE=1`;
+- non-loopback bind also requires bearer auth, Host allowlisting, and CIDR
+  allowlisting;
+- global allow-all CIDRs such as `0.0.0.0/0` and `::/0` are rejected;
+- only `POST /mcp` dispatches JSON-RPC;
+- `GET /healthz` returns only a minimal status object;
+- CORS is not enabled;
+- request bodies are size-limited;
+- concurrent requests are bounded;
+- `X-Forwarded-For` is ignored unless forwarded-header mode and trusted proxy
+  CIDRs are both configured.
+
+Production/shared deployments should terminate HTTPS/TLS at a reverse proxy and
+forward to loopback. See [MCP HTTP transport and reverse proxy deployment](mcp-http-reverse-proxy.md).

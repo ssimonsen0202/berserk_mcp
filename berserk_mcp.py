@@ -61,6 +61,9 @@ import time
 import uuid
 import urllib.error
 import random
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import hmac
+import ipaddress
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -360,6 +363,22 @@ MCP_META_SERVER_INFO = "io.modelcontextprotocol/serverInfo"
 ENABLE_MCP_2026_07_28 = os.environ.get(
     "BERSERK_MCP_ENABLE_2026_07_28", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
+HTTP_ENABLE = os.environ.get("BERSERK_MCP_HTTP_ENABLE", "").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+HTTP_BIND = os.environ.get("BERSERK_MCP_HTTP_BIND", "127.0.0.1:8765").strip() or "127.0.0.1:8765"
+HTTP_ALLOW_REMOTE = os.environ.get("BERSERK_MCP_HTTP_ALLOW_REMOTE", "").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+HTTP_AUTH_TOKEN = os.environ.get("BERSERK_MCP_HTTP_AUTH_TOKEN", "")
+HTTP_ALLOWED_HOSTS = os.environ.get("BERSERK_MCP_HTTP_ALLOWED_HOSTS", "").strip()
+HTTP_ALLOW_CIDRS = os.environ.get("BERSERK_MCP_HTTP_ALLOW_CIDRS", "127.0.0.1/32,::1/128").strip()
+HTTP_MAX_REQUEST_BYTES = _nonnegative_int_env("BERSERK_MCP_HTTP_MAX_REQUEST_BYTES", 1048576) or 1048576
+HTTP_MAX_CONCURRENT_REQUESTS = _nonnegative_int_env("BERSERK_MCP_HTTP_MAX_CONCURRENT_REQUESTS", 8) or 8
+HTTP_USE_FORWARDED_FOR = os.environ.get(
+    "BERSERK_MCP_HTTP_USE_FORWARDED_FOR", ""
+).strip().lower() in {"1", "true", "yes", "on"}
+HTTP_TRUSTED_PROXY_CIDRS = os.environ.get("BERSERK_MCP_HTTP_TRUSTED_PROXY_CIDRS", "").strip()
 SERVER_INFO = {"name": "berserk-q", "title": "Berserk Query", "version": __version__}
 
 _BASE_INSTRUCTIONS = (
@@ -3082,6 +3101,285 @@ def _serve_mcp():
     log("stdin closed")
 
 
+class HttpConfigError(ValueError):
+    pass
+
+
+def _parse_http_bind(bind):
+    text = str(bind or "").strip()
+    if text.startswith("["):
+        host, _, rest = text[1:].partition("]")
+        if not rest.startswith(":"):
+            raise HttpConfigError("BERSERK_MCP_HTTP_BIND must be host:port")
+        port_text = rest[1:]
+    else:
+        if ":" not in text:
+            raise HttpConfigError("BERSERK_MCP_HTTP_BIND must be host:port")
+        host, port_text = text.rsplit(":", 1)
+    host = host.strip()
+    if not host:
+        raise HttpConfigError("BERSERK_MCP_HTTP_BIND host is empty")
+    try:
+        port = int(port_text)
+    except (TypeError, ValueError):
+        raise HttpConfigError("BERSERK_MCP_HTTP_BIND port must be an integer")
+    if not 1 <= port <= 65535:
+        raise HttpConfigError("BERSERK_MCP_HTTP_BIND port must be 1..65535")
+    return host, port
+
+
+def _host_is_loopback(host):
+    lowered = str(host or "").strip().lower()
+    if lowered == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(lowered).is_loopback
+    except ValueError:
+        return False
+
+
+def _parse_cidr_list(raw, label, *, allow_empty=False, allow_global=False):
+    text = str(raw or "").strip()
+    if not text:
+        if allow_empty:
+            return []
+        raise HttpConfigError(f"{label} must not be empty")
+    networks = []
+    for item in text.split(","):
+        part = item.strip()
+        if not part:
+            continue
+        try:
+            network = ipaddress.ip_network(part, strict=False)
+        except ValueError as exc:
+            raise HttpConfigError(f"{label} contains invalid CIDR {part!r}") from exc
+        if not allow_global and network.prefixlen == 0:
+            raise HttpConfigError(f"{label} must not include global allow-all CIDR {part!r}")
+        networks.append(network)
+    if not networks and not allow_empty:
+        raise HttpConfigError(f"{label} must not be empty")
+    return networks
+
+
+def _parse_host_list(raw, *, allow_empty=False):
+    text = str(raw or "").strip()
+    if not text:
+        if allow_empty:
+            return set()
+        raise HttpConfigError("BERSERK_MCP_HTTP_ALLOWED_HOSTS must not be empty")
+    hosts = set()
+    for item in text.split(","):
+        host = item.strip().lower()
+        if not host:
+            continue
+        if any(ch in host for ch in "\r\n/\\"):
+            raise HttpConfigError("BERSERK_MCP_HTTP_ALLOWED_HOSTS contains an invalid host")
+        hosts.add(host)
+    if not hosts and not allow_empty:
+        raise HttpConfigError("BERSERK_MCP_HTTP_ALLOWED_HOSTS must not be empty")
+    return hosts
+
+
+def _normalize_host_header(value):
+    host = str(value or "").strip().lower()
+    if host.startswith("["):
+        inner, _, _ = host[1:].partition("]")
+        return inner
+    return host.rsplit(":", 1)[0] if ":" in host else host
+
+
+def _http_peer_ip(handler):
+    return str(handler.client_address[0])
+
+
+def _ip_allowed(ip_text, networks):
+    try:
+        ip = ipaddress.ip_address(str(ip_text))
+    except ValueError:
+        return False
+    return any(ip in network for network in networks)
+
+
+def _http_effective_client_ip(handler, config):
+    peer = _http_peer_ip(handler)
+    if not config["use_forwarded_for"]:
+        return peer
+    if not _ip_allowed(peer, config["trusted_proxy_cidrs"]):
+        return peer
+    forwarded = handler.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        first = forwarded.split(",", 1)[0].strip()
+        try:
+            ipaddress.ip_address(first)
+            return first
+        except ValueError:
+            return peer
+    return peer
+
+
+def _build_http_config(
+    *,
+    enable=HTTP_ENABLE,
+    bind=HTTP_BIND,
+    allow_remote=HTTP_ALLOW_REMOTE,
+    auth_token=HTTP_AUTH_TOKEN,
+    allowed_hosts=HTTP_ALLOWED_HOSTS,
+    allow_cidrs=HTTP_ALLOW_CIDRS,
+    max_request_bytes=HTTP_MAX_REQUEST_BYTES,
+    max_concurrent_requests=HTTP_MAX_CONCURRENT_REQUESTS,
+    use_forwarded_for=HTTP_USE_FORWARDED_FOR,
+    trusted_proxy_cidrs=HTTP_TRUSTED_PROXY_CIDRS,
+):
+    host, port = _parse_http_bind(bind)
+    loopback = _host_is_loopback(host)
+    remote = not loopback
+    allowed = _parse_cidr_list(allow_cidrs, "BERSERK_MCP_HTTP_ALLOW_CIDRS")
+    trusted = _parse_cidr_list(
+        trusted_proxy_cidrs,
+        "BERSERK_MCP_HTTP_TRUSTED_PROXY_CIDRS",
+        allow_empty=not use_forwarded_for,
+    )
+    hosts = _parse_host_list(allowed_hosts, allow_empty=True)
+    if remote:
+        if not allow_remote:
+            raise HttpConfigError("non-loopback HTTP bind requires BERSERK_MCP_HTTP_ALLOW_REMOTE=1")
+        if not str(auth_token or ""):
+            raise HttpConfigError("non-loopback HTTP bind requires BERSERK_MCP_HTTP_AUTH_TOKEN")
+        if not hosts:
+            raise HttpConfigError("non-loopback HTTP bind requires BERSERK_MCP_HTTP_ALLOWED_HOSTS")
+    if use_forwarded_for and not trusted:
+        raise HttpConfigError("forwarded-header mode requires BERSERK_MCP_HTTP_TRUSTED_PROXY_CIDRS")
+    if max_request_bytes <= 0:
+        raise HttpConfigError("BERSERK_MCP_HTTP_MAX_REQUEST_BYTES must be positive")
+    if max_concurrent_requests <= 0:
+        raise HttpConfigError("BERSERK_MCP_HTTP_MAX_CONCURRENT_REQUESTS must be positive")
+    return {
+        "enabled": bool(enable),
+        "host": host,
+        "port": port,
+        "remote": remote,
+        "auth_token": str(auth_token or ""),
+        "allowed_hosts": hosts,
+        "allow_cidrs": allowed,
+        "max_request_bytes": int(max_request_bytes),
+        "semaphore": threading.BoundedSemaphore(int(max_concurrent_requests)),
+        "use_forwarded_for": bool(use_forwarded_for),
+        "trusted_proxy_cidrs": trusted,
+    }
+
+
+def _http_error(handler, status, message):
+    body = json.dumps({"error": message}).encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def _http_request_allowed(handler, config):
+    host = _normalize_host_header(handler.headers.get("Host", ""))
+    if config["allowed_hosts"] and host not in config["allowed_hosts"]:
+        return False, 403, "host not allowed"
+    client_ip = _http_effective_client_ip(handler, config)
+    if not _ip_allowed(client_ip, config["allow_cidrs"]):
+        return False, 403, "client ip not allowed"
+    token = config["auth_token"]
+    if token:
+        supplied = handler.headers.get("Authorization", "")
+        prefix = "Bearer "
+        if not supplied.startswith(prefix) or not hmac.compare_digest(supplied[len(prefix):], token):
+            return False, 401, "unauthorized"
+    return True, 200, "ok"
+
+
+def _make_http_handler(config):
+    class BerserkMcpHttpHandler(BaseHTTPRequestHandler):
+        server_version = "berserk-mcp"
+        sys_version = ""
+
+        def log_message(self, fmt, *args):
+            log("http: " + fmt % args)
+
+        def do_GET(self):
+            if self.path != "/healthz":
+                _http_error(self, 404, "not found")
+                return
+            body = b'{"status":"ok"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_OPTIONS(self):
+            _http_error(self, 405, "method not allowed")
+
+        def do_POST(self):
+            if self.path != "/mcp":
+                _http_error(self, 404, "not found")
+                return
+            ok, status, message = _http_request_allowed(self, config)
+            if not ok:
+                _http_error(self, status, message)
+                return
+            ctype = self.headers.get("Content-Type", "")
+            if "application/json" not in ctype.lower():
+                _http_error(self, 415, "content-type must be application/json")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", ""))
+            except ValueError:
+                _http_error(self, 411, "content-length required")
+                return
+            if length < 0 or length > config["max_request_bytes"]:
+                _http_error(self, 413, "request too large")
+                return
+            if not config["semaphore"].acquire(blocking=False):
+                _http_error(self, 429, "too many concurrent requests")
+                return
+            try:
+                raw = self.rfile.read(length)
+                try:
+                    req = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    resp = {"jsonrpc": "2.0", "id": None,
+                            "error": {"code": -32700, "message": "Parse error"}}
+                else:
+                    resp = dispatch(req)
+                    if resp is None:
+                        self.send_response(204)
+                        self.send_header("Cache-Control", "no-store")
+                        self.end_headers()
+                        return
+                body = json.dumps(resp).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+            finally:
+                config["semaphore"].release()
+
+    return BerserkMcpHttpHandler
+
+
+def _serve_http():
+    config = _build_http_config()
+    if not config["enabled"]:
+        raise HttpConfigError("HTTP transport is disabled; set BERSERK_MCP_HTTP_ENABLE=1")
+    handler = _make_http_handler(config)
+    log(f"http starting v{__version__} on {config['host']}:{config['port']}")
+    server = ThreadingHTTPServer((config["host"], config["port"]), handler)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+
+
 def main():
     import argparse
     cli = argparse.ArgumentParser(
@@ -3122,6 +3420,8 @@ def main():
     cli.add_argument("--dashboard-format", choices=("markdown", "html"), default="markdown")
     cli.add_argument("--set-hermes-url", metavar="URL",
                      help="persist the Hermes LLM endpoint and exit")
+    cli.add_argument("--http", action="store_true",
+                     help="serve HTTP transport instead of stdio; requires BERSERK_MCP_HTTP_ENABLE=1")
     ns = cli.parse_args()
     if ns.import_business_data:
         if not ns.input:
@@ -3179,6 +3479,12 @@ def main():
             since=ns.since, mode=ns.agent_report_mode,
             output_json=ns.agent_report_json,
         ))
+    if ns.http or HTTP_ENABLE:
+        try:
+            _serve_http()
+        except HttpConfigError as e:
+            print(f"HTTP configuration error: {e}", file=sys.stderr)
+            sys.exit(2)
     _serve_mcp()
 
 

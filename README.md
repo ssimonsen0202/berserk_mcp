@@ -16,6 +16,7 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 - **Works with Claude Desktop, Claude Code, and any MCP client.** berserk-mcp speaks MCP protocol version `2025-06-18` over stdio (newline-delimited JSON-RPC 2.0). It implements every required method — `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call` — with strict envelope validation and adversarial regression tests. See [Connect it to a client](#connect-it-to-a-client) for `claude_desktop_config.json` and `claude mcp add` recipes.
 - **MCP compatibility baseline.** The current stable protocol path is intentionally `2025-06-18` stdio. The newer `2026-07-28` MCP adaptation is planned as additive dual-era support, not a breaking replacement. See [MCP 2026-07-28 adaptation baseline](docs/mcp-2026-07-28-adaptation.md).
+- **Optional HTTP transport is closed by default.** stdio remains the default. HTTP opens no listener unless explicitly enabled, defaults to loopback, and fails closed for remote bind unless auth, Host allowlisting, and CIDR allowlisting are configured. See [MCP HTTP transport and reverse proxy deployment](docs/mcp-http-reverse-proxy.md) and [.env.example](.env.example).
 - **Zero dependencies.** berserk-mcp uses only the Python standard library. You do not `pip install` anything beyond the package itself. (The optional LLM parser factory uses `urllib`. It still adds no third-party dependency.)
 - **Small and auditable.** berserk-mcp is standard-library-only. Its focused modules cover the MCP server, parser generation, Claude analytics, AI FinOps, KQL validation, schema snapshots, secret redaction, and ingestion advice. You can read, audit, and vendor each module without pulling in a framework.
 - **Cross-platform.** berserk-mcp runs anywhere the `bzrk` CLI runs, including Windows.
@@ -1118,6 +1119,16 @@ All configuration is via environment variables. All are optional:
 | `BERSERK_MCP_PRICING_CATALOG_PATH` | packaged catalog | Absolute path to an alternate effective-dated pricing catalog. Unknown models remain unpriced. |
 | `BERSERK_MCP_OTLP_LOGS_ENDPOINT` | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` or unset | Optional OTLP/HTTP logs endpoint for `engineering-work` and recommendation-audit records. Non-loopback endpoints must use HTTPS. |
 | `BERSERK_MCP_OTLP_HEADERS` | `OTEL_EXPORTER_OTLP_HEADERS` or unset | Comma-separated `name=value` OTLP HTTP headers. Malformed items fail loudly and cannot override JSON `Content-Type`. |
+| `BERSERK_MCP_HTTP_ENABLE` | `0` | Optional HTTP transport. Disabled by default; stdio remains the normal Claude Desktop/Claude Code path. |
+| `BERSERK_MCP_HTTP_BIND` | `127.0.0.1:8765` | HTTP bind address when HTTP is enabled. Keep loopback when using a local reverse proxy. |
+| `BERSERK_MCP_HTTP_ALLOW_REMOTE` | unset | Required to bind HTTP to a non-loopback address. Remote bind also requires auth, Host allowlist, and CIDR allowlist. |
+| `BERSERK_MCP_HTTP_AUTH_TOKEN` | unset | Bearer token for HTTP requests. Required for non-loopback bind and recommended behind a reverse proxy. |
+| `BERSERK_MCP_HTTP_ALLOWED_HOSTS` | unset | Exact Host header allowlist. Required for non-loopback bind; wildcards are intentionally unsupported. |
+| `BERSERK_MCP_HTTP_ALLOW_CIDRS` | `127.0.0.1/32,::1/128` | Source IP/CIDR allowlist. Global allow-all CIDRs such as `0.0.0.0/0` and `::/0` are rejected. |
+| `BERSERK_MCP_HTTP_MAX_REQUEST_BYTES` | `1048576` | Maximum HTTP JSON request body size. Oversized requests return HTTP 413. |
+| `BERSERK_MCP_HTTP_MAX_CONCURRENT_REQUESTS` | `8` | Maximum concurrent HTTP requests admitted to MCP dispatch. Excess requests return HTTP 429. |
+| `BERSERK_MCP_HTTP_USE_FORWARDED_FOR` | unset | Trust `X-Forwarded-For` only when the socket peer is in `BERSERK_MCP_HTTP_TRUSTED_PROXY_CIDRS`. Disabled by default. |
+| `BERSERK_MCP_HTTP_TRUSTED_PROXY_CIDRS` | unset | CIDRs for reverse proxies whose forwarded client IP should be trusted. Required when forwarded-header mode is enabled. |
 
 Parser-factory (LLM parser generation) has its own env vars — see
 [Parser factory](#parser-factory-llm-generated-query-packs) above.
@@ -1136,6 +1147,11 @@ telemetry payload:
   `BERSERK_DISCORD_ALERT_SECRET` is sent as `X-Auth-Token`.
 - `BERSERK_MCP_OTLP_LOGS_ENDPOINT` is stricter: non-loopback OTLP endpoints
   must use HTTPS. Plain HTTP is accepted only for loopback collectors.
+- The optional HTTP MCP transport is disabled by default. If enabled, it binds
+  to loopback unless `BERSERK_MCP_HTTP_ALLOW_REMOTE=1` is explicitly set, and
+  remote bind fails closed without bearer auth, Host allowlisting, and CIDR
+  allowlisting. Put remote/shared deployments behind HTTPS/TLS; see
+  [MCP HTTP transport and reverse proxy deployment](docs/mcp-http-reverse-proxy.md).
 - The Berserk cluster endpoint itself is configured inside the `bzrk` CLI
   profile via `bzrk login`. berserk-mcp shells out to `bzrk` and never reads
   the stored bearer token or profile URL, so operators must ensure the CLI
