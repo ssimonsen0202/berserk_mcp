@@ -341,7 +341,15 @@ FINOPS_OTLP_HEADERS = os.environ.get(
     "BERSERK_MCP_OTLP_HEADERS",
     os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", ""),
 ).strip()
-PROTOCOL_VERSION = "2025-06-18"
+MCP_PROTOCOL_LEGACY = "2025-06-18"
+MCP_PROTOCOL_MODERN = "2026-07-28"
+SUPPORTED_PROTOCOL_VERSIONS = (MCP_PROTOCOL_LEGACY, MCP_PROTOCOL_MODERN)
+PROTOCOL_MODE_LEGACY = "legacy"
+PROTOCOL_MODE_MODERN = "modern"
+PROTOCOL_VERSION = MCP_PROTOCOL_LEGACY
+ENABLE_MCP_2026_07_28 = os.environ.get(
+    "BERSERK_MCP_ENABLE_2026_07_28", ""
+).strip().lower() in {"1", "true", "yes", "on"}
 SERVER_INFO = {"name": "berserk-q", "title": "Berserk Query", "version": __version__}
 
 _BASE_INSTRUCTIONS = (
@@ -2423,6 +2431,51 @@ def _valid_mcp_id(value):
     return isinstance(value, (str, int)) and not isinstance(value, bool)
 
 
+def _modern_mcp_enabled():
+    return bool(ENABLE_MCP_2026_07_28)
+
+
+def _request_meta(params):
+    """Return a validated modern-MCP metadata object, or None if malformed.
+
+    MCP 2026-07-28 moves protocol information into per-request ``_meta``.
+    Phase 1 only adds internal mode selection; actual modern methods are added
+    in later phases.
+    """
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    if meta is None:
+        return {}
+    if not isinstance(meta, dict):
+        return None
+    return meta
+
+
+def _requested_protocol_version(params):
+    meta = _request_meta(params)
+    if meta is None:
+        return None
+    version = meta.get("protocolVersion")
+    if isinstance(version, str) and version.strip():
+        return version.strip()
+    return None
+
+
+def _protocol_mode_for_request(method, params):
+    """Select the internal MCP compatibility mode for a validated request.
+
+    Default behavior stays legacy. Modern mode is selected only when the
+    explicit feature flag is on and the request advertises the modern protocol
+    through per-request metadata.
+    """
+    del method  # reserved for method-specific routing in Phase 2+
+    if (
+        _modern_mcp_enabled()
+        and _requested_protocol_version(params) == MCP_PROTOCOL_MODERN
+    ):
+        return PROTOCOL_MODE_MODERN
+    return PROTOCOL_MODE_LEGACY
+
+
 def dispatch(req):
     """Handle one JSON-RPC request per JSON-RPC 2.0 and MCP 2025-06-18.
 
@@ -2450,7 +2503,8 @@ def dispatch(req):
     params = req.get("params") or {}
 
     try:
-        return _dispatch_validated(method, params, id_, is_notification)
+        mode = _protocol_mode_for_request(method, params)
+        return _dispatch_validated(method, params, id_, is_notification, mode=mode)
     except Exception as exc:
         log(f"dispatch failed: {type(exc).__name__}")
         if is_notification:
@@ -2458,8 +2512,10 @@ def dispatch(req):
         return _jsonrpc_error(-32603, "Internal error", id_)
 
 
-def _dispatch_validated(method, params, id_, is_notification):
+def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE_LEGACY):
     """Dispatch a validated request envelope to the appropriate handler."""
+    del mode  # Phase 1 scaffolding; modern behavior is introduced in Phase 2+.
+
     def _reply(result):
         if is_notification:
             return None

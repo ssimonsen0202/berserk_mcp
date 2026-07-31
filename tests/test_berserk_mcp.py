@@ -950,6 +950,67 @@ class BerserkMcpTest(unittest.TestCase):
             bm.run_bzrk = orig_run_bzrk
 
     # ---- JSON-RPC protocol ----
+    def test_phase1_protocol_constants_are_explicit(self):
+        self.assertEqual(bm.MCP_PROTOCOL_LEGACY, "2025-06-18")
+        self.assertEqual(bm.MCP_PROTOCOL_MODERN, "2026-07-28")
+        self.assertEqual(bm.PROTOCOL_VERSION, bm.MCP_PROTOCOL_LEGACY)
+        self.assertEqual(
+            bm.SUPPORTED_PROTOCOL_VERSIONS,
+            (bm.MCP_PROTOCOL_LEGACY, bm.MCP_PROTOCOL_MODERN),
+        )
+
+    def test_phase1_protocol_mode_defaults_to_legacy(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = False
+            self.assertEqual(
+                bm._protocol_mode_for_request("tools/list", {}),
+                bm.PROTOCOL_MODE_LEGACY,
+            )
+            self.assertEqual(
+                bm._protocol_mode_for_request(
+                    "tools/list",
+                    {"_meta": {"protocolVersion": bm.MCP_PROTOCOL_MODERN}},
+                ),
+                bm.PROTOCOL_MODE_LEGACY,
+            )
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+
+    def test_phase1_protocol_mode_can_select_modern_when_gated(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            self.assertEqual(
+                bm._protocol_mode_for_request(
+                    "tools/list",
+                    {"_meta": {"protocolVersion": bm.MCP_PROTOCOL_MODERN}},
+                ),
+                bm.PROTOCOL_MODE_MODERN,
+            )
+            self.assertEqual(
+                bm._protocol_mode_for_request(
+                    "tools/list",
+                    {"_meta": {"protocolVersion": "2099-01-01"}},
+                ),
+                bm.PROTOCOL_MODE_LEGACY,
+            )
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+
+    def test_phase1_malformed_meta_does_not_enable_modern_mode(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            self.assertIsNone(bm._request_meta({"_meta": "2026-07-28"}))
+            self.assertIsNone(bm._requested_protocol_version({"_meta": "2026-07-28"}))
+            self.assertEqual(
+                bm._protocol_mode_for_request("tools/list", {"_meta": "2026-07-28"}),
+                bm.PROTOCOL_MODE_LEGACY,
+            )
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+
     def test_initialize_requires_protocol_version(self):
         """FVR-004: initialize without a protocolVersion must return -32602,
         not silently succeed with a default. Prior behavior returned a

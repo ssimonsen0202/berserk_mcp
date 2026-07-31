@@ -57,3 +57,19 @@ Phase 0 adds explicit tests for the legacy contract:
 
 These tests complement the existing JSON-RPC, role-filtering, secret-redaction,
 and tool-shape regression tests.
+
+## Phase 1 protocol-mode scaffolding
+
+Phase 1 introduces internal constants and helpers without exposing modern MCP
+behavior by default:
+
+- `MCP_PROTOCOL_LEGACY = "2025-06-18"`
+- `MCP_PROTOCOL_MODERN = "2026-07-28"`
+- `SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2026-07-28")`
+- `PROTOCOL_VERSION = "2025-06-18"`
+- `BERSERK_MCP_ENABLE_2026_07_28=1` gates modern-mode selection
+
+Modern mode is selected internally only when the feature flag is enabled and a
+validated request carries `_meta.protocolVersion == "2026-07-28"`. Until Phase
+2 implements `server/discover`, this mode-selection hook does not change the
+observable legacy RPC contract.
