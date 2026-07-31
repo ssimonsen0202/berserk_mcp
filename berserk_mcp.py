@@ -2529,6 +2529,16 @@ def _discover_result():
     }
 
 
+def _tool_call_result(text, is_error, mode):
+    result = {
+        "content": [{"type": "text", "text": text}],
+        "isError": is_error,
+    }
+    if mode == PROTOCOL_MODE_MODERN:
+        result["resultType"] = "complete"
+    return result
+
+
 def dispatch(req):
     """Handle one JSON-RPC request per JSON-RPC 2.0 and MCP 2025-06-18.
 
@@ -2639,6 +2649,8 @@ def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE
     if method == "tools/call":
         if is_notification:
             return None
+        if mode == PROTOCOL_MODE_MODERN and not _valid_modern_meta(params):
+            return _jsonrpc_error(-32602, "Invalid params", id_)
         name = params.get("name")
         if not name or not isinstance(name, str):
             return _jsonrpc_error(-32602, "Invalid params", id_)
@@ -2663,9 +2675,7 @@ def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE
             include_entropy=REDACT_ENTROPY,
             pii_types=REDACT_PII_TYPES,
         )
-        return _jsonrpc_result(id_, {
-            "content": [{"type": "text", "text": text}], "isError": is_err,
-        })
+        return _jsonrpc_result(id_, _tool_call_result(text, is_err, mode))
 
     if is_notification:
         return None

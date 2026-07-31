@@ -94,3 +94,20 @@ The discovery result intentionally does not inline the tool list. Clients must
 still call `tools/list` for the role-filtered tools. This avoids introducing a
 second tool-visibility surface while the modern `tools/list` envelope is still
 planned for a later phase.
+
+## Phase 3 modern `tools/call` result envelope
+
+Phase 3 adds the first modern tool result envelope while keeping legacy behavior
+unchanged.
+
+When `BERSERK_MCP_ENABLE_2026_07_28=1` is set and a `tools/call` request carries
+valid modern `_meta`, the tool result includes:
+
+- `resultType: "complete"`;
+- the existing text `content` array;
+- the existing `isError` flag.
+
+Legacy `tools/call` responses do not include `resultType`. Phase 3 also does
+not add `structuredContent`; that remains the Phase 4 task so structured output
+can be designed per high-value reporting tool rather than bolted onto every
+tool generically.

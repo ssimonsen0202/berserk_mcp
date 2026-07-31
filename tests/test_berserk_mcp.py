@@ -1144,6 +1144,94 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertNotIn('"tools": [', payload)
         self.assertNotIn("soc_high_severity_logs", payload)
 
+    def test_phase3_modern_tools_call_includes_result_type_and_text_content(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "call-1",
+                "method": "tools/call",
+                "params": {
+                    "_meta": {
+                        bm.MCP_META_PROTOCOL_VERSION: bm.MCP_PROTOCOL_MODERN,
+                        bm.MCP_META_CLIENT_INFO: {"name": "phase3-test", "version": "1"},
+                        bm.MCP_META_CLIENT_CAPABILITIES: {},
+                    },
+                    "name": "list_hosts",
+                    "arguments": {},
+                },
+            })
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        result = resp["result"]
+        self.assertEqual(result["resultType"], "complete")
+        self.assertEqual(result["content"], [{"type": "text", "text": "OK"}])
+        self.assertFalse(result["isError"])
+        self.assertNotIn("structuredContent", result)
+
+    def test_phase3_modern_tools_call_error_keeps_is_error_and_result_type(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "call-1",
+                "method": "tools/call",
+                "params": {
+                    "_meta": {
+                        bm.MCP_META_PROTOCOL_VERSION: bm.MCP_PROTOCOL_MODERN,
+                        bm.MCP_META_CLIENT_INFO: {"name": "phase3-test", "version": "1"},
+                        bm.MCP_META_CLIENT_CAPABILITIES: {},
+                    },
+                    "name": "no_such_tool",
+                    "arguments": {},
+                },
+            })
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        result = resp["result"]
+        self.assertEqual(result["resultType"], "complete")
+        self.assertTrue(result["isError"])
+        self.assertIn("unknown tool", result["content"][0]["text"])
+
+    def test_phase3_modern_tools_call_requires_valid_modern_meta(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "call-1",
+                "method": "tools/call",
+                "params": {
+                    "_meta": {
+                        bm.MCP_META_PROTOCOL_VERSION: bm.MCP_PROTOCOL_MODERN,
+                    },
+                    "name": "list_hosts",
+                    "arguments": {},
+                },
+            })
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        self.assertEqual(resp["error"]["code"], -32602)
+
+    def test_phase3_tools_call_without_modern_meta_stays_legacy_when_flag_enabled(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "call-1",
+                "method": "tools/call",
+                "params": {"name": "list_hosts", "arguments": {}},
+            })
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        result = resp["result"]
+        self.assertEqual(result["content"], [{"type": "text", "text": "OK"}])
+        self.assertNotIn("resultType", result)
+        self.assertNotIn("structuredContent", result)
+
     def test_initialize_requires_protocol_version(self):
         """FVR-004: initialize without a protocolVersion must return -32602,
         not silently succeed with a default. Prior behavior returned a
