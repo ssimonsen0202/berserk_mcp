@@ -347,6 +347,10 @@ SUPPORTED_PROTOCOL_VERSIONS = (MCP_PROTOCOL_LEGACY, MCP_PROTOCOL_MODERN)
 PROTOCOL_MODE_LEGACY = "legacy"
 PROTOCOL_MODE_MODERN = "modern"
 PROTOCOL_VERSION = MCP_PROTOCOL_LEGACY
+MCP_META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion"
+MCP_META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo"
+MCP_META_CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities"
+MCP_META_SERVER_INFO = "io.modelcontextprotocol/serverInfo"
 ENABLE_MCP_2026_07_28 = os.environ.get(
     "BERSERK_MCP_ENABLE_2026_07_28", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -2427,6 +2431,21 @@ def _jsonrpc_result(id_, result):
     return {"jsonrpc": "2.0", "id": id_, "result": result}
 
 
+def _jsonrpc_unsupported_protocol(id_, requested):
+    return {
+        "jsonrpc": "2.0",
+        "id": id_,
+        "error": {
+            "code": -32022,
+            "message": "Unsupported protocol version",
+            "data": {
+                "supported": list(SUPPORTED_PROTOCOL_VERSIONS),
+                "requested": requested,
+            },
+        },
+    }
+
+
 def _valid_mcp_id(value):
     return isinstance(value, (str, int)) and not isinstance(value, bool)
 
@@ -2454,7 +2473,9 @@ def _requested_protocol_version(params):
     meta = _request_meta(params)
     if meta is None:
         return None
-    version = meta.get("protocolVersion")
+    version = meta.get(MCP_META_PROTOCOL_VERSION)
+    if version is None:
+        version = meta.get("protocolVersion")
     if isinstance(version, str) and version.strip():
         return version.strip()
     return None
@@ -2474,6 +2495,38 @@ def _protocol_mode_for_request(method, params):
     ):
         return PROTOCOL_MODE_MODERN
     return PROTOCOL_MODE_LEGACY
+
+
+def _valid_modern_meta(params):
+    meta = _request_meta(params)
+    if meta is None:
+        return False
+    requested = _requested_protocol_version(params)
+    caps = meta.get(MCP_META_CLIENT_CAPABILITIES)
+    client_info = meta.get(MCP_META_CLIENT_INFO)
+    return (
+        requested == MCP_PROTOCOL_MODERN
+        and isinstance(caps, dict)
+        and isinstance(client_info, dict)
+    )
+
+
+def _discover_result():
+    return {
+        "resultType": "complete",
+        "supportedVersions": [MCP_PROTOCOL_MODERN, MCP_PROTOCOL_LEGACY],
+        "capabilities": {
+            "tools": {"listChanged": False},
+        },
+        "_meta": {
+            MCP_META_SERVER_INFO: SERVER_INFO,
+        },
+        "instructions": INSTRUCTIONS,
+        # Role and environment can change tool visibility/instructions, so this
+        # is cacheable only for the current caller/deployment context.
+        "ttlMs": 300000,
+        "cacheScope": "private",
+    }
 
 
 def dispatch(req):
@@ -2514,12 +2567,28 @@ def dispatch(req):
 
 def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE_LEGACY):
     """Dispatch a validated request envelope to the appropriate handler."""
-    del mode  # Phase 1 scaffolding; modern behavior is introduced in Phase 2+.
-
     def _reply(result):
         if is_notification:
             return None
         return _jsonrpc_result(id_, result)
+
+    if method == "server/discover":
+        if is_notification:
+            return None
+        if mode != PROTOCOL_MODE_MODERN:
+            if _modern_mcp_enabled() and _request_meta(params) is None:
+                return _jsonrpc_error(-32602, "Invalid params", id_)
+            requested = _requested_protocol_version(params)
+            if _modern_mcp_enabled() and requested and requested not in SUPPORTED_PROTOCOL_VERSIONS:
+                return _jsonrpc_unsupported_protocol(id_, requested)
+            if _modern_mcp_enabled() and requested != MCP_PROTOCOL_MODERN:
+                return _jsonrpc_error(-32602, "Invalid params", id_)
+            return _jsonrpc_error(-32601, "Method not found", id_)
+        if set(params) - {"_meta"}:
+            return _jsonrpc_error(-32602, "Invalid params", id_)
+        if not _valid_modern_meta(params):
+            return _jsonrpc_error(-32602, "Invalid params", id_)
+        return _jsonrpc_result(id_, _discover_result())
 
     if method == "initialize":
         if is_notification:

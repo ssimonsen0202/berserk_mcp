@@ -70,6 +70,27 @@ behavior by default:
 - `BERSERK_MCP_ENABLE_2026_07_28=1` gates modern-mode selection
 
 Modern mode is selected internally only when the feature flag is enabled and a
-validated request carries `_meta.protocolVersion == "2026-07-28"`. Until Phase
-2 implements `server/discover`, this mode-selection hook does not change the
-observable legacy RPC contract.
+validated request carries
+`_meta["io.modelcontextprotocol/protocolVersion"] == "2026-07-28"`. Until
+Phase 2 implements `server/discover`, this mode-selection hook does not change
+the observable legacy RPC contract.
+
+## Phase 2 `server/discover`
+
+Phase 2 adds the modern discovery method behind
+`BERSERK_MCP_ENABLE_2026_07_28=1`.
+
+When disabled, `server/discover` still returns `Method not found`, preserving
+the Phase 0 legacy baseline. When enabled, a valid modern request returns:
+
+- `resultType: "complete"`;
+- `supportedVersions: ["2026-07-28", "2025-06-18"]`;
+- `capabilities.tools.listChanged: false`;
+- `_meta["io.modelcontextprotocol/serverInfo"]`;
+- the existing role-aware server instructions;
+- conservative private cache hints.
+
+The discovery result intentionally does not inline the tool list. Clients must
+still call `tools/list` for the role-filtered tools. This avoids introducing a
+second tool-visibility surface while the modern `tools/list` envelope is still
+planned for a later phase.

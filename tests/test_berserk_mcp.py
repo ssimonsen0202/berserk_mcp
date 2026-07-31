@@ -955,6 +955,10 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertEqual(bm.MCP_PROTOCOL_MODERN, "2026-07-28")
         self.assertEqual(bm.PROTOCOL_VERSION, bm.MCP_PROTOCOL_LEGACY)
         self.assertEqual(
+            bm.MCP_META_PROTOCOL_VERSION,
+            "io.modelcontextprotocol/protocolVersion",
+        )
+        self.assertEqual(
             bm.SUPPORTED_PROTOCOL_VERSIONS,
             (bm.MCP_PROTOCOL_LEGACY, bm.MCP_PROTOCOL_MODERN),
         )
@@ -970,7 +974,8 @@ class BerserkMcpTest(unittest.TestCase):
             self.assertEqual(
                 bm._protocol_mode_for_request(
                     "tools/list",
-                    {"_meta": {"protocolVersion": bm.MCP_PROTOCOL_MODERN}},
+                    {"_meta": {bm.MCP_META_PROTOCOL_VERSION: bm.MCP_PROTOCOL_MODERN,
+                               bm.MCP_META_CLIENT_CAPABILITIES: {}}},
                 ),
                 bm.PROTOCOL_MODE_LEGACY,
             )
@@ -984,14 +989,16 @@ class BerserkMcpTest(unittest.TestCase):
             self.assertEqual(
                 bm._protocol_mode_for_request(
                     "tools/list",
-                    {"_meta": {"protocolVersion": bm.MCP_PROTOCOL_MODERN}},
+                    {"_meta": {bm.MCP_META_PROTOCOL_VERSION: bm.MCP_PROTOCOL_MODERN,
+                               bm.MCP_META_CLIENT_CAPABILITIES: {}}},
                 ),
                 bm.PROTOCOL_MODE_MODERN,
             )
             self.assertEqual(
                 bm._protocol_mode_for_request(
                     "tools/list",
-                    {"_meta": {"protocolVersion": "2099-01-01"}},
+                    {"_meta": {bm.MCP_META_PROTOCOL_VERSION: "2099-01-01",
+                               bm.MCP_META_CLIENT_CAPABILITIES: {}}},
                 ),
                 bm.PROTOCOL_MODE_LEGACY,
             )
@@ -1010,6 +1017,132 @@ class BerserkMcpTest(unittest.TestCase):
             )
         finally:
             bm.ENABLE_MCP_2026_07_28 = orig_enabled
+
+    def test_phase2_discover_requires_feature_flag(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = False
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "discover-1",
+                "method": "server/discover",
+                "params": {"_meta": {
+                    bm.MCP_META_PROTOCOL_VERSION: bm.MCP_PROTOCOL_MODERN,
+                    bm.MCP_META_CLIENT_CAPABILITIES: {},
+                }},
+            })
+            self.assertEqual(resp["error"]["code"], -32601)
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+
+    def test_phase2_discover_returns_modern_capability_envelope(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "discover-1",
+                "method": "server/discover",
+                "params": {"_meta": {
+                    bm.MCP_META_PROTOCOL_VERSION: bm.MCP_PROTOCOL_MODERN,
+                    bm.MCP_META_CLIENT_INFO: {"name": "phase2-test", "version": "1"},
+                    bm.MCP_META_CLIENT_CAPABILITIES: {},
+                }},
+            })
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        result = resp["result"]
+        self.assertEqual(result["resultType"], "complete")
+        self.assertEqual(result["supportedVersions"],
+                         [bm.MCP_PROTOCOL_MODERN, bm.MCP_PROTOCOL_LEGACY])
+        self.assertEqual(result["capabilities"], {"tools": {"listChanged": False}})
+        self.assertEqual(result["_meta"][bm.MCP_META_SERVER_INFO]["name"], "berserk-q")
+        self.assertEqual(result["cacheScope"], "private")
+        self.assertGreater(result["ttlMs"], 0)
+        self.assertTrue(result["instructions"])
+        self.assertNotIn("resources", result["capabilities"])
+        self.assertNotIn("prompts", result["capabilities"])
+
+    def test_phase2_discover_rejects_extra_params(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "discover-1",
+                "method": "server/discover",
+                "params": {"_meta": {
+                    bm.MCP_META_PROTOCOL_VERSION: bm.MCP_PROTOCOL_MODERN,
+                    bm.MCP_META_CLIENT_INFO: {"name": "phase2-test", "version": "1"},
+                    bm.MCP_META_CLIENT_CAPABILITIES: {},
+                }, "includeTools": True},
+            })
+            self.assertEqual(resp["error"]["code"], -32602)
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+
+    def test_phase2_discover_requires_valid_modern_meta(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            missing_caps = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "discover-1",
+                "method": "server/discover",
+                "params": {"_meta": {
+                    bm.MCP_META_PROTOCOL_VERSION: bm.MCP_PROTOCOL_MODERN,
+                }},
+            })
+            malformed_meta = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "discover-2",
+                "method": "server/discover",
+                "params": {"_meta": "bad"},
+            })
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        self.assertEqual(missing_caps["error"]["code"], -32602)
+        self.assertEqual(malformed_meta["error"]["code"], -32602)
+
+    def test_phase2_discover_reports_unsupported_protocol_version(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "discover-1",
+                "method": "server/discover",
+                "params": {"_meta": {
+                    bm.MCP_META_PROTOCOL_VERSION: "2099-01-01",
+                    bm.MCP_META_CLIENT_INFO: {"name": "phase2-test", "version": "1"},
+                    bm.MCP_META_CLIENT_CAPABILITIES: {},
+                }},
+            })
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        self.assertEqual(resp["error"]["code"], -32022)
+        self.assertEqual(resp["error"]["data"]["requested"], "2099-01-01")
+        self.assertIn(bm.MCP_PROTOCOL_MODERN, resp["error"]["data"]["supported"])
+
+    def test_phase2_discover_does_not_list_role_hidden_tools(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "discover-1",
+                "method": "server/discover",
+                "params": {"_meta": {
+                    bm.MCP_META_PROTOCOL_VERSION: bm.MCP_PROTOCOL_MODERN,
+                    bm.MCP_META_CLIENT_INFO: {"name": "phase2-test", "version": "1"},
+                    bm.MCP_META_CLIENT_CAPABILITIES: {},
+                }},
+            })
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        payload = json.dumps(resp["result"], sort_keys=True)
+        self.assertNotIn('"tools": [', payload)
+        self.assertNotIn("soc_high_severity_logs", payload)
 
     def test_initialize_requires_protocol_version(self):
         """FVR-004: initialize without a protocolVersion must return -32602,
