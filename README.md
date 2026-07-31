@@ -14,8 +14,8 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 > This fixed-query design is the whole point. It lets even small or cheap
 > models answer observability questions reliably.
 
-- **Works with Claude Desktop, Claude Code, and any MCP client.** berserk-mcp speaks MCP protocol version `2025-06-18` over stdio (newline-delimited JSON-RPC 2.0). It implements every required method — `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call` — with strict envelope validation and adversarial regression tests. See [Connect it to a client](#connect-it-to-a-client) for `claude_desktop_config.json` and `claude mcp add` recipes.
-- **MCP compatibility baseline.** The current stable protocol path is intentionally `2025-06-18` stdio. The newer `2026-07-28` MCP adaptation is planned as additive dual-era support, not a breaking replacement. See [MCP 2026-07-28 adaptation baseline](docs/mcp-2026-07-28-adaptation.md).
+- **Works with Claude Desktop, Claude Code, and any MCP client.** By default, berserk-mcp speaks MCP protocol version `2025-06-18` over stdio (newline-delimited JSON-RPC 2.0). It implements every required method — `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call` — with strict envelope validation and adversarial regression tests. See [Connect it to a client](#connect-it-to-a-client) for `claude_desktop_config.json` and `claude mcp add` recipes.
+- **MCP compatibility baseline.** The stable default remains `2025-06-18` stdio. Additive `2026-07-28` MCP features are available only when explicitly enabled with `BERSERK_MCP_ENABLE_2026_07_28=1`, so existing clients keep their legacy response shapes. See [MCP 2026-07-28 adaptation baseline](docs/mcp-2026-07-28-adaptation.md).
 - **Optional HTTP transport is closed by default.** stdio remains the default. HTTP opens no listener unless explicitly enabled, defaults to loopback, and fails closed for remote bind unless auth, Host allowlisting, and CIDR allowlisting are configured. See [MCP HTTP transport and reverse proxy deployment](docs/mcp-http-reverse-proxy.md) and [.env.example](.env.example).
 - **Zero dependencies.** berserk-mcp uses only the Python standard library. You do not `pip install` anything beyond the package itself. (The optional LLM parser factory uses `urllib`. It still adds no third-party dependency.)
 - **Small and auditable.** berserk-mcp is standard-library-only. Its focused modules cover the MCP server, parser generation, Claude analytics, AI FinOps, KQL validation, schema snapshots, secret redaction, and ingestion advice. You can read, audit, and vendor each module without pulling in a framework.
@@ -41,10 +41,16 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.23.0**. This is a bullet-point overview, most recent
+Current version: **1.24.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.24.0** (2026-07-31) — MCP 2026-07-28 adaptation and safe-default HTTP
+  transport: gated modern discovery, modern result envelopes, structured
+  reporting output, private cache hints, input-required guidance, in-memory
+  task lifecycle support, and a closed-by-default HTTP listener with auth,
+  Host, CIDR, request-size, concurrency, and reverse-proxy guidance.
+  See [details](docs/releases/v1.24.0.md).
 - **v1.23.0** (2026-07-27) — Security remediation Phase 3: generated-content
   sanitization, per-deployment HMAC owner pseudonyms, spreadsheet-safe CSV,
   model-facing fence hardening, mandatory Discord egress redaction, scrubbed

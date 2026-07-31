@@ -2024,6 +2024,61 @@ class BerserkMcpTest(unittest.TestCase):
         )
         self.assertEqual(bm._http_effective_client_ip(FakeHandler(), trusted), "198.51.100.9")
 
+    def test_phase8_operator_docs_cover_safe_http_settings(self):
+        project_root = Path(bm.__file__).resolve().parent
+        env_example = (project_root / ".env.example").read_text(encoding="utf-8")
+        readme = (project_root / "README.md").read_text(encoding="utf-8")
+        proxy_doc = (project_root / "docs" / "mcp-http-reverse-proxy.md").read_text(
+            encoding="utf-8"
+        )
+
+        expected_settings = (
+            "BERSERK_MCP_HTTP_ENABLE",
+            "BERSERK_MCP_HTTP_BIND",
+            "BERSERK_MCP_HTTP_ALLOW_REMOTE",
+            "BERSERK_MCP_HTTP_AUTH_TOKEN",
+            "BERSERK_MCP_HTTP_ALLOWED_HOSTS",
+            "BERSERK_MCP_HTTP_ALLOW_CIDRS",
+            "BERSERK_MCP_HTTP_MAX_REQUEST_BYTES",
+            "BERSERK_MCP_HTTP_MAX_CONCURRENT_REQUESTS",
+            "BERSERK_MCP_HTTP_USE_FORWARDED_FOR",
+            "BERSERK_MCP_HTTP_TRUSTED_PROXY_CIDRS",
+            "BERSERK_MCP_ENABLE_2026_07_28",
+        )
+        for setting in expected_settings:
+            self.assertIn(setting, env_example)
+            self.assertIn(setting, readme)
+
+        self.assertIn("disabled by default", env_example)
+        self.assertIn("127.0.0.1:8765", env_example)
+        self.assertIn("0.0.0.0/0", env_example)
+        self.assertIn("rejected", env_example)
+        self.assertIn("HTTPS/TLS", proxy_doc)
+        self.assertIn("mTLS", proxy_doc)
+        self.assertIn("X-Forwarded-For", proxy_doc)
+
+    def test_v124_release_notes_cover_new_mcp_and_http_features(self):
+        project_root = Path(bm.__file__).resolve().parent
+        release_notes = (
+            project_root / "docs" / "releases" / "v1.24.0.md"
+        ).read_text(encoding="utf-8")
+
+        expected_terms = (
+            "2026-07-28",
+            "server/discover",
+            "resultType",
+            "structuredContent",
+            "input_required",
+            "tasks/get",
+            "tasks/cancel",
+            "BERSERK_MCP_HTTP_ENABLE",
+            "Host allowlisting",
+            "CIDR allowlisting",
+            ".env.example",
+        )
+        for term in expected_terms:
+            self.assertIn(term, release_notes)
+
     def test_initialize_requires_protocol_version(self):
         """FVR-004: initialize without a protocolVersion must return -32602,
         not silently succeed with a default. Prior behavior returned a
