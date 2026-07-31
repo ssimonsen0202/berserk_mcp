@@ -15,6 +15,7 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 > models answer observability questions reliably.
 
 - **Works with Claude Desktop, Claude Code, and any MCP client.** berserk-mcp speaks MCP protocol version `2025-06-18` over stdio (newline-delimited JSON-RPC 2.0). It implements every required method — `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call` — with strict envelope validation and adversarial regression tests. See [Connect it to a client](#connect-it-to-a-client) for `claude_desktop_config.json` and `claude mcp add` recipes.
+- **MCP compatibility baseline.** The current stable protocol path is intentionally `2025-06-18` stdio. The newer `2026-07-28` MCP adaptation is planned as additive dual-era support, not a breaking replacement. See [MCP 2026-07-28 adaptation baseline](docs/mcp-2026-07-28-adaptation.md).
 - **Zero dependencies.** berserk-mcp uses only the Python standard library. You do not `pip install` anything beyond the package itself. (The optional LLM parser factory uses `urllib`. It still adds no third-party dependency.)
 - **Small and auditable.** berserk-mcp is standard-library-only. Its focused modules cover the MCP server, parser generation, Claude analytics, AI FinOps, KQL validation, schema snapshots, secret redaction, and ingestion advice. You can read, audit, and vendor each module without pulling in a framework.
 - **Cross-platform.** berserk-mcp runs anywhere the `bzrk` CLI runs, including Windows.

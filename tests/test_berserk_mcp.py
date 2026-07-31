@@ -965,6 +965,25 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertIn("tools", resp["result"]["capabilities"])
         self.assertTrue(resp["result"]["instructions"])
 
+    def test_phase0_legacy_initialize_shape_is_stable(self):
+        """Phase 0 MCP 2026-07-28 adaptation baseline.
+
+        The current server intentionally remains a 2025-06-18 stdio server
+        until modern support is added behind an explicit compatibility path.
+        This test prevents an accidental partial migration from changing the
+        legacy initialize contract.
+        """
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                            "params": {"protocolVersion": "2025-06-18",
+                                       "capabilities": {},
+                                       "clientInfo": {"name": "phase0-test",
+                                                      "version": "1"}}})
+        result = resp["result"]
+        self.assertEqual(result["protocolVersion"], "2025-06-18")
+        self.assertEqual(set(result), {"protocolVersion", "capabilities",
+                                       "serverInfo", "instructions"})
+        self.assertEqual(result["capabilities"], {"tools": {"listChanged": False}})
+
     def test_initialize_rejects_non_object_capabilities(self):
         resp = bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "initialize",
                             "params": {"protocolVersion": "2025-06-18",
@@ -993,6 +1012,12 @@ class BerserkMcpTest(unittest.TestCase):
         resp = bm.dispatch({"jsonrpc": "2.0", "id": 4, "method": "tools/list",
                             "params": {"filter": "sre"}})
         self.assertEqual(resp["error"]["code"], -32602)
+
+    def test_phase0_modern_discover_is_not_enabled_in_legacy_mode(self):
+        """Phase 0 baseline: 2026-07-28 server/discover is planned, not active."""
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": 6, "method": "server/discover",
+                            "params": {"_meta": {"protocolVersion": "2026-07-28"}}})
+        self.assertEqual(resp["error"]["code"], -32601)
 
     def test_unexpected_handler_exception_becomes_internal_error(self):
         """FVR-004: an unexpected exception from handle_call must surface as
@@ -1212,6 +1237,17 @@ class BerserkMcpTest(unittest.TestCase):
                             "params": {"name": "list_hosts", "arguments": {}}})
         self.assertEqual(resp["result"]["content"][0]["type"], "text")
         self.assertFalse(resp["result"]["isError"])
+        self.assertNotIn("resultType", resp["result"])
+        self.assertNotIn("structuredContent", resp["result"])
+
+    def test_phase0_legacy_tools_list_shape_is_stable(self):
+        """Legacy tools/list has no modern cache-hint envelope yet."""
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        result = resp["result"]
+        self.assertEqual(set(result), {"tools"})
+        self.assertNotIn("resultType", result)
+        self.assertNotIn("ttlMs", result)
+        self.assertNotIn("cacheScope", result)
 
     def test_ping(self):
         resp = bm.dispatch({"jsonrpc": "2.0", "id": 4, "method": "ping"})
