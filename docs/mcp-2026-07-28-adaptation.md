@@ -148,3 +148,27 @@ The cache scope is intentionally private. Tool visibility and instructions are
 role-aware and deployment-aware, so clients must not share one role's cached
 tool list with another role or user context. Legacy `tools/list` remains
 unchanged and does not include cache hints.
+
+## Phase 6 input-required guidance
+
+Phase 6 adds modern-only input-required guidance for cases where the MCP can
+help the user get the intended result while protecting cluster health and
+attribution quality.
+
+Modern `tools/call` may now return `resultType: "input_required"` for:
+
+- broad custom `search` calls where `since` is more than 24 hours and the KQL
+  does not appear to include a bounding operator (`take`, `limit`, `count`,
+  `summarize`, or `top`);
+- `claude_feature_cost` without `feature_id`;
+- `claude_project_economics` without `project_id`.
+
+The expensive-query guard does not execute `bzrk`. It asks the client/user to
+narrow the window, add a bounding operator, or retry with
+`arguments.allow_expensive=true` after explicit approval. This gives an agent a
+safe loop: clarify intent first, then spend cluster resources only when the
+user accepts the tradeoff.
+
+The guidance is modern-only. Legacy `2025-06-18` calls keep the previous
+text-result/error behavior. Hidden role tools still return the same
+`unknown tool` response and never reveal a tool-specific input-required reason.

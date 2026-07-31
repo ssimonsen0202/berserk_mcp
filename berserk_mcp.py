@@ -348,6 +348,7 @@ PROTOCOL_MODE_LEGACY = "legacy"
 PROTOCOL_MODE_MODERN = "modern"
 PROTOCOL_VERSION = MCP_PROTOCOL_LEGACY
 MCP_PRIVATE_CACHE_TTL_MS = 300000
+MCP_EXPENSIVE_SEARCH_WINDOW_HOURS = 24
 MCP_META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion"
 MCP_META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo"
 MCP_META_CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities"
@@ -2600,6 +2601,80 @@ def _extract_structured_content(name, text, is_error):
     return None
 
 
+def _input_required_result(reason, message, request_state, input_requests=None):
+    result = {
+        "resultType": "input_required",
+        "reason": reason,
+        "content": [{"type": "text", "text": message}],
+        "requestState": json.dumps(request_state, sort_keys=True, separators=(",", ":")),
+    }
+    if input_requests:
+        result["inputRequests"] = input_requests
+    return result
+
+
+def _looks_bounded_kql(kql):
+    lowered = str(kql or "").lower()
+    return any(
+        re.search(r"\b" + re.escape(operator) + r"\b", lowered)
+        for operator in ("take", "limit", "count", "summarize", "top")
+    )
+
+
+def _modern_preflight_input_required(name, arguments):
+    if name == "search":
+        kql = str(arguments.get("kql") or "")
+        since = arguments.get("since") or "15m ago"
+        if (
+            valid_since(since)
+            and _since_hours(since) > MCP_EXPENSIVE_SEARCH_WINDOW_HOURS
+            and not _looks_bounded_kql(kql)
+            and arguments.get("allow_expensive") is not True
+        ):
+            message = (
+                "This custom KQL spans more than 24 hours and does not appear "
+                "to include a bounding operator such as take, limit, count, "
+                "summarize, or top. Narrow the window, add a bounding operator, "
+                "or retry with arguments.allow_expensive=true if this cost is "
+                "intentional."
+            )
+            return _input_required_result(
+                "expensive_query_guard",
+                message,
+                {
+                    "tool": name,
+                    "since": since,
+                    "window_hours": _since_hours(since),
+                    "suggested_actions": [
+                        "narrow since to 24h ago or less",
+                        "add take/limit/count/summarize/top",
+                        "retry with allow_expensive=true after explicit approval",
+                    ],
+                },
+            )
+    if name == "claude_feature_cost" and not str(arguments.get("feature_id") or "").strip():
+        return _input_required_result(
+            "missing_finops_attribution",
+            "Feature economics requires a feature_id so spend can be attributed without guessing.",
+            {
+                "tool": name,
+                "missing": ["feature_id"],
+                "suggested_actions": ["provide feature_id"],
+            },
+        )
+    if name == "claude_project_economics" and not str(arguments.get("project_id") or "").strip():
+        return _input_required_result(
+            "missing_finops_attribution",
+            "Project economics requires a project_id so spend can be attributed without guessing.",
+            {
+                "tool": name,
+                "missing": ["project_id"],
+                "suggested_actions": ["provide project_id"],
+            },
+        )
+    return None
+
+
 def _tool_call_result(name, text, is_error, mode):
     result = {
         "content": [{"type": "text", "text": text}],
@@ -2742,6 +2817,10 @@ def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE
         if matched_tool is not None and not tool_visible(matched_tool):
             text, is_err = "unknown tool: " + name, True
         else:
+            if mode == PROTOCOL_MODE_MODERN:
+                input_required = _modern_preflight_input_required(name, arguments)
+                if input_required is not None:
+                    return _jsonrpc_result(id_, input_required)
             text, is_err = handle_call(name, arguments)
         text = secret_scan.apply_output_filter(
             text,

@@ -955,6 +955,7 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertEqual(bm.MCP_PROTOCOL_MODERN, "2026-07-28")
         self.assertEqual(bm.PROTOCOL_VERSION, bm.MCP_PROTOCOL_LEGACY)
         self.assertEqual(bm.MCP_PRIVATE_CACHE_TTL_MS, 300000)
+        self.assertEqual(bm.MCP_EXPENSIVE_SEARCH_WINDOW_HOURS, 24)
         self.assertEqual(
             bm.MCP_META_PROTOCOL_VERSION,
             "io.modelcontextprotocol/protocolVersion",
@@ -1421,6 +1422,152 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertNotIn("soc_high_severity_logs", sre_names)
         self.assertIn("soc_high_severity_logs", soc_names)
         self.assertNotIn("sre_error_rate", soc_names)
+
+    def _modern_tool_call_params(self, name, arguments):
+        return {
+            "_meta": {
+                bm.MCP_META_PROTOCOL_VERSION: bm.MCP_PROTOCOL_MODERN,
+                bm.MCP_META_CLIENT_INFO: {"name": "phase-test", "version": "1"},
+                bm.MCP_META_CLIENT_CAPABILITIES: {},
+            },
+            "name": name,
+            "arguments": arguments,
+        }
+
+    def test_phase6_modern_expensive_search_returns_input_required_without_bzrk(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "call-1",
+                "method": "tools/call",
+                "params": self._modern_tool_call_params(
+                    "search",
+                    {"kql": f"{bm.TABLE} | where body contains 'timeout'",
+                     "since": "7d ago"},
+                ),
+            })
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        result = resp["result"]
+        self.assertEqual(result["resultType"], "input_required")
+        self.assertEqual(result["reason"], "expensive_query_guard")
+        self.assertIn("allow_expensive=true", result["content"][0]["text"])
+        state = json.loads(result["requestState"])
+        self.assertEqual(state["tool"], "search")
+        self.assertEqual(state["since"], "7d ago")
+        self.assertGreater(state["window_hours"], 24)
+        self.assertEqual(self.calls, [])
+
+    def test_phase6_modern_expensive_search_override_executes(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "call-1",
+                "method": "tools/call",
+                "params": self._modern_tool_call_params(
+                    "search",
+                    {"kql": f"{bm.TABLE} | where body contains 'timeout'",
+                     "since": "7d ago",
+                     "allow_expensive": True},
+                ),
+            })
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        self.assertEqual(resp["result"]["resultType"], "complete")
+        self.assertTrue(resp["result"]["content"][0]["text"].endswith("OK"))
+        self.assertEqual(self.calls[-1][2], "search")
+
+    def test_phase6_modern_bounded_broad_search_executes(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "call-1",
+                "method": "tools/call",
+                "params": self._modern_tool_call_params(
+                    "search",
+                    {"kql": f"{bm.TABLE} | summarize count()",
+                     "since": "7d ago"},
+                ),
+            })
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        self.assertEqual(resp["result"]["resultType"], "complete")
+        self.assertTrue(resp["result"]["content"][0]["text"].endswith("OK"))
+        self.assertEqual(self.calls[-1][2], "search")
+
+    def test_phase6_legacy_expensive_search_behavior_unchanged(self):
+        resp = bm.dispatch({
+            "jsonrpc": "2.0",
+            "id": "call-1",
+            "method": "tools/call",
+            "params": {
+                "name": "search",
+                "arguments": {"kql": f"{bm.TABLE} | where body contains 'timeout'",
+                              "since": "7d ago"},
+            },
+        })
+        self.assertNotIn("resultType", resp["result"])
+        self.assertTrue(resp["result"]["content"][0]["text"].endswith("OK"))
+        self.assertEqual(self.calls[-1][2], "search")
+
+    def test_phase6_modern_finops_missing_attribution_returns_input_required(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            feature_resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "call-1",
+                "method": "tools/call",
+                "params": self._modern_tool_call_params(
+                    "claude_feature_cost",
+                    {"since": "90d ago"},
+                ),
+            })
+            project_resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "call-2",
+                "method": "tools/call",
+                "params": self._modern_tool_call_params(
+                    "claude_project_economics",
+                    {"since": "90d ago"},
+                ),
+            })
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        self.assertEqual(feature_resp["result"]["resultType"], "input_required")
+        self.assertEqual(project_resp["result"]["resultType"], "input_required")
+        self.assertEqual(feature_resp["result"]["reason"], "missing_finops_attribution")
+        self.assertEqual(json.loads(feature_resp["result"]["requestState"])["missing"], ["feature_id"])
+        self.assertEqual(json.loads(project_resp["result"]["requestState"])["missing"], ["project_id"])
+
+    def test_phase6_hidden_role_tool_does_not_leak_input_required(self):
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        orig_role = bm.ACTIVE_ROLE
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            bm.ACTIVE_ROLE = "sre"
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "call-1",
+                "method": "tools/call",
+                "params": self._modern_tool_call_params(
+                    "claude_feature_cost",
+                    {},
+                ),
+            })
+        finally:
+            bm.ACTIVE_ROLE = orig_role
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        self.assertEqual(resp["result"]["resultType"], "complete")
+        self.assertTrue(resp["result"]["isError"])
+        self.assertIn("unknown tool", resp["result"]["content"][0]["text"])
+        self.assertNotEqual(resp["result"].get("reason"), "missing_finops_attribution")
 
     def test_initialize_requires_protocol_version(self):
         """FVR-004: initialize without a protocolVersion must return -32602,
