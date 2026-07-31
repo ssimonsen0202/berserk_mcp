@@ -233,7 +233,7 @@ def run_stdio_smoke(command):
                 got_task.get("id") == task_id and got_task.get("status") in {
                     "pending",
                     "running",
-                    "completed",
+                    "complete",
                     "failed",
                     "cancelled",
                 },
