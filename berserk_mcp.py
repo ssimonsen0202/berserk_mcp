@@ -1526,12 +1526,14 @@ def _canonloom_call(path: str, method: str = "GET", body=None):
         headers["X-API-Key"] = api_key
     try:
         url = server_url + path
-        if method == "GET":
-            result = _http.http_get_json(url, headers, timeout=120)
-        else:
-            result = _http.http_post_json(url, headers, body or {}, timeout=300)
         import json as _json
-        return _json.dumps(result, indent=2), False
+        if method == "GET":
+            data, err = _http.http_get_json(url, headers, timeout=120)
+        else:
+            data, err = _http.http_post_json(url, headers, body or {}, timeout=300)
+        if err:
+            return f"CanonLoom API error: {err}", True
+        return _json.dumps(data, indent=2), False
     except Exception as exc:
         return f"CanonLoom API error: {exc}", True
 
