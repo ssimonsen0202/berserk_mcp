@@ -1510,6 +1510,32 @@ def _with_output_schema(tool):
     return enriched
 
 
+# ── CanonLoom knowledge-pipeline bridge ──────────────────────────────────────
+
+def _canonloom_call(path: str, method: str = "GET", body=None):
+    """Call the canonloom HTTP API. Returns (result_text, is_error)."""
+    server_url = os.environ.get("CANONLOOM_SERVER_URL", "").rstrip("/")
+    if not server_url:
+        return (
+            "CANONLOOM_SERVER_URL is not set. Start canonloom-server and set the URL. "
+            "Example: export CANONLOOM_SERVER_URL=http://localhost:8080"
+        ), True
+    headers = {"Content-Type": "application/json"}
+    api_key = os.environ.get("CANONLOOM_API_KEY")
+    if api_key:
+        headers["X-API-Key"] = api_key
+    try:
+        url = server_url + path
+        if method == "GET":
+            result = _http.http_get_json(url, headers, timeout=120)
+        else:
+            result = _http.http_post_json(url, headers, body or {}, timeout=300)
+        import json as _json
+        return _json.dumps(result, indent=2), False
+    except Exception as exc:
+        return f"CanonLoom API error: {exc}", True
+
+
 # Each entry: name -> (kql, default_since). Tools requiring user input or extra
 # calls (logs, search, cc_search, schema) are handled explicitly in handle_call.
 SIMPLE = {
@@ -1599,6 +1625,12 @@ TOOLS = [
     {"name": "claude_generate_dashboard", "roles": ["claude"], "description": "Generate a privacy-safe Markdown or self-contained HTML dashboard beneath BERSERK_MCP_REPORT_DIR for use from Claude Code. This is an explicit local write.", "inputSchema": {"type": "object", "properties": {"dashboard": {"type": "string", "enum": ["portfolio", "project", "feature", "agent_efficiency", "data_quality"], "default": "portfolio"}, "identifier": {"type": "string"}, "since": _since()["since"], "format": {"type": "string", "enum": ["markdown", "html"], "default": "markdown"}, "filename": {"type": "string", "maxLength": 128}}}},
     {"name": "scan_secrets", "roles": ["soc"], "description": "Audit recent log bodies for potential credentials and optionally selected PII categories. Returns only aggregate service/type counts and first-seen timestamps; secret values are never returned. Default 1h.", "inputSchema": {"type": "object", "properties": {"since": _since()["since"], "include_entropy": {"type": "boolean", "description": "Enable false-positive-prone high-entropy token detection."}, "include_pii": {"type": "array", "items": {"type": "string", "enum": ["email", "ipv4", "ipv6", "credit_card"]}, "description": "Optional PII categories to include."}}}},
     {"name": "suggest_ingestion", "description": "Recommend concrete telemetry sources for a role/use case. With check_gap=true, compares service and metric hints against live Berserk inventory and marks each source present or missing. Catalog-backed and read-only.", "inputSchema": {"type": "object", "properties": {"role_or_usecase": {"type": "string", "description": "Catalog key such as sre/onprem-ad-health, soc/endpoint-identity, change-management/ansible, or scom."}, "check_gap": {"type": "boolean", "description": "Compare recommendations with live service and metric inventory."}, "since": _since()["since"]}, "required": ["role_or_usecase"]}},
+    # ── CanonLoom knowledge-pipeline tools ────────────────────────────────────
+    {"name": "canonloom_run_pipeline", "description": "Submit a URL to the CanonLoom knowledge lifecycle pipeline. Acquires the source, scores it for relevance, compares with existing skills, and optionally generates a validated skill artifact. Requires CANONLOOM_SERVER_URL.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string", "description": "Source URL to process through the pipeline"}, "stop_after": {"type": "string", "enum": ["clp1", "clp2", "clp3", "clp4", "clp5"], "description": "Stop after this phase (default: run all phases)"}, "auto_promote": {"type": "boolean", "description": "Promote to validated on passing CLP-4 (default: false)"}, "record_telemetry": {"type": "boolean", "description": "Record run telemetry (default: true)"}}, "required": ["url"]}},
+    {"name": "canonloom_list_artifacts", "description": "List all validated, approved, and published skill artifacts in the CanonLoom knowledge repository. Requires CANONLOOM_SERVER_URL.", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "canonloom_get_artifact", "description": "Retrieve a single artifact manifest by artifact_id from the CanonLoom knowledge repository. Requires CANONLOOM_SERVER_URL.", "inputSchema": {"type": "object", "properties": {"artifact_id": {"type": "string", "description": "Artifact ID (art_...)"}}, "required": ["artifact_id"]}},
+    {"name": "canonloom_freshness_report", "description": "Compute a freshness score for all validated skills in the CanonLoom repository and surface deprecation candidates. Requires CANONLOOM_SERVER_URL.", "inputSchema": {"type": "object", "properties": {"half_life_days": {"type": "integer", "description": "Days until freshness score halves (default: 365)"}, "min_age_days": {"type": "integer", "description": "Minimum age for deprecation candidates (default: 90)"}}}},
+    {"name": "canonloom_run_history", "description": "List recent CanonLoom pipeline runs with outcome, phase, and artifact info. Requires CANONLOOM_SERVER_URL.", "inputSchema": {"type": "object", "properties": {"status": {"type": "string", "enum": ["ok", "rejected"], "description": "Filter by outcome"}, "limit": {"type": "integer", "description": "Maximum number of runs to return (default: 20)"}}}},
 ]
 
 MGMT_TOOLS = [
@@ -2375,6 +2407,42 @@ def _handle_call_uncached(name, arguments):
         return ingestion_advisor.suggest_ingestion(
             role_or_usecase, check_gap=check_gap, since=since,
         )
+
+    # ── CanonLoom knowledge-pipeline tools ────────────────────────────────────
+    if name == "canonloom_run_pipeline":
+        url = str(arguments.get("url", "")).strip()
+        if not url:
+            return "canonloom_run_pipeline requires 'url'", True
+        body = {"url": url}
+        if "stop_after" in arguments:
+            body["stop_after"] = arguments["stop_after"]
+        if "auto_promote" in arguments:
+            body["auto_promote"] = bool(arguments["auto_promote"])
+        if "record_telemetry" in arguments:
+            body["record_telemetry"] = bool(arguments["record_telemetry"])
+        return _canonloom_call("/pipeline/run", "POST", body)
+    if name == "canonloom_list_artifacts":
+        return _canonloom_call("/artifacts", "GET")
+    if name == "canonloom_get_artifact":
+        artifact_id = str(arguments.get("artifact_id", "")).strip()
+        if not artifact_id:
+            return "canonloom_get_artifact requires 'artifact_id'", True
+        return _canonloom_call(f"/artifacts/{artifact_id}", "GET")
+    if name == "canonloom_freshness_report":
+        body = {}
+        if "half_life_days" in arguments:
+            body["half_life_days"] = int(arguments["half_life_days"])
+        if "min_age_days" in arguments:
+            body["min_age_days"] = int(arguments["min_age_days"])
+        return _canonloom_call("/telemetry/freshness", "POST", body)
+    if name == "canonloom_run_history":
+        params = []
+        if "status" in arguments:
+            params.append(f"status={arguments['status']}")
+        limit = int(arguments.get("limit", 20))
+        params.append(f"limit={limit}")
+        qs = "?" + "&".join(params) if params else ""
+        return _canonloom_call(f"/telemetry/runs{qs}", "GET")
 
     return "unknown tool: " + str(name), True
 
