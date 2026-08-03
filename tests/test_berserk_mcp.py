@@ -3293,5 +3293,144 @@ class FleetControlsTest(unittest.TestCase):
             bm.KQL_STATS_MODE = old_stats
 
 
+class CanonLoomTest(unittest.TestCase):
+    """Tests for _canonloom_call and the canonloom MCP tool dispatch.
+
+    Mocks _http.http_get_json / _http.http_post_json so no live server needed.
+    Verifies the (data, err) tuple is correctly unpacked — the bug that caused
+    serialised tuples like [{"artifacts": [...]}, null] to reach callers.
+    """
+
+    def setUp(self):
+        import _http
+        self._http = _http
+        self._orig_get = _http.http_get_json
+        self._orig_post = _http.http_post_json
+        self._orig_env = os.environ.copy()
+        os.environ["CANONLOOM_SERVER_URL"] = "http://127.0.0.1:19999"
+        os.environ["CANONLOOM_API_KEY"] = "test-key"
+
+    def tearDown(self):
+        self._http.http_get_json = self._orig_get
+        self._http.http_post_json = self._orig_post
+        os.environ.clear()
+        os.environ.update(self._orig_env)
+
+    def _fake_get(self, response):
+        """Return a fake http_get_json that yields (response, None)."""
+        def fake(url, headers, timeout=120):
+            return response, None
+        self._http.http_get_json = fake
+
+    def _fake_post(self, response):
+        def fake(url, headers, payload, timeout=300):
+            return response, None
+        self._http.http_post_json = fake
+
+    def _fake_get_error(self, message):
+        def fake(url, headers, timeout=120):
+            return None, message
+        self._http.http_get_json = fake
+
+    # ── _canonloom_call contract ──────────────────────────────────────────────
+
+    def test_get_returns_json_string_not_tuple(self):
+        """Result must be a JSON string, not a serialised (data, None) tuple."""
+        self._fake_get({"artifacts": []})
+        text, err = bm._canonloom_call("/artifacts", "GET")
+        self.assertFalse(err)
+        parsed = json.loads(text)
+        # Must be the dict, not a list wrapping (dict, null)
+        self.assertIsInstance(parsed, dict)
+        self.assertIn("artifacts", parsed)
+
+    def test_get_error_propagates(self):
+        self._fake_get_error("connection failed")
+        text, err = bm._canonloom_call("/artifacts", "GET")
+        self.assertTrue(err)
+        self.assertIn("connection failed", text)
+
+    def test_missing_server_url(self):
+        del os.environ["CANONLOOM_SERVER_URL"]
+        text, err = bm._canonloom_call("/artifacts", "GET")
+        self.assertTrue(err)
+        self.assertIn("CANONLOOM_SERVER_URL", text)
+
+    # ── canonloom_list_artifacts ──────────────────────────────────────────────
+
+    def test_list_artifacts_basic(self):
+        self._fake_get({"artifacts": [{"artifact_id": "art_1", "name": "skill-foo"}]})
+        text, err = bm.handle_call("canonloom_list_artifacts", {})
+        self.assertFalse(err)
+        data = json.loads(text)
+        self.assertEqual(data["artifacts"][0]["artifact_id"], "art_1")
+
+    def test_list_artifacts_include_staging_merges(self):
+        """include_staging=true must merge promoted + staging into one list."""
+        responses = [
+            {"artifacts": [{"artifact_id": "art_promoted", "lifecycle_status": "validated"}]},
+            {"artifacts": [{"artifact_id": "art_draft",    "lifecycle_status": "draft"}]},
+        ]
+        call_count = [0]
+        def fake_get(url, headers, timeout=120):
+            r = responses[call_count[0]]
+            call_count[0] += 1
+            return r, None
+        self._http.http_get_json = fake_get
+
+        text, err = bm.handle_call("canonloom_list_artifacts", {"include_staging": True})
+        self.assertFalse(err)
+        data = json.loads(text)
+        ids = [a["artifact_id"] for a in data["artifacts"]]
+        self.assertIn("art_promoted", ids)
+        self.assertIn("art_draft", ids)
+        self.assertEqual(len(ids), 2)
+
+    def test_list_artifacts_include_staging_promoted_error(self):
+        """If the promoted call fails, the whole operation fails."""
+        call_count = [0]
+        def fake_get(url, headers, timeout=120):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return None, "HTTP 503"
+            return {"artifacts": []}, None
+        self._http.http_get_json = fake_get
+
+        text, err = bm.handle_call("canonloom_list_artifacts", {"include_staging": True})
+        self.assertTrue(err)
+
+    # ── canonloom_run_pipeline ────────────────────────────────────────────────
+
+    def test_run_pipeline_posts_url(self):
+        posted = []
+        def fake_post(url, headers, payload, timeout=300):
+            posted.append(payload)
+            return {"ok": True, "run_id": "run_1", "stages": []}, None
+        self._http.http_post_json = fake_post
+
+        text, err = bm.handle_call("canonloom_run_pipeline", {"url": "https://example.com"})
+        self.assertFalse(err)
+        self.assertEqual(posted[0]["url"], "https://example.com")
+
+    def test_run_pipeline_requires_url(self):
+        text, err = bm.handle_call("canonloom_run_pipeline", {})
+        self.assertTrue(err)
+        self.assertIn("url", text.lower())
+
+    # ── canonloom_get_artifact ────────────────────────────────────────────────
+
+    def test_get_artifact(self):
+        self._fake_get({"artifact_id": "art_1", "name": "skill-foo", "lifecycle_status": "draft"})
+        text, err = bm.handle_call("canonloom_get_artifact", {"artifact_id": "art_1"})
+        self.assertFalse(err)
+        data = json.loads(text)
+        self.assertEqual(data["artifact_id"], "art_1")
+
+    def test_get_artifact_requires_id(self):
+        text, err = bm.handle_call("canonloom_get_artifact", {})
+        self.assertTrue(err)
+        self.assertIn("artifact_id", text.lower())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
