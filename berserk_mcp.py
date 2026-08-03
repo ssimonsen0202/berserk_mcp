@@ -1627,7 +1627,7 @@ TOOLS = [
     {"name": "suggest_ingestion", "description": "Recommend concrete telemetry sources for a role/use case. With check_gap=true, compares service and metric hints against live Berserk inventory and marks each source present or missing. Catalog-backed and read-only.", "inputSchema": {"type": "object", "properties": {"role_or_usecase": {"type": "string", "description": "Catalog key such as sre/onprem-ad-health, soc/endpoint-identity, change-management/ansible, or scom."}, "check_gap": {"type": "boolean", "description": "Compare recommendations with live service and metric inventory."}, "since": _since()["since"]}, "required": ["role_or_usecase"]}},
     # ── CanonLoom knowledge-pipeline tools ────────────────────────────────────
     {"name": "canonloom_run_pipeline", "description": "Submit a URL to the CanonLoom knowledge lifecycle pipeline. Acquires the source, scores it for relevance, compares with existing skills, and optionally generates a validated skill artifact. Requires CANONLOOM_SERVER_URL.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string", "description": "Source URL to process through the pipeline"}, "stop_after": {"type": "string", "enum": ["clp1", "clp2", "clp3", "clp4", "clp5"], "description": "Stop after this phase (default: run all phases)"}, "auto_promote": {"type": "boolean", "description": "Promote to validated on passing CLP-4 (default: false)"}, "record_telemetry": {"type": "boolean", "description": "Record run telemetry (default: true)"}}, "required": ["url"]}},
-    {"name": "canonloom_list_artifacts", "description": "List all validated, approved, and published skill artifacts in the CanonLoom knowledge repository. Requires CANONLOOM_SERVER_URL.", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "canonloom_list_artifacts", "description": "List skill artifacts in the CanonLoom knowledge repository. By default returns only promoted artifacts (validated/approved/published). Pass include_staging=true to also include draft artifacts in staging. Requires CANONLOOM_SERVER_URL.", "inputSchema": {"type": "object", "properties": {"include_staging": {"type": "boolean", "description": "Also return draft artifacts from staging (default: false)"}}}},
     {"name": "canonloom_get_artifact", "description": "Retrieve a single artifact manifest by artifact_id from the CanonLoom knowledge repository. Requires CANONLOOM_SERVER_URL.", "inputSchema": {"type": "object", "properties": {"artifact_id": {"type": "string", "description": "Artifact ID (art_...)"}}, "required": ["artifact_id"]}},
     {"name": "canonloom_freshness_report", "description": "Compute a freshness score for all validated skills in the CanonLoom repository and surface deprecation candidates. Requires CANONLOOM_SERVER_URL.", "inputSchema": {"type": "object", "properties": {"half_life_days": {"type": "integer", "description": "Days until freshness score halves (default: 365)"}, "min_age_days": {"type": "integer", "description": "Minimum age for deprecation candidates (default: 90)"}}}},
     {"name": "canonloom_run_history", "description": "List recent CanonLoom pipeline runs with outcome, phase, and artifact info. Requires CANONLOOM_SERVER_URL.", "inputSchema": {"type": "object", "properties": {"status": {"type": "string", "enum": ["ok", "rejected"], "description": "Filter by outcome"}, "limit": {"type": "integer", "description": "Maximum number of runs to return (default: 20)"}}}},
@@ -2422,6 +2422,21 @@ def _handle_call_uncached(name, arguments):
             body["record_telemetry"] = bool(arguments["record_telemetry"])
         return _canonloom_call("/pipeline/run", "POST", body)
     if name == "canonloom_list_artifacts":
+        if arguments.get("include_staging"):
+            promoted, err = _canonloom_call("/artifacts", "GET")
+            staging, serr = _canonloom_call("/artifacts/staging", "GET")
+            if err:
+                return promoted, True
+            if serr:
+                return staging, True
+            import json as _json
+            try:
+                p = _json.loads(promoted) if isinstance(promoted, str) else promoted
+                s = _json.loads(staging) if isinstance(staging, str) else staging
+                combined = {"artifacts": p.get("artifacts", []) + s.get("artifacts", [])}
+                return _json.dumps(combined), False
+            except Exception as exc:
+                return f"error merging artifact lists: {exc}", True
         return _canonloom_call("/artifacts", "GET")
     if name == "canonloom_get_artifact":
         artifact_id = str(arguments.get("artifact_id", "")).strip()
