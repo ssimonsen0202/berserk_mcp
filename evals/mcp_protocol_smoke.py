@@ -5,6 +5,7 @@ This starts a local berserk-mcp process and verifies the installed MCP surface
 without requiring live Berserk authentication:
 
 - legacy stdio initialize remains `2025-06-18`;
+- Codex-style tools/list progress metadata is accepted;
 - gated `2026-07-28` stdio discovery works;
 - modern tools/list exposes private cache hints and output schemas;
 - modern tools/call returns `resultType`;
@@ -139,6 +140,18 @@ def run_stdio_smoke(command):
             json.dumps(init)[:300],
         )
         client.notify("notifications/initialized")
+
+        codex_tools = client.request(
+            "tools/list",
+            {"_meta": {"progressToken": 0}},
+        )
+        check(
+            report,
+            "Codex tools/list progress metadata",
+            "error" not in codex_tools
+            and bool(codex_tools.get("result", {}).get("tools")),
+            json.dumps(codex_tools)[:300],
+        )
 
         discover = client.request("server/discover", {"_meta": meta})
         d_result = discover.get("result", {})

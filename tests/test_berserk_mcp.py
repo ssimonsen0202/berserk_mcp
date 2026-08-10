@@ -2513,6 +2513,17 @@ class BerserkMcpTest(unittest.TestCase):
             self.assertEqual(resp["error"]["code"], -32602, f"params={bad!r}")
             self.assertEqual(resp["id"], 1)
 
+    def test_codex_tools_list_accepts_progress_token_metadata(self):
+        """Codex includes standard progress metadata in tools/list requests."""
+        resp = bm.dispatch({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {"_meta": {"progressToken": 0}},
+        })
+        self.assertNotIn("error", resp)
+        self.assertTrue(resp["result"]["tools"])
+
     def test_non_object_params_notification_no_response(self):
         """DR-004: scalar params on notification produces no response."""
         resp = bm.dispatch({"jsonrpc": "2.0", "method": "ping", "params": "bad"})

@@ -3086,20 +3086,28 @@ def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE
             return _jsonrpc_error(-32602, "Invalid params", id_)
         return _reply({})
     if method == "tools/list":
+        # MCP permits request metadata on paginated list operations. Codex
+        # includes a progressToken in this envelope even for the initial,
+        # unpaginated tools/list request. We do not paginate, so only an empty
+        # cursor is accepted, but standard metadata must remain transparent.
+        if set(params) - {"_meta", "cursor"}:
+            if is_notification:
+                return None
+            return _jsonrpc_error(-32602, "Invalid params", id_)
+        if "_meta" in params and not isinstance(params["_meta"], dict):
+            if is_notification:
+                return None
+            return _jsonrpc_error(-32602, "Invalid params", id_)
+        if params.get("cursor") is not None:
+            if is_notification:
+                return None
+            return _jsonrpc_error(-32602, "Invalid params", id_)
         if mode == PROTOCOL_MODE_MODERN:
-            if set(params) - {"_meta"}:
-                if is_notification:
-                    return None
-                return _jsonrpc_error(-32602, "Invalid params", id_)
             if not _valid_modern_meta(params):
                 if is_notification:
                     return None
                 return _jsonrpc_error(-32602, "Invalid params", id_)
             return _reply(_tool_list_result(mode))
-        if params:
-            if is_notification:
-                return None
-            return _jsonrpc_error(-32602, "Invalid params", id_)
         return _reply(_tool_list_result(mode))
     if method == "tools/call":
         if is_notification:
