@@ -41,10 +41,14 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.24.0**. This is a bullet-point overview, most recent
+Current version: **1.25.1**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.25.1** (2026-08-11) — Performance bugfixes for shipped KQL: selective
+  service filtering, shallower unfiltered schema discovery, CI cost guardrails,
+  and validator-derived query-budget headroom. See
+  [details](docs/releases/v1.25.1.md).
 - **v1.24.0** (2026-07-31) — MCP 2026-07-28 adaptation and safe-default HTTP
   transport: gated modern discovery, modern result envelopes, structured
   reporting output, private cache hints, input-required guidance, in-memory
