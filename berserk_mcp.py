@@ -78,7 +78,7 @@ import parser_factory
 import schema_registry
 import secret_scan
 
-__version__ = "1.24.0"
+__version__ = "1.25.0"
 
 
 def log(msg):
@@ -174,10 +174,11 @@ TOOL_BUDGET_SECONDS = min(
 # scanned time range — a 72h aggregate that legitimately needs ~13s is not a
 # runaway query, while 13s for a 15m window is. Scale the budget with the
 # requested window instead of applying the short-window number to every call:
-# effective = base + per_hour * window_hours, capped at BZRK_TIMEOUT. The
-# default 0.5 s/h keeps a 15m window at the tight calibrated budget while a
-# 72h window earns ~46s and a 7d cost report ~94s. Set to 0 to restore the
-# flat budget.
+# effective = base * risk_multiplier + per_hour * window_hours, capped at
+# BZRK_TIMEOUT. The
+# default 0.5 s/h keeps a 1x-risk 15m window at the tight calibrated budget
+# while a 72h window earns ~46s and a 7d cost report ~94s. Set to 0 to restore
+# flat window scaling (risk multipliers still apply).
 BUDGET_PER_HOUR_SECONDS = _nonnegative_float_env(
     "BERSERK_MCP_BUDGET_PER_HOUR_SECONDS", 0.5
 )
@@ -202,12 +203,13 @@ def _since_hours(since):
     return float(m.group(1)) * _SINCE_HOURS_FACTORS.get(m.group(2).lower(), 0.0)
 
 
-def _window_budget(base, since):
+def _window_budget(base, since, multiplier=1.0):
     """Effective per-query budget for this window, capped at BZRK_TIMEOUT."""
     if base is None or base <= 0:
         return base
-    scaled = base + BUDGET_PER_HOUR_SECONDS * _since_hours(since)
-    return min(scaled, max(base, float(DEFAULT_TIMEOUT)))
+    scaled = base * max(1.0, float(multiplier))
+    scaled += BUDGET_PER_HOUR_SECONDS * _since_hours(since)
+    return min(scaled, float(DEFAULT_TIMEOUT))
 FAIL_COOLDOWN_SECONDS = _nonnegative_float_env("BERSERK_MCP_FAIL_COOLDOWN_SECONDS", 30)
 CACHE_TTL_SECONDS = _nonnegative_float_env("BERSERK_MCP_CACHE_TTL_SECONDS", 120)
 KQL_VALIDATION_MODE = _choice_env("BERSERK_MCP_KQL_VALIDATION", "warn", {"off", "warn", "strict"})
@@ -552,7 +554,8 @@ Q_ERRORS = (
     f"| sort by errors desc"
 )
 Q_SERVICES = (
-    f"{T} | summarize total=count(), logs=countif(isnotnull(body)), "
+    f"{T} | where isnotnull(body) or isnotnull(metric_name) "
+    f"| summarize total=count(), logs=countif(isnotnull(body)), "
     f"metrics=countif(isnotnull(metric_name)) by service=tostring(resource['service.name']) "
     f"| sort by total desc"
 )
@@ -748,11 +751,14 @@ def q_discover_fieldstats(service=None):
     """Bounded dynamic-field inventory for schema discovery.
 
     ``fieldstats`` reports field type, cardinality, and representative values
-    without exporting the raw resource bag. Keep the row sample separate so
-    callers can inspect value shape without widening the inventory result.
+    without exporting the raw resource bag. Global discovery uses depth 1 to
+    limit scan cost; a selective service filter permits depth 2. Keep the row
+    sample separate so callers can inspect value shape without widening the
+    inventory result.
     """
     filt = f"| where resource['service.name'] == '{service}' " if service else ""
-    return f"{T} {filt}| fieldstats resource with limit=50 depth=2"
+    depth = 2 if service else 1
+    return f"{T} {filt}| fieldstats resource with limit=50 depth={depth}"
 Q_CC_RECENT = (
     f"{CC} | tail 60 | project ts=timestamp, typ=tostring(attributes['claude.type']), "
     f"role=tostring(attributes['claude.message_role']), "
@@ -1078,7 +1084,11 @@ def bzrk_search(kql, since, extra=None):
     timeout = None
     tool_name = None
     if _FLEET_CONTEXT is not None:
-        timeout = _window_budget(_FLEET_CONTEXT.get("budget"), since)
+        timeout = _window_budget(
+            _FLEET_CONTEXT.get("budget"),
+            since,
+            _FLEET_CONTEXT.get("budget_multiplier", 1.0),
+        )
         tool_name = _FLEET_CONTEXT.get("tool")
     effective_timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
     with _query_semaphore_slot(effective_timeout) as acquired:
@@ -1566,6 +1576,39 @@ SIMPLE = {
     "trace_find_slow": (Q_TRACE_FIND_SLOW, "1h ago"),
     "trace_find_errors": (Q_TRACE_FIND_ERRORS, "1h ago"),
 }
+
+_QUERY_RISK_BUDGET_MULTIPLIERS = {
+    "low": 1.0,
+    "medium": 1.5,
+    "high": 2.0,
+}
+
+
+def _derive_tool_budget_multipliers(simple_queries=None, include_discovery=True):
+    """Derive per-tool budgets from the same static validator used by the gate."""
+    queries = dict(SIMPLE if simple_queries is None else simple_queries)
+    if include_discovery:
+        queries["discover_schema"] = (q_discover_fieldstats(), "1h ago")
+    multipliers = {}
+    for tool_name, (kql, since) in queries.items():
+        report = kql_validation.validate_kql_static(
+            kql,
+            table=TABLE,
+            since=since,
+        )
+        multipliers[str(tool_name)] = _QUERY_RISK_BUDGET_MULTIPLIERS.get(
+            report.get("risk"),
+            1.0,
+        )
+    return multipliers
+
+
+TOOL_BUDGET_MULTIPLIERS = _derive_tool_budget_multipliers()
+
+
+def _tool_budget_multiplier(tool_name):
+    """Return the derived multiplier; non-shipped/non-SIMPLE tools stay at 1x."""
+    return TOOL_BUDGET_MULTIPLIERS.get(str(tool_name), 1.0)
 
 TOOLS = [
     {"name": "list_containers", "description": "List all containers currently sending metrics to Berserk (with sample counts).", "inputSchema": {"type": "object", "properties": _since()}},
@@ -2539,6 +2582,7 @@ def handle_call(name, arguments):
     _FLEET_CONTEXT = {
         "tool": str(name),
         "budget": TOOL_BUDGET_SECONDS if TOOL_BUDGET_SECONDS > 0 else None,
+        "budget_multiplier": _tool_budget_multiplier(name),
     }
     try:
         text, is_err = _handle_call_uncached(name, args)

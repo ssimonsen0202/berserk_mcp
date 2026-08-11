@@ -106,14 +106,26 @@ Many independent MCP processes may share one cluster. A polite tool therefore:
 
 Before merging a new or changed query:
 
-1. Run it against a live deployment and capture `--stats` for the intended
-   window. Confirm shard/range/bloom skips and a bounded row count.
+1. Declare the tool's default `since` window, then run that exact default
+   against a live deployment and capture `--stats`. Confirm shard/range/bloom
+   skips and a bounded row count.
 2. Test a representative wide-body row. Assert that the query does not project
    raw `body`/bags unless the consumer truly needs them.
 3. Identify every Python consumer and prove whether it depends on input order.
 4. Add a unit test that locks the important KQL shape and a pure-function test
    for the preserved behavior.
 5. Run `python3 -m unittest discover -s tests` before and after the change.
+
+### Shipped-query guardrail
+
+The CI enforcement test runs static validation over every shipped `SIMPLE`
+query and both filtered and unfiltered schema-fieldstats shapes. Treat `MISSING_SELECTIVE_FILTER`,
+`HIGH_CARDINALITY_GROUP`, and `EXPENSIVE_OPERATOR` as merge-blocking unless the
+exact query/finding pair has a documented reason in the test allowlist. Remove
+allowlist entries when their finding disappears; stale exceptions fail the
+test. Static risk also sets the base query-budget multiplier at startup: low
+is 1x, medium is 1.5x, and high is 2x before time-window scaling and the global
+`BZRK_TIMEOUT` cap.
 
 ## Static validation findings and runtime receipts
 

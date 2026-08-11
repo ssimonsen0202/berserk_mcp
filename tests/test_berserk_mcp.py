@@ -20,6 +20,38 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import berserk_mcp as bm  # noqa: E402
 
 
+SHIPPED_QUERY_GUARDRAIL_CODES = {
+    "MISSING_SELECTIVE_FILTER",
+    "HIGH_CARDINALITY_GROUP",
+    "EXPENSIVE_OPERATOR",
+}
+
+# Every exception must identify one exact shipped query/finding pair and explain
+# why the query shape is intentional. The enforcement test also rejects stale
+# entries so this cannot grow into a blanket bypass.
+SHIPPED_QUERY_GUARDRAIL_ALLOWLIST = {
+    ("list_containers", "HIGH_CARDINALITY_GROUP"): "Intentional scalar container-name inventory.",
+    ("top_cpu", "HIGH_CARDINALITY_GROUP"): "Intentional scalar container-name ranking.",
+    ("top_memory", "HIGH_CARDINALITY_GROUP"): "Intentional scalar container-name ranking.",
+    ("errors_by_service", "HIGH_CARDINALITY_GROUP"): "Intentional scalar service-name rollup.",
+    ("list_services", "HIGH_CARDINALITY_GROUP"): "Intentional scalar service-name inventory.",
+    ("list_hosts", "MISSING_SELECTIVE_FILTER"): "Host inventory intentionally covers all telemetry kinds.",
+    ("list_hosts", "HIGH_CARDINALITY_GROUP"): "Intentional scalar host-name inventory.",
+    ("host_cpu", "HIGH_CARDINALITY_GROUP"): "Intentional scalar host-name ranking.",
+    ("host_memory", "HIGH_CARDINALITY_GROUP"): "Intentional scalar host-name ranking.",
+    ("container_hosts", "MISSING_SELECTIVE_FILTER"): "Topology inventory intentionally covers all telemetry kinds.",
+    ("container_hosts", "HIGH_CARDINALITY_GROUP"): "Intentional scalar container/host topology grouping.",
+    ("sre_host_headroom", "HIGH_CARDINALITY_GROUP"): "Intentional scalar host/metric rollup.",
+    ("sre_ingest_health", "HIGH_CARDINALITY_GROUP"): "Intentional scalar host-name health rollup.",
+    ("sre_top_error_messages", "HIGH_CARDINALITY_GROUP"): "Intentional bounded error-signature grouping.",
+    ("soc_repeated_errors", "HIGH_CARDINALITY_GROUP"): "Intentional bounded repeated-error grouping.",
+    ("claude_sessions", "MISSING_SELECTIVE_FILTER"): "The prefiltered claude-code table alias is not recognized by the validator.",
+    ("claude_sessions", "HIGH_CARDINALITY_GROUP"): "Intentional scalar session-id rollup.",
+    ("claude_tools", "EXPENSIVE_OPERATOR"): "Tool-name inventory requires bounded mv-expand.",
+    ("discover_schema_fieldstats_nofilter", "MISSING_SELECTIVE_FILTER"): "Global schema discovery intentionally has no service predicate and uses depth=1.",
+}
+
+
 class BerserkMcpTest(unittest.TestCase):
     def setUp(self):
         self.calls = []
@@ -155,6 +187,36 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertIn("has_body", discovery_query)
         self.assertNotIn("| project resource, attributes", discovery_query)
         self.assertIn("fieldstats resource", bm.q_discover_fieldstats("nginx"))
+        self.assertIn("depth=1", bm.q_discover_fieldstats())
+        self.assertIn("depth=2", bm.q_discover_fieldstats("nginx"))
+
+    def test_shipped_queries_pass_static_cost_guardrails(self):
+        shipped = list(bm.SIMPLE.items()) + [
+            ("discover_schema_fieldstats_nofilter", (bm.q_discover_fieldstats(None), "1h ago")),
+            ("discover_schema_fieldstats_filtered", (bm.q_discover_fieldstats("someservice"), "1h ago")),
+        ]
+        actual = {}
+        for tool_name, (kql, since) in shipped:
+            report = bm.kql_validation.validate_kql_static(
+                kql,
+                table=bm.TABLE,
+                since=since,
+            )
+            for finding in report["findings"]:
+                if finding["code"] in SHIPPED_QUERY_GUARDRAIL_CODES:
+                    actual[(tool_name, finding["code"])] = finding["message"]
+
+        allowed = set(SHIPPED_QUERY_GUARDRAIL_ALLOWLIST)
+        unexpected = {
+            pair: message for pair, message in actual.items() if pair not in allowed
+        }
+        stale = allowed - set(actual)
+        self.assertFalse(
+            unexpected or stale,
+            "shipped-query cost guardrail mismatch\n"
+            f"unexpected={unexpected!r}\n"
+            f"stale_allowlist={sorted(stale)!r}",
+        )
 
     def test_phase1_native_queries_are_zero_filled_and_prunable(self):
         self.assertIn("make-series", bm.Q_SRE_ERROR_RATE)
@@ -3136,6 +3198,7 @@ class FleetControlsTest(unittest.TestCase):
         self.orig_cache = bm.CACHE_TTL_SECONDS
         self.orig_cooldown = bm.FAIL_COOLDOWN_SECONDS
         self.orig_per_hour = bm.BUDGET_PER_HOUR_SECONDS
+        self.orig_multipliers = bm.TOOL_BUDGET_MULTIPLIERS
         bm.BUDGET_PER_HOUR_SECONDS = 0  # flat budgets unless a test opts in
         self.calls = []
         bm._reset_fleet_state()
@@ -3146,6 +3209,7 @@ class FleetControlsTest(unittest.TestCase):
         bm.CACHE_TTL_SECONDS = self.orig_cache
         bm.FAIL_COOLDOWN_SECONDS = self.orig_cooldown
         bm.BUDGET_PER_HOUR_SECONDS = self.orig_per_hour
+        bm.TOOL_BUDGET_MULTIPLIERS = self.orig_multipliers
         bm._reset_fleet_state()
 
     def test_successful_allowlisted_result_is_cached_with_marker(self):
@@ -3227,6 +3291,56 @@ class FleetControlsTest(unittest.TestCase):
         bm.handle_call("sre_error_rate", {"since": "72h ago"})
 
         self.assertEqual(self.calls[0][1], 10)
+
+    def test_static_query_risk_drives_effective_tool_budget(self):
+        high_query = (
+            "default | join kind=inner (default) on trace_id "
+            "| where body contains 'x' | project resource"
+        )
+        low_query = "default | where metric_name == 'x' | take 1"
+        synthetic = {
+            "synthetic_high": (high_query, "1h ago"),
+            "synthetic_low": (low_query, "1h ago"),
+        }
+        derived = bm._derive_tool_budget_multipliers(
+            synthetic,
+            include_discovery=False,
+        )
+        self.assertEqual(derived["synthetic_high"], 2.0)
+        self.assertEqual(derived["synthetic_low"], 1.0)
+
+        original_simple = bm.SIMPLE
+        try:
+            bm.SIMPLE = dict(bm.SIMPLE, **synthetic)
+            bm.TOOL_BUDGET_MULTIPLIERS = derived
+            bm.TOOL_BUDGET_SECONDS = 10
+            bm.BUDGET_PER_HOUR_SECONDS = 0
+            bm.CACHE_TTL_SECONDS = 0
+
+            def fake(args, timeout=bm.DEFAULT_TIMEOUT):
+                self.calls.append((args, timeout))
+                return "result", False
+
+            bm.run_bzrk = fake
+            bm.handle_call("synthetic_high", {})
+            bm.handle_call("synthetic_low", {})
+            bm.handle_call("logs_for_service", {"service": "nginx"})
+
+            self.assertEqual([call[1] for call in self.calls], [20.0, 10.0, 10.0])
+
+            self.calls.clear()
+
+            def fake_timeout(args, timeout=bm.DEFAULT_TIMEOUT):
+                self.calls.append((args, timeout))
+                return f"bzrk timed out after {timeout}s", True
+
+            bm.run_bzrk = fake_timeout
+            text, err = bm.handle_call("synthetic_high", {})
+            self.assertTrue(err)
+            self.assertIn("exceeded its 20s query budget", text)
+            self.assertEqual(self.calls[0][1], 20.0)
+        finally:
+            bm.SIMPLE = original_simple
 
     def test_validate_kql_tool_registered_and_visible_to_operational_roles(self):
         tool = next(t for t in bm.TOOLS if t["name"] == "validate_kql")
