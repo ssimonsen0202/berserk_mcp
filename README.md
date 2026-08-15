@@ -22,6 +22,7 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 - **Cross-platform.** berserk-mcp runs anywhere the `bzrk` CLI runs, including Windows.
 - **Safe by construction.** berserk-mcp uses fixed queries. It validates input on every free-text tool. It never calls `shell=True`. The Berserk token never touches this code.
 - **Self-extending (new in 1.7).** An optional [parser factory](#parser-factory-llm-generated-query-packs) detects *new* sources arriving in Berserk. It uses an LLM to author, execute-verify, and save KQL "query packs" for each new source. The design follows Microsoft Sentinel's [ASIM parser AI agent](https://learn.microsoft.com/en-gb/azure/sentinel/normalization-create-parsers-ai-agent). It tries cheap providers first, enforces hard runaway fail-safes, and never lets a generated query overwrite a human one.
+- **Knowledge-artifact lifecycle bridge.** An optional [CanonLoom bridge](#canonloom-knowledge-artifact-lifecycle-bridge) exposes a separate, self-hosted service for turning a source URL into a validated, versioned skill artifact — source acquisition, relevance scoring, artifact-diff comparison, generation, structural/injection validation, and git-committed promotion. berserk-mcp only speaks to CanonLoom's HTTP API; nothing about CanonLoom's own dependencies (FastAPI, Anthropic, `pygit2`, and its stricter Python 3.14+ floor) touches berserk-mcp's own zero-dependency footprint.
 
 > ## ⚠️ Disclaimer — please read
 >
@@ -49,6 +50,13 @@ first — full detail for each notable release lives in
   service filtering, shallower unfiltered schema discovery, CI cost guardrails,
   and validator-derived query-budget headroom. See
   [details](docs/releases/v1.25.1.md).
+- **CanonLoom bridge** (2026-08-03, commit `033d855`, "CLP-9 CanonLoom MCP
+  tool bridge") — five new tools (`canonloom_run_pipeline`,
+  `canonloom_list_artifacts`, `canonloom_get_artifact`,
+  `canonloom_freshness_report`, `canonloom_run_history`) bridging to a
+  separately-run `canonloom-server`. Landed after v1.24.0 with no dedicated
+  release-notes entry; see
+  [CanonLoom bridge](#canonloom-knowledge-artifact-lifecycle-bridge) below.
 - **v1.24.0** (2026-07-31) — MCP 2026-07-28 adaptation and safe-default HTTP
   transport: gated modern discovery, modern result envelopes, structured
   reporting output, private cache hints, input-required guidance, in-memory
@@ -186,6 +194,7 @@ agent-facing surface:
 | **Two-lane cost model** (cheap default · on-demand `@deep`) | — | ✅ tool descriptions + annotations make this safe |
 | **KQL-injection guards** on free-text inputs | n/a (humans) | ✅ service-name allowlist · `claude_search` reject-list |
 | **Trace/span analysis** — find slow/failed traces, reconstruct a span tree with correlated logs | — | ✅ `trace_find_slow` · `trace_find_errors` · `trace_analyze` (v1.14.0; see [Trace tools](#trace-tools-all-lanes)) |
+| **Knowledge-artifact lifecycle pipeline** (source URL → validated skill artifact) | — | ✅ `canonloom_run_pipeline` · `canonloom_list_artifacts` · `canonloom_get_artifact` · `canonloom_freshness_report` · `canonloom_run_history`, bridged to a separate `canonloom-server` (see [CanonLoom bridge](#canonloom-knowledge-artifact-lifecycle-bridge)) |
 
 ### Why this complements Berserk's native MCP (not competes with it)
 
@@ -899,6 +908,187 @@ library, matching the rest of berserk-mcp's zero-dependency design.
 
 ---
 
+## CanonLoom: knowledge-artifact lifecycle bridge
+
+**The problem it solves:** the parser factory turns a *telemetry source*
+into verified, reusable KQL. CanonLoom does the analogous job for
+*knowledge* — it turns a *source URL* (a doc page, an advisory, a runbook)
+into a validated, versioned skill artifact your agents can load later,
+without a human manually reading, summarizing, and filing it.
+
+**CanonLoom is a separate project**, not part of berserk-mcp. It ships its
+own HTTP API server (`canonloom-server`) and its own knowledge repository.
+berserk-mcp adds five tools that bridge to that API — it does not implement
+any pipeline logic itself. If `canonloom-server` is not running, every
+`canonloom_*` tool call returns one clear error instead of failing silently:
+
+```text
+CANONLOOM_SERVER_URL is not set. Start canonloom-server and set the URL.
+Example: export CANONLOOM_SERVER_URL=http://localhost:8080
+```
+
+### Deployment scenario
+
+Both stacks run independently. The MCP client is the only thing that talks
+to both — berserk-mcp itself never imports or embeds any CanonLoom code, it
+only makes an HTTP call when a `canonloom_*` tool is invoked:
+
+```mermaid
+flowchart LR
+    subgraph client["Operator machine"]
+        MCPClient["MCP client<br/>(Claude Desktop / Claude Code)"]
+    end
+
+    subgraph bmcp["berserk-mcp process (stdio)"]
+        BMCP["berserk-mcp<br/>tools/list · tools/call"]
+    end
+
+    subgraph berserk["Berserk cluster"]
+        BzrkGW["Gateway (gRPC)"]
+        BzrkStore["KQL storage + query engine"]
+    end
+
+    subgraph canon["canonloom-server (HTTP :8080)"]
+        CLP["CLP-1..5 pipeline"]
+    end
+
+    subgraph know["canonloom-knowledge (git repo)"]
+        Skills["skills/ · manifests/"]
+    end
+
+    Anthropic["Anthropic API"]
+
+    MCPClient -- "MCP over stdio" --> BMCP
+    BMCP -- "bzrk CLI, bearer token" --> BzrkGW
+    BzrkGW --> BzrkStore
+    BMCP -. "HTTP + X-API-Key<br/>(canonloom_* tools only,<br/>opt-in via CANONLOOM_SERVER_URL)" .-> CLP
+    CLP -- "CLP-1/2/3 LLM calls" --> Anthropic
+    CLP -- "git add / git commit<br/>(CLP-5 promotion)" --> Skills
+```
+
+The dotted edge is the only connection between the two stacks, and it only
+exists when `CANONLOOM_SERVER_URL` is set. Run berserk-mcp with no
+`canonloom-server` anywhere and every other tool works exactly as documented
+above — only the five `canonloom_*` calls return the setup error shown above
+instead of a result. See
+[canonloom's own README](https://github.com/ssimonsen0202/canonloom#relationship-to-berserk-and-berserk-mcp)
+for the same diagram from the other side, and for what CanonLoom does when
+there is no MCP client or Berserk cluster involved at all.
+
+### The pipeline: CLP-1 through CLP-5
+
+CanonLoom's own pipeline runs a source through five phases. It stops at the
+first phase that fails and reports why:
+
+| Phase | What it does |
+|---|---|
+| **CLP-1 — Intake** | Acquires the source, then runs safety, relevance, and de-duplication checks. |
+| **CLP-2 — Impact analysis** | Compares the candidate against existing skill artifacts and recommends `create`, `update`, or `skip`. The pipeline stops here unless the recommendation is `create`. |
+| **CLP-3 — Draft generation** | Generates a draft `SKILL.md` plus manifest from the intake and impact results. |
+| **CLP-4 — Validation** | Schema, semantic, prompt-injection, and structural checks on the draft. `auto_promote` only proceeds past this phase if validation passes. |
+| **CLP-5 — Promotion** | Moves the validated draft from staging into the knowledge repo's `skills/` directory with a git commit. Only runs when `auto_promote=true` and CLP-4 passed. |
+
+`canonloom_run_pipeline`'s `stop_after` argument (`clp1`–`clp5`) lets you halt
+early — for example `stop_after=clp2` to see the impact-analysis
+recommendation without generating a draft, useful for a dry-run review before
+committing LLM calls to CLP-3.
+
+### Tools
+
+| Tool | What it does |
+|---|---|
+| `canonloom_run_pipeline` | Submit a URL to the pipeline. Runs CLP-1 through CLP-5 (or stops early via `stop_after`). `auto_promote=true` commits the artifact automatically on a CLP-4 pass; default `false` leaves it in staging for review. |
+| `canonloom_list_artifacts` | List promoted (validated/approved/published) skill artifacts. Pass `include_staging=true` to also list unpromoted drafts. |
+| `canonloom_get_artifact` | Retrieve one artifact's manifest by `artifact_id`. |
+| `canonloom_freshness_report` | Score every validated artifact's freshness on a configurable half-life (`half_life_days`, default 365) and surface deprecation candidates older than `min_age_days` (default 90). |
+| `canonloom_run_history` | List recent pipeline runs, optionally filtered by outcome (`ok`/`rejected`), with the phase each run reached. |
+
+### Configure
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CANONLOOM_SERVER_URL` | unset | Base URL of the running `canonloom-server`, e.g. `http://localhost:8080`. Every `canonloom_*` tool call requires this; unset returns a clear setup error instead of failing silently. |
+| `CANONLOOM_API_KEY` | unset | Sent as `X-API-Key` on every request, if the server requires it. |
+
+### Requirements for `canonloom-server`
+
+`canonloom-server` is a **separate project with its own, stricter
+requirements** — none of this is required by berserk-mcp itself, only by the
+optional bridge target. This is not yet documented in CanonLoom's own README,
+so it's captured here in full:
+
+- **Python 3.14+.** CanonLoom's `pyproject.toml` pins `requires-python =
+  ">=3.14"` — noticeably stricter than berserk-mcp's own 3.9+ floor. The two
+  projects are not necessarily installable into the same virtualenv.
+- **Install with the `server` extra**, not a bare install — the base package
+  has no HTTP server at all:
+  ```bash
+  pip install "canonloom[server]"
+  ```
+  The `server` extra pulls in `fastapi`, `uvicorn[standard]`, and `httpx`.
+  Everything else (`anthropic`, `pygit2`, `pyyaml`, `jsonschema`,
+  `trafilatura` for content extraction, plus a handful of schema-validation
+  libraries) is a base dependency, installed either way.
+- **The `git` CLI binary on `PATH`.** CLP-5 promotion shells out to `git add`
+  / `git commit` directly (not a Python git binding) — see
+  `canonloom/src/canonloom/promote.py`. It sets its own commit author/committer
+  env vars and passes `--no-gpg-sign`, so no local `git config` or GPG setup
+  is needed — but the `git` executable itself must be present.
+- **`CANONLOOM_KNOWLEDGE_ROOT` must already be a git repository with a
+  specific directory scaffold** — `canonloom-server` does not create or
+  `git init` it for you. At minimum it needs `skills/` and
+  `manifests/artifacts/` to exist (CLP-5 writes into both). The upstream
+  `canonloom-knowledge` template's full scaffold is:
+  ```
+  skills/               agents/            playbooks/
+  patterns/             prompts/           evaluations/
+  lessons/              domain-packs/      manifests/sources/
+  manifests/artifacts/
+  ```
+  Point `CANONLOOM_KNOWLEDGE_ROOT` at a clone of that repo (or an
+  equivalently-shaped one). Passing a directory that isn't a git repo, or is
+  missing `skills/`/`manifests/artifacts/`, fails CLP-5 promotion with a
+  `PromotionError`, not a clean startup error — the server itself starts
+  fine and only fails when a pipeline run reaches that phase.
+- **`ANTHROPIC_API_KEY`** — CLP-1 (intake/relevance), CLP-2 (impact
+  analysis), and CLP-3 (draft generation) all call Claude directly. The
+  `anthropic` Python package is a hard base dependency either way; without
+  the key set, the server starts but every pipeline run stops at CLP-1.
+
+Putting it together:
+
+```bash
+pip install "canonloom[server]"                                  # requires Python 3.14+
+
+export CANONLOOM_KNOWLEDGE_ROOT=/path/to/canonloom-knowledge     # existing git repo, correct scaffold
+export CANONLOOM_API_KEY=some-shared-secret                       # optional — enables X-API-Key auth
+export ANTHROPIC_API_KEY=sk-ant-...                                # required for CLP-1/2/3 to do anything
+canonloom-server --host 0.0.0.0 --port 8080
+```
+
+See the CanonLoom project's own docs for artifact schema and validation-rule
+detail beyond this setup; berserk-mcp's bridge is intentionally a thin
+pass-through and does not duplicate that documentation here.
+
+### Example
+
+```
+canonloom_run_pipeline url="https://docs.example.com/incident-runbook" stop_after="clp2"
+```
+
+returns the impact-analysis recommendation — `create`, `update`, or `skip` —
+without spending an LLM call on draft generation. Once you're ready to
+generate and commit:
+
+```
+canonloom_run_pipeline url="https://docs.example.com/incident-runbook" auto_promote=true
+```
+
+runs all five phases and commits the artifact to `canonloom-knowledge` if
+CLP-4 validation passes.
+
+---
+
 ## Worked examples
 
 Concrete prompts you can paste into any MCP-aware client. Each example shows
@@ -990,6 +1180,7 @@ Write a 10-line digest, flag anything anomalous, and stop.
 
 - Python 3.9+. (Python 3.8 reached upstream end-of-life on 2024-10-07 and is no longer a supported floor.)
 - The [`bzrk`](https://docs.bzrk.dev) CLI, installed and authenticated (`bzrk -P <profile> search "..."` must work). The bearer token lives in `bzrk`'s own config. berserk-mcp never reads or stores it.
+- *(Optional)* A running `canonloom-server` instance, only if you use the `canonloom_*` tools. This is a separate project requiring **Python 3.14+** (stricter than berserk-mcp's own 3.9+ floor) plus its own dependencies (FastAPI, Anthropic, `pygit2`, and others) and the `git` CLI binary — berserk-mcp only calls its HTTP API and adds nothing to berserk-mcp's own dependency footprint. Full setup: [Requirements for `canonloom-server`](#requirements-for-canonloom-server).
 
 ## Install
 
@@ -1142,6 +1333,10 @@ All configuration is via environment variables. All are optional:
 
 Parser-factory (LLM parser generation) has its own env vars — see
 [Parser factory](#parser-factory-llm-generated-query-packs) above.
+
+The CanonLoom bridge has its own two env vars (`CANONLOOM_SERVER_URL`,
+`CANONLOOM_API_KEY`) — see
+[CanonLoom bridge](#canonloom-knowledge-artifact-lifecycle-bridge) below.
 
 ### Transport security guidance
 
