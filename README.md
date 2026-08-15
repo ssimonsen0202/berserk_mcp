@@ -910,11 +910,17 @@ library, matching the rest of berserk-mcp's zero-dependency design.
 
 ## CanonLoom: knowledge-artifact lifecycle bridge
 
-**The problem it solves:** the parser factory turns a *telemetry source*
-into verified, reusable KQL. CanonLoom does the analogous job for
-*knowledge* — it turns a *source URL* (a doc page, an advisory, a runbook)
-into a validated, versioned skill artifact your agents can load later,
-without a human manually reading, summarizing, and filing it.
+**The problem it solves:** growing a library of good "skills" — runbooks,
+incident patterns, lessons learned — normally means a human notices a source,
+reads it, decides if it's new or a duplicate, distills it into a clean
+document, checks it isn't garbage or a prompt-injection attempt, and files it
+somewhere durable. That doesn't scale: sources show up faster than anyone can
+manually curate them. The parser factory (above) solves the analogous
+problem for *telemetry sources* → verified, reusable KQL. CanonLoom solves
+it for *knowledge sources* → it turns a source URL into a validated,
+versioned skill artifact your agents can load later, through a five-phase
+pipeline with a hard validation gate before anything is trusted, instead of
+a human doing that work by hand.
 
 **CanonLoom is a separate project**, not part of berserk-mcp. It ships its
 own HTTP API server (`canonloom-server`) and its own knowledge repository.
@@ -926,6 +932,24 @@ any pipeline logic itself. If `canonloom-server` is not running, every
 CANONLOOM_SERVER_URL is not set. Start canonloom-server and set the URL.
 Example: export CANONLOOM_SERVER_URL=http://localhost:8080
 ```
+
+Side by side, feature and functionality wise:
+
+| | Berserk | berserk-mcp | CanonLoom |
+|---|---|---|---|
+| Domain | Observability data — logs, metrics, traces | Agent-facing query layer over Berserk | Agent-facing knowledge-artifact lifecycle |
+| Problem solved | Store and query telemetry at scale | Let an LLM ask Berserk questions without hand-authoring KQL | Let an LLM or operator turn a URL into a trustworthy, versioned skill without manual curation |
+| Core unit | A log / metric / trace record | A verified tool call (e.g. `top_cpu`) | A skill artifact (`SKILL.md` + manifest) |
+| Durable storage | Berserk's own KQL engine | None — stateless bridge | `canonloom-knowledge` git repo |
+| Trust/validation model | n/a | Fixed, pre-verified queries — the model never authors KQL | A schema/semantic/injection/structural gate before anything is promoted |
+| How they relate | The data source berserk-mcp queries | Depends on Berserk (via `bzrk`); no dependency on CanonLoom | Depends on neither — bridged in only as an optional HTTP client |
+
+See [canonloom's own README](https://github.com/ssimonsen0202/canonloom#why-this-exists)
+for the full why/what/how. One gap worth knowing: CanonLoom also has a
+**domain packs** capability (deterministic `.tar.gz` bundles of validated
+artifacts for distribution) that this bridge exposes no tool for yet —
+everything else (`run_pipeline`, artifact listing/lookup, freshness
+scoring, run history) is covered by the five tools above.
 
 ### Deployment scenario
 
