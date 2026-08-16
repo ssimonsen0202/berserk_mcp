@@ -1052,6 +1052,49 @@ def valid_since(s):
     return bool(_SINCE_RE.match(str(s).strip())) and len(str(s)) <= 32
 
 
+# Small models reach for these natural-language forms even when the schema
+# asks for the canonical grammar. Map them onto a form _SINCE_RE already
+# accepts, rather than rejecting a well-intentioned answer on syntax alone.
+_SINCE_QUALIFIER_RE = re.compile(
+    r"^\s*(?:in\s+the\s+last|over\s+the\s+last|last|past)\s+", re.IGNORECASE
+)
+_SINCE_UNIT_ONLY_RE = re.compile(
+    r"^(s|sec|secs|second|seconds|m|min|mins|minute|minutes|"
+    r"h|hr|hrs|hour|hours|d|day|days|w|wk|week|weeks)\s*$",
+    re.IGNORECASE,
+)
+_SINCE_WORD_MAP = {"yesterday": "1d ago"}
+
+
+def _normalize_since(s):
+    """Map common natural-language time windows onto the canonical grammar
+    _SINCE_RE accepts, before validation runs. Returns the input unchanged
+    when it is already canonical or not recognized — this only widens the
+    accepted spelling, never what reaches bzrk (the normalized output must
+    still pass valid_since before it is used)."""
+    raw = str(s)
+    stripped = raw.strip()
+
+    mapped = _SINCE_WORD_MAP.get(stripped.lower())
+    if mapped is not None:
+        return mapped
+    if valid_since(raw):
+        return raw
+
+    qualified = _SINCE_QUALIFIER_RE.sub("", stripped, count=1)
+    if qualified == stripped:
+        return raw
+    qualified = re.sub(r"\s+", " ", qualified).strip()
+
+    # A bare unit noun with no leading number ("past week") implies quantity 1.
+    if _SINCE_UNIT_ONLY_RE.match(qualified):
+        qualified = "1 " + qualified
+    if not qualified.lower().endswith("ago"):
+        qualified += " ago"
+
+    return qualified if valid_since(qualified) else raw
+
+
 # Free-text KQL is passed as a positional argv element to the bzrk CLI. If it
 # began with '-', some CLI parsers would interpret it as an option rather than
 # the query (e.g. a stray "--profile x"), silently changing what runs. Require
@@ -1076,6 +1119,7 @@ def bzrk_search(kql, since, extra=None):
             f"invalid KQL: query must start with '{TABLE} | ...' "
             f"(got: {query[:40]!r})"
         ), True
+    since = _normalize_since(since)
     if not valid_since(since):
         return (
             f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
@@ -1469,8 +1513,21 @@ ingestion_advisor.configure(
 
 
 # ---------- tool definitions ----------
+_SINCE_SCHEMA_PATTERN = (
+    r"^(now|\d+\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|"
+    r"h|hr|hrs|hour|hours|d|day|days|w|wk|week|weeks)(\s+ago)?)$"
+)
+
+
 def _since():
-    return {"since": {"type": "string", "description": "Time window e.g. '15m ago', '1h ago', '2d ago'."}}
+    return {
+        "since": {
+            "type": "string",
+            "description": "Time window e.g. '15m ago', '1h ago', '2d ago'.",
+            "pattern": _SINCE_SCHEMA_PATTERN,
+            "examples": ["15m ago", "1h ago", "6h ago", "1d ago", "7d ago", "now"],
+        }
+    }
 
 
 _REPORT_OUTPUT_SCHEMA = {

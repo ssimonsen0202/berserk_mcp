@@ -6,6 +6,7 @@ generated KQL, default time windows, injection guards, JSON-RPC shape, and the
 learning loop — without a real backend.
 """
 import os
+import re
 import sys
 import json
 import subprocess
@@ -3555,6 +3556,122 @@ class CanonLoomTest(unittest.TestCase):
         text, err = bm.handle_call("canonloom_get_artifact", {})
         self.assertTrue(err)
         self.assertIn("artifact_id", text.lower())
+
+
+class SinceNormalizerTest(unittest.TestCase):
+    """_normalize_since() maps common natural-language forms onto the
+    canonical grammar _SINCE_RE already accepts, before validation runs."""
+
+    def test_canonical_forms_pass_through_unchanged(self):
+        for s in ("now", "15m ago", "2 hours ago", "1d", "30 minutes ago", "3w ago"):
+            with self.subTest(s=s):
+                self.assertEqual(bm._normalize_since(s), s)
+
+    def test_strips_leading_qualifier_and_keeps_valid(self):
+        cases = [
+            "last 24 hours",
+            "past 24 hours",
+            "in the last 24 hours",
+            "over the last 24 hours",
+            "LAST 24 HOURS",
+            "  last   24   hours  ",
+        ]
+        for s in cases:
+            with self.subTest(s=s):
+                normalized = bm._normalize_since(s)
+                self.assertTrue(bm.valid_since(normalized), f"{s!r} -> {normalized!r}")
+                self.assertAlmostEqual(bm._since_hours(normalized), 24.0)
+
+    def test_bare_unit_without_number_defaults_to_one(self):
+        for s in ("past week", "last week", "last hour", "past day"):
+            with self.subTest(s=s):
+                normalized = bm._normalize_since(s)
+                self.assertTrue(bm.valid_since(normalized), f"{s!r} -> {normalized!r}")
+
+    def test_yesterday_maps_to_one_day_ago(self):
+        normalized = bm._normalize_since("yesterday")
+        self.assertTrue(bm.valid_since(normalized))
+        self.assertAlmostEqual(bm._since_hours(normalized), 24.0)
+
+    def test_unrecognized_form_returned_unchanged(self):
+        # Out-of-grammar units (e.g. "month") are not covered; the normalizer
+        # must not guess, and the existing validator still rejects it with
+        # its normal error.
+        self.assertEqual(bm._normalize_since("last month"), "last month")
+        self.assertEqual(bm._normalize_since("garbage; rm -rf /"), "garbage; rm -rf /")
+
+    def test_normalizer_output_always_satisfies_since_re(self):
+        """Security invariant: whatever the normalizer accepts and rewrites
+        must land in the same canonical grammar _SINCE_RE already gates —
+        nothing new reaches bzrk."""
+        accepted_inputs = [
+            "now", "15m ago", "last 24 hours", "past week", "yesterday",
+            "LAST 2 DAYS", "in the last 3 hours",
+        ]
+        for s in accepted_inputs:
+            with self.subTest(s=s):
+                self.assertTrue(bm.valid_since(bm._normalize_since(s)))
+
+    def test_wired_into_bzrk_search_via_handle_call(self):
+        """Integration: a natural-language since that previously failed
+        validation now succeeds end-to-end, and the argv sent to bzrk carries
+        the normalized canonical value, not the raw string."""
+        calls = []
+
+        def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
+            calls.append(list(args))
+            return ("OK", False)
+
+        orig = bm.run_bzrk
+        bm.run_bzrk = fake_run_bzrk
+        try:
+            text, err = bm.handle_call("top_cpu", {"since": "last 24 hours"})
+            self.assertFalse(err, text)
+            sent_since = calls[-1][-1]
+            self.assertNotEqual(sent_since, "last 24 hours")
+            self.assertTrue(bm.valid_since(sent_since))
+        finally:
+            bm.run_bzrk = orig
+
+    def test_since_schema_has_pattern_and_examples(self):
+        """The shared _since() schema fragment is reused across ~51 tool
+        definitions, so constraining it once constrains grammar-decoded
+        argument generation everywhere without touching each call site."""
+        schema = bm._since()["since"]
+        self.assertIn("pattern", schema)
+        self.assertTrue(schema["pattern"])
+        self.assertIn("examples", schema)
+        self.assertTrue(schema["examples"])
+
+    def test_since_schema_examples_are_all_valid(self):
+        schema = bm._since()["since"]
+        for ex in schema["examples"]:
+            with self.subTest(ex=ex):
+                self.assertTrue(bm.valid_since(ex))
+
+    def test_since_schema_pattern_matches_canonical_forms(self):
+        schema = bm._since()["since"]
+        compiled = re.compile(schema["pattern"])
+        for s in ("now", "15m ago", "1h ago", "2d ago", "3w ago"):
+            with self.subTest(s=s):
+                self.assertRegex(s, compiled)
+
+    def test_garbage_since_still_rejected_after_normalization(self):
+        calls = []
+
+        def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
+            calls.append(list(args))
+            return ("OK", False)
+
+        orig = bm.run_bzrk
+        bm.run_bzrk = fake_run_bzrk
+        try:
+            text, err = bm.handle_call("top_cpu", {"since": "garbage; rm -rf /"})
+            self.assertTrue(err)
+            self.assertIn("invalid 'since'", text)
+            self.assertEqual(calls, [])
+        finally:
+            bm.run_bzrk = orig
 
 
 if __name__ == "__main__":
