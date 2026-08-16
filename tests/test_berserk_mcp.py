@@ -138,6 +138,51 @@ class BerserkMcpTest(unittest.TestCase):
             self.assertFalse(err, s)
             self.assertEqual(self.calls[-1][-1], s)
 
+    # ---- since normalization must apply before ANY consumer inspects it,
+    # not just inside bzrk_search (code review finding, PR #7) ----
+    def test_claude_loop_check_accepts_natural_language_since(self):
+        """claude_loop_check checks valid_since() directly and never reaches
+        bzrk_search, so bzrk_search-only normalization does not cover it."""
+        text, err = bm.handle_call("claude_loop_check", {"since": "last 24 hours"})
+        self.assertFalse(err, text)
+        self.assertNotIn("invalid 'since'", text)
+
+    def test_search_accepts_natural_language_since(self):
+        """search validates since via _validate_user_kql (INVALID_SINCE,
+        severity=error), a second path bzrk_search-only normalization
+        does not cover."""
+        text, err = bm.handle_call(
+            "search", {"kql": f"{bm.TABLE} | take 1", "since": "last 24 hours"}
+        )
+        self.assertFalse(err, text)
+
+    def test_modern_preflight_expensive_guard_triggers_for_natural_language_since(self):
+        """The expensive_query_guard preflight check inspects the raw
+        argument before handle_call ever runs. If normalization only
+        happens inside bzrk_search, 'last 7 days' (an unbounded >24h
+        window) skips the guard that 'valid_since'-parseable '7d ago'
+        would trigger -- a policy bypass, not just a UX gap."""
+        orig_enabled = bm.ENABLE_MCP_2026_07_28
+        try:
+            bm.ENABLE_MCP_2026_07_28 = True
+            resp = bm.dispatch({
+                "jsonrpc": "2.0",
+                "id": "call-1",
+                "method": "tools/call",
+                "params": self._modern_tool_call_params(
+                    "search",
+                    {"kql": f"{bm.TABLE} | where body contains 'timeout'",
+                     "since": "last 7 days"},
+                ),
+            })
+        finally:
+            bm.ENABLE_MCP_2026_07_28 = orig_enabled
+        result = resp["result"]
+        self.assertEqual(result["resultType"], "input_required")
+        self.assertEqual(result["reason"], "expensive_query_guard")
+        self.assertGreater(result["requestState"] and json.loads(result["requestState"])["window_hours"], 24)
+        self.assertEqual(self.calls, [])
+
     def test_locked_query_strings(self):
         """Guard the most-used KQL against accidental edits during refactors."""
         self.assertEqual(
@@ -3655,6 +3700,34 @@ class SinceNormalizerTest(unittest.TestCase):
         for s in ("now", "15m ago", "1h ago", "2d ago", "3w ago"):
             with self.subTest(s=s):
                 self.assertRegex(s, compiled)
+
+    def test_since_schema_pattern_matches_uppercase_forms(self):
+        """_SINCE_RE (runtime) uses re.IGNORECASE, so valid_since('NOW') and
+        valid_since('2 HOURS AGO') are True. The schema pattern must accept
+        the same forms, or a client doing strict grammar-constrained
+        decoding rejects values the server actually accepts."""
+        schema = bm._since()["since"]
+        compiled = re.compile(schema["pattern"])
+        for s in ("NOW", "2 HOURS AGO", "1D", "Now"):
+            with self.subTest(s=s):
+                self.assertTrue(bm.valid_since(s), f"valid_since should accept {s!r}")
+                self.assertRegex(s, compiled, f"schema pattern should accept {s!r}")
+
+    def test_every_advertised_since_field_has_pattern_and_examples(self):
+        """Iterate every tool's advertised schema rather than spot-checking
+        one -- catches any tool (e.g. detect_new_sources) that hand-rolls
+        its own since property instead of using the shared _since()."""
+        checked = 0
+        for tool in bm.TOOLS + bm.MGMT_TOOLS:
+            props = tool.get("inputSchema", {}).get("properties", {})
+            since_schema = props.get("since")
+            if since_schema is None:
+                continue
+            checked += 1
+            with self.subTest(tool=tool["name"]):
+                self.assertIn("pattern", since_schema, tool["name"])
+                self.assertIn("examples", since_schema, tool["name"])
+        self.assertGreater(checked, 0, "no tool advertised a since field to check")
 
     def test_garbage_since_still_rejected_after_normalization(self):
         calls = []
