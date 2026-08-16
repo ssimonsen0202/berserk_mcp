@@ -1052,6 +1052,71 @@ def valid_since(s):
     return bool(_SINCE_RE.match(str(s).strip())) and len(str(s)) <= 32
 
 
+# Small models reach for these natural-language forms even when the schema
+# asks for the canonical grammar. Map them onto a form _SINCE_RE already
+# accepts, rather than rejecting a well-intentioned answer on syntax alone.
+_SINCE_QUALIFIER_RE = re.compile(
+    r"^\s*(?:in\s+the\s+last|over\s+the\s+last|last|past)\s+", re.IGNORECASE
+)
+_SINCE_UNIT_ONLY_RE = re.compile(
+    r"^(s|sec|secs|second|seconds|m|min|mins|minute|minutes|"
+    r"h|hr|hrs|hour|hours|d|day|days|w|wk|week|weeks)\s*$",
+    re.IGNORECASE,
+)
+_SINCE_WORD_MAP = {"yesterday": "1d ago"}
+
+
+def _normalize_since(s):
+    """Map common natural-language time windows onto the canonical grammar
+    _SINCE_RE accepts, before validation runs. Returns the input unchanged
+    when it is already canonical or not recognized — this only widens the
+    accepted spelling, never what reaches bzrk (the normalized output must
+    still pass valid_since before it is used)."""
+    raw = str(s)
+    stripped = raw.strip()
+
+    mapped = _SINCE_WORD_MAP.get(stripped.lower())
+    if mapped is not None:
+        return mapped
+    if valid_since(raw):
+        return raw
+
+    qualified = _SINCE_QUALIFIER_RE.sub("", stripped, count=1)
+    if qualified == stripped:
+        return raw
+    qualified = re.sub(r"\s+", " ", qualified).strip()
+
+    # A bare unit noun with no leading number ("past week") implies quantity 1.
+    if _SINCE_UNIT_ONLY_RE.match(qualified):
+        qualified = "1 " + qualified
+    if not qualified.lower().endswith("ago"):
+        qualified += " ago"
+
+    return qualified if valid_since(qualified) else raw
+
+
+def _normalize_since_arg(args):
+    """Normalize args['since'] in place, once, at the request boundary.
+
+    Several consumers check `since` before ever reaching bzrk_search --
+    claude_loop_check and other analytics tools call valid_since() directly,
+    search/validate_kql/run_saved/save_query validate it via
+    _validate_user_kql, and the modern-mode expensive_query_guard preflight
+    inspects the raw argument before handle_call even runs. Normalizing only
+    inside bzrk_search left all of those paths rejecting forms it had
+    already learned to accept, and let an unbounded natural-language window
+    (e.g. 'last 100 hours') skip the preflight confirmation its canonical
+    equivalent ('100 hours ago') would have triggered. This must run before
+    any of those checks, on every path that reaches them -- call it at the
+    top of handle_call() (covers all tool branches and direct/test callers)
+    and again before the modern preflight check in dispatch() (covers the
+    JSON-RPC request path, which evaluates preflight before handle_call is
+    invoked). Idempotent: normalizing an already-canonical value is a no-op.
+    """
+    if isinstance(args, dict) and isinstance(args.get("since"), str):
+        args["since"] = _normalize_since(args["since"])
+
+
 # Free-text KQL is passed as a positional argv element to the bzrk CLI. If it
 # began with '-', some CLI parsers would interpret it as an option rather than
 # the query (e.g. a stray "--profile x"), silently changing what runs. Require
@@ -1076,6 +1141,7 @@ def bzrk_search(kql, since, extra=None):
             f"invalid KQL: query must start with '{TABLE} | ...' "
             f"(got: {query[:40]!r})"
         ), True
+    since = _normalize_since(since)
     if not valid_since(since):
         return (
             f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
@@ -1469,8 +1535,32 @@ ingestion_advisor.configure(
 
 
 # ---------- tool definitions ----------
+def _case_insensitive_literal(word):
+    """Fold an ASCII-letter literal into a bracket-class-per-letter form,
+    e.g. 'now' -> '[nN][oO][wW]'. JSON Schema `pattern` has no portable
+    case-insensitive flag, but _SINCE_RE matches with re.IGNORECASE -- this
+    keeps the advertised schema accepting exactly what the runtime already
+    does (e.g. 'NOW', '2 HOURS AGO') without duplicating and drifting from
+    the unit list _SINCE_RE and _SINCE_HOURS_FACTORS already define."""
+    return "".join(f"[{c.lower()}{c.upper()}]" if c.isalpha() else c for c in word)
+
+
+_SINCE_SCHEMA_PATTERN = (
+    "^(" + _case_insensitive_literal("now") + r"|\d+\s*("
+    + "|".join(_case_insensitive_literal(u) for u in _SINCE_HOURS_FACTORS)
+    + r")(\s+" + _case_insensitive_literal("ago") + r")?)$"
+)
+
+
 def _since():
-    return {"since": {"type": "string", "description": "Time window e.g. '15m ago', '1h ago', '2d ago'."}}
+    return {
+        "since": {
+            "type": "string",
+            "description": "Time window e.g. '15m ago', '1h ago', '2d ago'.",
+            "pattern": _SINCE_SCHEMA_PATTERN,
+            "examples": ["15m ago", "1h ago", "6h ago", "1d ago", "7d ago", "now"],
+        }
+    }
 
 
 _REPORT_OUTPUT_SCHEMA = {
@@ -1684,7 +1774,7 @@ MGMT_TOOLS = [
     {"name": "save_query", "description": "Persist a WORKING KQL query as a reusable named query so it never has to be figured out again. Call this after you answer a non-standard question with a custom search query. The query is run once to verify it works; if it errors it is NOT saved. Replacing an existing saved query of the same name requires overwrite=true.", "inputSchema": {"type": "object", "properties": dict({"name": {"type": "string", "description": "short snake_case name"}, "description": {"type": "string", "description": "what the query answers"}, "kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'"}, "roles": {"type": ["array", "string"], "description": "optional role(s) this query serves: sre, soc, claude, ops"}, "overwrite": {"type": "boolean", "description": "must be true to replace an existing saved query of the same name"}}, **_since()), "required": ["name", "description", "kql"]}},
     {"name": "request_discovery", "description": "Queue a newly-added service or metric for author-lane integration. Validates the source is currently visible in Berserk, then records a job for the discovery worker to drain. Use when a user says 'I added / connected / started shipping SOURCE'.", "inputSchema": {"type": "object", "properties": {"service": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "service.name to integrate"}, "metric": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "metric name to integrate"}, "role_hint": {"type": "string", "description": "optional target role: sre, soc, claude, ops"}, "requested_by": {"type": "string", "description": "optional requester label"}, **_since()}}},
     {"name": "discovery_status", "description": "List pending and completed discovery jobs for new services or metrics.", "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "detect_new_sources", "description": "Scan Berserk for services/metrics never seen before (and optionally schema drift on known ones). Use for 'anything new reporting?', or run with auto_queue=true to queue newcomers for parser generation.", "inputSchema": {"type": "object", "properties": {"since": {"type": "string", "description": "Time window e.g. '24h ago'."}, "auto_queue": {"type": "boolean", "description": "queue newly-detected sources for parser generation"}, "check_drift": {"type": "boolean", "description": "also check known services for resource-key schema drift"}}}},
+    {"name": "detect_new_sources", "description": "Scan Berserk for services/metrics never seen before (and optionally schema drift on known ones). Use for 'anything new reporting?', or run with auto_queue=true to queue newcomers for parser generation.", "inputSchema": {"type": "object", "properties": dict(_since(), **{"auto_queue": {"type": "boolean", "description": "queue newly-detected sources for parser generation"}, "check_drift": {"type": "boolean", "description": "also check known services for resource-key schema drift"}})}},
     {"name": "generate_parser", "description": "Generate and verify a query pack for one source right now (synchronous; may take minutes). An LLM authors 2-4 KQL queries from a live schema profile, validates each against Berserk, and saves the survivors. Requires at least one configured LLM provider (HERMES_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY).", "inputSchema": {"type": "object", "properties": {"service": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "service.name to generate a parser for"}, "metric": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "metric_name to generate a parser for"}, "role_hint": {"type": "string", "description": "optional target role: sre, soc, claude, ops"}}}},
     {"name": "run_discovery_worker", "description": "Drain queued discovery jobs: for each one, an LLM authors a verified query pack for the new source. Requires at least one configured LLM provider; may take minutes per job.", "inputSchema": {"type": "object", "properties": {"max_jobs": {"type": "integer", "description": "max jobs to process this call, default 1, capped at 5"}}}},
     {"name": "review_generated", "description": "List or inspect LLM-generated saved queries for audit before trusting them. No arg: list all generated queries with their provider/model/timestamp. With name: full entry including the KQL.", "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "description": "optional: a specific generated query name to inspect in full"}}}},
@@ -2551,6 +2641,7 @@ def handle_call(name, arguments):
     """Dispatch one tool call with fleet-friendly budget/cache controls."""
     global _FLEET_CONTEXT, _FLEET_BACKEND_ID
     args = arguments if isinstance(arguments, dict) else {}
+    _normalize_since_arg(args)
     backend_id = _fleet_backend_fingerprint()
     with _FLEET_LOCK:
         if _FLEET_BACKEND_ID != backend_id:
@@ -3165,6 +3256,12 @@ def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE
         if arguments is not None and not isinstance(arguments, dict):
             return _jsonrpc_error(-32602, "Invalid params", id_)
         arguments = arguments or {}
+        # Normalize before the modern preflight check below inspects `since`
+        # -- it runs before handle_call() and must see the same canonical
+        # value handle_call's own normalization would produce, or an
+        # unbounded natural-language window can skip the expensive-query
+        # confirmation its canonical spelling would have triggered.
+        _normalize_since_arg(arguments)
         # F-008: tools/list already filters by role; tools/call must enforce
         # the SAME predicate, or a client can invoke a tool that was never
         # supposed to be visible in this role's lane just by naming it
