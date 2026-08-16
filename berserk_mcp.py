@@ -2366,13 +2366,23 @@ def _handle_call_uncached(name, arguments):
             return "missing required 'kql'", True
         since = arguments.get("since") or "15m ago"
         warning = ""
+        wide_projection = False
         if KQL_VALIDATION_MODE != "off":
             report = _validate_user_kql(str(kql), since)
             if _blocking_validation(report):
                 return _format_validation_rejection(report), True
             if KQL_VALIDATION_MODE == "warn":
                 warning = _format_validation_warnings(report)
-        out, err = bzrk_search(str(kql), since)
+            wide_projection = any(
+                f.get("code") == "WIDE_PROJECTION"
+                for f in report.get("findings", [])
+            )
+        # Switch to JSON mode when body/$raw columns are projected so the full
+        # content is returned instead of being truncated by table alignment.
+        if wide_projection:
+            out, err = bzrk_search_json(str(kql), since)
+        else:
+            out, err = bzrk_search(str(kql), since)
         if warning and not err:
             return warning + "\n\n" + out, False
         return out, err
