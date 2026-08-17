@@ -1231,13 +1231,17 @@ def bzrk_search(kql, since, extra=None):
 # output. Both known clap phrasings put the literal word "argument"
 # immediately next to the (usually quoted) flag it's rejecting -- "unexpected
 # argument '--json' found" / "Found argument '--json' which wasn't
-# expected" -- so anchoring on "argument '--json'" is both narrower and more
-# reliable than matching on rejection-word vocabulary. A prior version tried
-# to match on words like "invalid" appearing anywhere near "--json", which
-# also matched unrelated runtime errors that merely mention the flag in
-# passing (e.g. "backend returned invalid JSON while processing --json
-# request"), silently masking the real failure as an unsupported-flag case.
-_JSON_UNSUPPORTED_RE = re.compile(r"(?i)argument\s*['\"]?--json['\"]?")
+# expected" -- so anchoring on "argument '--json'" is narrower and more
+# reliable than matching on rejection-word vocabulary (a prior version
+# matched words like "invalid" appearing anywhere near "--json", which also
+# matched unrelated runtime errors merely mentioning the flag in passing).
+# "argument '--json'" alone can still coincidentally appear in an unrelated
+# message, so this additionally requires clap's own usage/help trailer,
+# which every real clap argument-parse error appends and a genuinely
+# unrelated backend/serialization error won't happen to also produce.
+_JSON_UNSUPPORTED_RE = re.compile(
+    r"(?i)argument\s*['\"]?--json['\"]?(?=.*?(usage:|--help))", re.DOTALL
+)
 
 
 def bzrk_search_json(kql, since):

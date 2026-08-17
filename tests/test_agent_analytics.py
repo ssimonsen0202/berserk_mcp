@@ -421,7 +421,12 @@ class BzrkSearchJsonTest(unittest.TestCase):
         def fake(args, timeout=bm.DEFAULT_TIMEOUT):
             seen.append(list(args))
             if "--json" in args:
-                return ("error: unexpected argument '--json' found", True)
+                return (
+                    "error: unexpected argument '--json' found\n\n"
+                    "Usage: bzrk search [OPTIONS] <QUERY>\n\n"
+                    "For more information, try '--help'.",
+                    True,
+                )
             return ("table out", False)
 
         bm.run_bzrk = fake

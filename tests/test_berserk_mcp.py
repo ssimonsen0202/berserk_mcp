@@ -3754,22 +3754,30 @@ class BodyPreservingJsonModeTest(unittest.TestCase):
         self.assertFalse(err, text)
         self.assertNotIn("Semantic indexing is not enabled", text)
 
-    def test_find_similar_detects_real_score_in_table_shape(self):
-        # Legacy fallback path only (old bzrk builds without --json support):
-        # single-line "_score" immediately adjacent to its value, matching
-        # what the pre-existing regex was already written to detect -- a
-        # genuine multi-row table with the header ("_score:double") and the
-        # value on separate lines was never something either regex handled,
-        # and isn't this test's concern; it only guards against regressing
-        # the adjacency case the original code already covered.
+    def test_find_similar_table_fallback_is_conservative_not_a_false_positive(self):
+        # Legacy fallback only (old bzrk builds without --json support): a
+        # genuine multi-row ASCII table separates the column header
+        # ("_score:double") from its value (on a later row, under that
+        # column's position), so there's no reliable single-line adjacency
+        # to pattern-match -- unlike --json's Tables/schema/rows shape,
+        # which is parsed structurally and doesn't have this ambiguity.
+        # Rather than guess and risk a false positive (claiming semantic
+        # search works when it may not), any non-JSON output that mentions
+        # "_score" at all is treated as inconclusive and reported as
+        # "not enabled", matching the tool's existing conservative posture
+        # for every other ambiguous case (see the `err` branch above).
         def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
             self.calls.append(list(args))
-            return ("_score       0.834521   body_text_here", False)
+            return (
+                " #   _score:double        body:string\n"
+                " 0   0.834521             match_text",
+                False,
+            )
 
         bm.run_bzrk = fake_run_bzrk
         text, err = bm.handle_call("find_similar", {"description": "timeouts"})
         self.assertFalse(err, text)
-        self.assertNotIn("Semantic indexing is not enabled", text)
+        self.assertIn("Semantic indexing is not enabled", text)
 
     def test_find_similar_falls_back_when_no_real_score_present(self):
         doc = {
@@ -3816,9 +3824,11 @@ class JsonUnsupportedFallbackTest(unittest.TestCase):
         ))
 
     def test_reversed_clap_style_found_argument_triggers_fallback(self):
-        # Older clap builds phrase the same rejection in the opposite order.
+        # Older clap builds phrase the same rejection in the opposite order,
+        # and (like all clap argument errors) append a usage/help trailer.
         self.assertTrue(bm._JSON_UNSUPPORTED_RE.search(
-            "Found argument '--json' which wasn't expected, or isn't valid in this context"
+            "Found argument '--json' which wasn't expected, or isn't valid "
+            "in this context\n\nFor more information, try '--help'."
         ))
 
     def test_unrelated_error_mentioning_json_does_not_trigger_fallback(self):
@@ -3839,6 +3849,16 @@ class JsonUnsupportedFallbackTest(unittest.TestCase):
         # rejected. Must not be misread as an unsupported-flag error.
         self.assertFalse(bm._JSON_UNSUPPORTED_RE.search(
             "backend returned invalid JSON while processing --json request"
+        ))
+
+    def test_unrelated_error_incidentally_containing_argument_json_does_not_trigger_fallback(self):
+        # A message can coincidentally contain the literal substring
+        # "argument '--json'" without being clap's own argument-parser
+        # rejection -- real clap errors always append their own usage/help
+        # trailer, which a genuinely unrelated backend error won't happen
+        # to also produce.
+        self.assertFalse(bm._JSON_UNSUPPORTED_RE.search(
+            "backend returned invalid JSON while processing argument '--json'"
         ))
 
 
