@@ -851,6 +851,47 @@ def q_find_similar(description, service=None, k=10):
     )
 
 
+# Legacy fallback only: pre-existing bzrk builds that reject --json return
+# plain table text from bzrk_search_json's fallback, where a `_score` column
+# renders as a single line ("_score   0.83") immediately adjacent to its
+# value -- unlike --json's Tables/schema/rows shape, where the column name
+# and its value are never textually adjacent (see _find_similar_has_real_score).
+_FIND_SIMILAR_SCORE_TABLE_RE = re.compile(
+    r"_score\s+(-?[1-9]\d*(?:\.\d+)?|0?\.\d*[1-9]\d*)"
+)
+
+
+def _find_similar_has_real_score(out):
+    """True if a genuinely non-zero `_score` value is present. bzrk's real
+    --json output is the Kusto-style {"Tables": [{"schema": {"columns":
+    [...]}, "rows": [[...]]}]} shape (confirmed live 2026-07-17, see
+    agent_analytics._json_records) -- rows are positional arrays zipped
+    against column order, so the column name "_score" and its value are
+    never textually adjacent and can't be found by pattern-matching the raw
+    text. Reuses the same column/row-zip helper agent_analytics already
+    validates against real output, rather than re-parsing it here. Falls
+    back to the table-adjacency regex only when `out` isn't parseable JSON
+    at all, i.e. bzrk_search_json degraded to its legacy table fallback."""
+    whole = str(out or "").strip()
+    if not whole or whole[0] not in "[{":
+        return bool(_FIND_SIMILAR_SCORE_TABLE_RE.search(out))
+    try:
+        records = agent_analytics._json_records(json.loads(whole))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return bool(_FIND_SIMILAR_SCORE_TABLE_RE.search(out))
+    if records is None:
+        return bool(_FIND_SIMILAR_SCORE_TABLE_RE.search(out))
+    for row in records:
+        if not isinstance(row, dict) or "_score" not in row:
+            continue
+        try:
+            if float(row["_score"]) != 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def _forecast_fit_rows(text):
     """Extract native ``series_fit_line`` coefficients from bzrk JSON.
 
@@ -1185,10 +1226,21 @@ def bzrk_search(kql, since, extra=None):
     return out, is_err
 
 
-# bzrk builds that don't support --json reject it with an argument-parse error;
-# detect that so we can transparently fall back to the default table output.
+# bzrk builds that don't support --json reject it with an argument-parse
+# error; detect that so we can transparently fall back to the default table
+# output. Both known clap phrasings put the literal word "argument"
+# immediately next to the (usually quoted) flag it's rejecting -- "unexpected
+# argument '--json' found" / "Found argument '--json' which wasn't
+# expected" -- so anchoring on "argument '--json'" is narrower and more
+# reliable than matching on rejection-word vocabulary (a prior version
+# matched words like "invalid" appearing anywhere near "--json", which also
+# matched unrelated runtime errors merely mentioning the flag in passing).
+# "argument '--json'" alone can still coincidentally appear in an unrelated
+# message, so this additionally requires clap's own usage/help trailer,
+# which every real clap argument-parse error appends and a genuinely
+# unrelated backend/serialization error won't happen to also produce.
 _JSON_UNSUPPORTED_RE = re.compile(
-    r"(?i)(unrecognized|unexpected|unknown|invalid)\b.*\b(argument|option|flag|--?json)|--json"
+    r"(?i)argument\s*['\"]?--json['\"]?(?=.*?(usage:|--help))", re.DOTALL
 )
 
 
@@ -1667,6 +1719,21 @@ SIMPLE = {
     "trace_find_errors": (Q_TRACE_FIND_ERRORS, "1h ago"),
 }
 
+# SIMPLE tools whose fixed query derives output from `body`, even though
+# it's already substring-capped at the KQL level (200-500 chars). Confirmed
+# empirically that the runtime table renderer can still clip those capped
+# values further depending on the calling process's terminal-width detection
+# -- unrelated to the KQL-level cap. sre_top_error_messages and
+# soc_repeated_errors derive their `example` column from
+# substring(tostring(body), ...) rather than projecting a literal `body`
+# column, which is easy to miss on a quick scan. The rest of SIMPLE is
+# aggregation-only and never carries body-derived content, so it stays on
+# the more compact table mode.
+_SIMPLE_JSON_TOOLS = {
+    "claude_errors", "soc_high_severity_logs",
+    "sre_top_error_messages", "soc_repeated_errors",
+}
+
 _QUERY_RISK_BUDGET_MULTIPLIERS = {
     "low": 1.0,
     "medium": 1.5,
@@ -1980,7 +2047,7 @@ def _handle_call_uncached(name, arguments):
                 )
             if _blocking_validation(report):
                 return prefix + _format_validation_rejection(report), True
-        out, err = bzrk_search(match["kql"], since)
+        out, err = bzrk_search_json(match["kql"], since)
         return prefix + out, err
     if name == "save_query":
         nm = sanitize_name(arguments.get("name", ""))
@@ -1994,7 +2061,7 @@ def _handle_call_uncached(name, arguments):
             validation_report = _validate_user_kql(kql, since)
             if _blocking_validation(validation_report, persistence=True):
                 return _format_validation_rejection(validation_report), True
-        out, is_err = bzrk_search(kql, since)
+        out, is_err = bzrk_search_json(kql, since)
         if is_err:
             return "NOT saved - the query failed when verified:\n" + out, True
         all_items = load_learned()
@@ -2260,7 +2327,7 @@ def _handle_call_uncached(name, arguments):
         except (TypeError, ValueError):
             return "k must be an integer between 1 and 50", True
         since = arguments.get("since") or "6h ago"
-        out, err = bzrk_search(q_find_similar(description, service or None, k), since)
+        out, err = bzrk_search_json(q_find_similar(description, service or None, k), since)
         if err:
             if "similarto" in str(out).lower() or "semantic" in str(out).lower():
                 return (
@@ -2269,7 +2336,7 @@ def _handle_call_uncached(name, arguments):
                     "search with has '<term>' for exact terms.", False
                 )
             return out, True
-        if "_score" in out and not re.search(r"_score\s+(-?[1-9]\d*(?:\.\d+)?|0?\.\d*[1-9]\d*)", out):
+        if "_score" in out and not _find_similar_has_real_score(out):
             return (
                 "Semantic indexing is not enabled on this Berserk cluster — falling "
                 "back is not possible for meaning-based search; use search with "
@@ -2281,6 +2348,8 @@ def _handle_call_uncached(name, arguments):
     if name in SIMPLE:
         kql, default_since = SIMPLE[name]
         since = arguments.get("since") or default_since
+        if name in _SIMPLE_JSON_TOOLS:
+            return bzrk_search_json(kql, since)
         return bzrk_search(kql, since)
 
     if name == "soc_new_services":
@@ -2328,7 +2397,7 @@ def _handle_call_uncached(name, arguments):
         if not _valid_interpolated_name(svc):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "1h ago"
-        return bzrk_search(q_logs(str(svc)), since)
+        return bzrk_search_json(q_logs(str(svc)), since)
     if name == "sre_service_health":
         svc = arguments.get("service")
         if not svc:
@@ -2344,7 +2413,7 @@ def _handle_call_uncached(name, arguments):
         if not _valid_interpolated_name(svc):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "6h ago"
-        return bzrk_search(q_soc_timeline(str(svc)), since)
+        return bzrk_search_json(q_soc_timeline(str(svc)), since)
     if name == "trace_analyze":
         trace_id = arguments.get("trace_id")
         if not trace_id:
@@ -2358,7 +2427,7 @@ def _handle_call_uncached(name, arguments):
         # any logs sharing the same trace_id — treated as a failure only if
         # BOTH halves fail, since a trace can legitimately have no logs.
         out1, e1 = bzrk_search(q_trace_analyze(str(trace_id)), "30d ago")
-        out2, e2 = bzrk_search(q_trace_logs(str(trace_id)), "30d ago")
+        out2, e2 = bzrk_search_json(q_trace_logs(str(trace_id)), "30d ago")
         return f"== spans ==\n{out1}\n\n== correlated logs ==\n{out2}", (e1 and e2)
     if name == "search":
         kql = arguments.get("kql")
@@ -2372,7 +2441,14 @@ def _handle_call_uncached(name, arguments):
                 return _format_validation_rejection(report), True
             if KQL_VALIDATION_MODE == "warn":
                 warning = _format_validation_warnings(report)
-        out, err = bzrk_search(str(kql), since)
+        # Always JSON: whether table-mode clips a wide `body`/`$raw` column
+        # depends on the calling process's terminal-width detection, not on
+        # anything visible in the KQL text -- confirmed empirically (see PR
+        # description) that identical queries clip under the real deployment
+        # path but not in a local interactive shell. Static detection from
+        # the query shape can't be trusted either direction, so arbitrary
+        # user KQL always gets full-fidelity output.
+        out, err = bzrk_search_json(str(kql), since)
         if warning and not err:
             return warning + "\n\n" + out, False
         return out, err
@@ -2385,7 +2461,7 @@ def _handle_call_uncached(name, arguments):
         if _TEXT_GUARD_RE.search(str(term)):
             return "term may not contain quotes, pipe, backslash, or backtick", True
         since = arguments.get("since") or "6h ago"
-        return bzrk_search(q_cc_search(str(term)), since)
+        return bzrk_search_json(q_cc_search(str(term)), since)
     if name == "claude_loop_check":
         since = arguments.get("since") or "6h ago"
         if not valid_since(since):
