@@ -1187,8 +1187,15 @@ def bzrk_search(kql, since, extra=None):
 
 # bzrk builds that don't support --json reject it with an argument-parse error;
 # detect that so we can transparently fall back to the default table output.
+# Requires an actual rejection word AND the literal --json token on the same
+# line, in either order (clap phrases this both ways across versions) -- a
+# bare `--json` substring match is too broad and can misclassify an unrelated
+# runtime error (e.g. a backend failure that happens to mention the flag) as
+# an unsupported-flag case, silently masking the real failure.
 _JSON_UNSUPPORTED_RE = re.compile(
-    r"(?i)(unrecognized|unexpected|unknown|invalid)\b.*\b(argument|option|flag|--?json)|--json"
+    r"(?i)(unrecognized|unexpected|unknown|invalid|wasn't expected|isn't expected)"
+    r"[^\n]*?--json"
+    r"|--json[^\n]*?(unrecognized|unexpected|unknown|invalid|wasn't expected|isn't expected)"
 )
 
 
@@ -1667,6 +1674,14 @@ SIMPLE = {
     "trace_find_errors": (Q_TRACE_FIND_ERRORS, "1h ago"),
 }
 
+# SIMPLE tools whose fixed query includes a `body` column, even though it's
+# already substring-capped at the KQL level (200-500 chars). Confirmed
+# empirically that the runtime table renderer can still clip those capped
+# values further depending on the calling process's terminal-width detection
+# -- unrelated to the KQL-level cap. The rest of SIMPLE is aggregation-only
+# and never carries body content, so it stays on the more compact table mode.
+_SIMPLE_JSON_TOOLS = {"claude_errors", "soc_high_severity_logs"}
+
 _QUERY_RISK_BUDGET_MULTIPLIERS = {
     "low": 1.0,
     "medium": 1.5,
@@ -1980,7 +1995,7 @@ def _handle_call_uncached(name, arguments):
                 )
             if _blocking_validation(report):
                 return prefix + _format_validation_rejection(report), True
-        out, err = bzrk_search(match["kql"], since)
+        out, err = bzrk_search_json(match["kql"], since)
         return prefix + out, err
     if name == "save_query":
         nm = sanitize_name(arguments.get("name", ""))
@@ -1994,7 +2009,7 @@ def _handle_call_uncached(name, arguments):
             validation_report = _validate_user_kql(kql, since)
             if _blocking_validation(validation_report, persistence=True):
                 return _format_validation_rejection(validation_report), True
-        out, is_err = bzrk_search(kql, since)
+        out, is_err = bzrk_search_json(kql, since)
         if is_err:
             return "NOT saved - the query failed when verified:\n" + out, True
         all_items = load_learned()
@@ -2260,7 +2275,7 @@ def _handle_call_uncached(name, arguments):
         except (TypeError, ValueError):
             return "k must be an integer between 1 and 50", True
         since = arguments.get("since") or "6h ago"
-        out, err = bzrk_search(q_find_similar(description, service or None, k), since)
+        out, err = bzrk_search_json(q_find_similar(description, service or None, k), since)
         if err:
             if "similarto" in str(out).lower() or "semantic" in str(out).lower():
                 return (
@@ -2269,7 +2284,10 @@ def _handle_call_uncached(name, arguments):
                     "search with has '<term>' for exact terms.", False
                 )
             return out, True
-        if "_score" in out and not re.search(r"_score\s+(-?[1-9]\d*(?:\.\d+)?|0?\.\d*[1-9]\d*)", out):
+        # Matches a real score in either table cell ("_score   0.83") or JSON
+        # field ("_score": 0.83) shape -- the quote/colon between the key and
+        # value are both optional so either rendering satisfies it.
+        if "_score" in out and not re.search(r'_score["\']?\s*:?\s*(-?[1-9]\d*(?:\.\d+)?|0?\.\d*[1-9]\d*)', out):
             return (
                 "Semantic indexing is not enabled on this Berserk cluster — falling "
                 "back is not possible for meaning-based search; use search with "
@@ -2281,6 +2299,8 @@ def _handle_call_uncached(name, arguments):
     if name in SIMPLE:
         kql, default_since = SIMPLE[name]
         since = arguments.get("since") or default_since
+        if name in _SIMPLE_JSON_TOOLS:
+            return bzrk_search_json(kql, since)
         return bzrk_search(kql, since)
 
     if name == "soc_new_services":
@@ -2328,7 +2348,7 @@ def _handle_call_uncached(name, arguments):
         if not _valid_interpolated_name(svc):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "1h ago"
-        return bzrk_search(q_logs(str(svc)), since)
+        return bzrk_search_json(q_logs(str(svc)), since)
     if name == "sre_service_health":
         svc = arguments.get("service")
         if not svc:
@@ -2344,7 +2364,7 @@ def _handle_call_uncached(name, arguments):
         if not _valid_interpolated_name(svc):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "6h ago"
-        return bzrk_search(q_soc_timeline(str(svc)), since)
+        return bzrk_search_json(q_soc_timeline(str(svc)), since)
     if name == "trace_analyze":
         trace_id = arguments.get("trace_id")
         if not trace_id:
@@ -2358,7 +2378,7 @@ def _handle_call_uncached(name, arguments):
         # any logs sharing the same trace_id — treated as a failure only if
         # BOTH halves fail, since a trace can legitimately have no logs.
         out1, e1 = bzrk_search(q_trace_analyze(str(trace_id)), "30d ago")
-        out2, e2 = bzrk_search(q_trace_logs(str(trace_id)), "30d ago")
+        out2, e2 = bzrk_search_json(q_trace_logs(str(trace_id)), "30d ago")
         return f"== spans ==\n{out1}\n\n== correlated logs ==\n{out2}", (e1 and e2)
     if name == "search":
         kql = arguments.get("kql")
@@ -2366,23 +2386,20 @@ def _handle_call_uncached(name, arguments):
             return "missing required 'kql'", True
         since = arguments.get("since") or "15m ago"
         warning = ""
-        wide_projection = False
         if KQL_VALIDATION_MODE != "off":
             report = _validate_user_kql(str(kql), since)
             if _blocking_validation(report):
                 return _format_validation_rejection(report), True
             if KQL_VALIDATION_MODE == "warn":
                 warning = _format_validation_warnings(report)
-            wide_projection = any(
-                f.get("code") == "WIDE_PROJECTION"
-                for f in report.get("findings", [])
-            )
-        # Switch to JSON mode when body/$raw columns are projected so the full
-        # content is returned instead of being truncated by table alignment.
-        if wide_projection:
-            out, err = bzrk_search_json(str(kql), since)
-        else:
-            out, err = bzrk_search(str(kql), since)
+        # Always JSON: whether table-mode clips a wide `body`/`$raw` column
+        # depends on the calling process's terminal-width detection, not on
+        # anything visible in the KQL text -- confirmed empirically (see PR
+        # description) that identical queries clip under the real deployment
+        # path but not in a local interactive shell. Static detection from
+        # the query shape can't be trusted either direction, so arbitrary
+        # user KQL always gets full-fidelity output.
+        out, err = bzrk_search_json(str(kql), since)
         if warning and not err:
             return warning + "\n\n" + out, False
         return out, err
@@ -2395,7 +2412,7 @@ def _handle_call_uncached(name, arguments):
         if _TEXT_GUARD_RE.search(str(term)):
             return "term may not contain quotes, pipe, backslash, or backtick", True
         since = arguments.get("since") or "6h ago"
-        return bzrk_search(q_cc_search(str(term)), since)
+        return bzrk_search_json(q_cc_search(str(term)), since)
     if name == "claude_loop_check":
         since = arguments.get("since") or "6h ago"
         if not valid_since(since):

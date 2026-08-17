@@ -374,7 +374,11 @@ class BerserkMcpTest(unittest.TestCase):
         text, err = bm.handle_call("run_saved", {"name": "big_errors"})
         self.assertFalse(err)
         self.assertEqual(self.calls[-1][3], "default | where severity_text=='ERROR' | count")
-        self.assertEqual(self.calls[-1][-1], "1d ago")
+        self.assertEqual(self.calls[-1][5], "1d ago")
+        # run_saved must use the same fidelity as search/save_query -- a
+        # replayed query can't silently drop to a lower-fidelity mode than
+        # the one that verified it before persisting.
+        self.assertIn("--json", self.calls[-1])
 
     def test_save_not_persisted_when_query_fails(self):
         def failing(args, timeout=bm.DEFAULT_TIMEOUT):
@@ -3601,6 +3605,175 @@ class CanonLoomTest(unittest.TestCase):
         text, err = bm.handle_call("canonloom_get_artifact", {})
         self.assertTrue(err)
         self.assertIn("artifact_id", text.lower())
+
+
+class BodyPreservingJsonModeTest(unittest.TestCase):
+    """Table-mode output can silently clip wide `body` columns depending on
+    the runtime's terminal-width detection (confirmed empirically against a
+    live cluster: identical 3-4 column queries truncated over the deployed
+    MCP path but not via a local interactive shell -- the earlier
+    WIDE_PROJECTION static-KQL-detection approach could never predict this,
+    since it depends on the calling environment, not the query text). Every
+    dispatch path that can surface `body` content to a caller must use
+    bzrk_search_json unconditionally rather than guessing from KQL shape."""
+
+    def setUp(self):
+        self.calls = []
+
+        def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
+            self.calls.append(list(args))
+            return ("OK", False)
+
+        self._orig = bm.run_bzrk
+        bm.run_bzrk = fake_run_bzrk
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_learned = bm.LEARNED_PATH
+        bm.LEARNED_PATH = Path(self._tmp.name) / "learned.json"
+
+    def tearDown(self):
+        bm.run_bzrk = self._orig
+        bm.LEARNED_PATH = self._orig_learned
+        self._tmp.cleanup()
+
+    def test_search_always_uses_json_regardless_of_projection_shape(self):
+        # A narrow, non-body-projecting query used to stay on table mode
+        # under the old WIDE_PROJECTION-detection design. It must not
+        # anymore -- the truncation risk is environment-driven, not
+        # KQL-shape-driven, so detection from the query text can't be
+        # trusted either way.
+        narrow_kql = f"{bm.TABLE} | summarize count() by resource['service.name']"
+        text, err = bm.handle_call("search", {"kql": narrow_kql})
+        self.assertFalse(err, text)
+        self.assertIn("--json", self.calls[-1])
+
+        wide_kql = f"{bm.TABLE} | project timestamp, body | take 5"
+        self.calls.clear()
+        text, err = bm.handle_call("search", {"kql": wide_kql})
+        self.assertFalse(err, text)
+        self.assertIn("--json", self.calls[-1])
+
+    def test_run_saved_uses_json(self):
+        bm.handle_call("save_query", {
+            "name": "wide_probe", "description": "d",
+            "kql": f"{bm.TABLE} | project timestamp, body | take 5",
+        })
+        self.calls.clear()
+        text, err = bm.handle_call("run_saved", {"name": "wide_probe"})
+        self.assertFalse(err, text)
+        self.assertIn("--json", self.calls[-1])
+
+    def test_save_query_verify_call_uses_json(self):
+        self.calls.clear()
+        bm.handle_call("save_query", {
+            "name": "verify_probe", "description": "d",
+            "kql": f"{bm.TABLE} | project timestamp, body | take 5",
+        })
+        self.assertIn("--json", self.calls[-1])
+
+    def test_logs_for_service_uses_json(self):
+        text, err = bm.handle_call("logs_for_service", {"service": "api"})
+        self.assertFalse(err, text)
+        self.assertIn("--json", self.calls[-1])
+
+    def test_soc_timeline_uses_json(self):
+        text, err = bm.handle_call("soc_timeline", {"service": "api"})
+        self.assertFalse(err, text)
+        self.assertIn("--json", self.calls[-1])
+
+    def test_claude_search_uses_json(self):
+        text, err = bm.handle_call("claude_search", {"term": "timeout"})
+        self.assertFalse(err, text)
+        self.assertIn("--json", self.calls[-1])
+
+    def test_claude_errors_simple_dispatch_uses_json(self):
+        text, err = bm.handle_call("claude_errors", {})
+        self.assertFalse(err, text)
+        self.assertIn("--json", self.calls[-1])
+
+    def test_soc_high_severity_logs_simple_dispatch_uses_json(self):
+        text, err = bm.handle_call("soc_high_severity_logs", {})
+        self.assertFalse(err, text)
+        self.assertIn("--json", self.calls[-1])
+
+    def test_trace_analyze_spans_table_logs_json(self):
+        text, err = bm.handle_call("trace_analyze", {"trace_id": "abc123"})
+        self.assertFalse(err, text)
+        spans_argv, logs_argv = self.calls[-2], self.calls[-1]
+        self.assertNotIn("--json", spans_argv)
+        self.assertIn("--json", logs_argv)
+
+    def test_non_body_simple_tool_stays_on_table_mode(self):
+        """Negative control: aggregation-only SIMPLE tools never carry body
+        content by construction, so they should stay compact rather than
+        being blanket-converted along with the body-bearing ones."""
+        text, err = bm.handle_call("top_cpu", {})
+        self.assertFalse(err, text)
+        self.assertNotIn("--json", self.calls[-1])
+
+    def test_find_similar_uses_json(self):
+        text, err = bm.handle_call("find_similar", {"description": "timeouts"})
+        self.assertFalse(err, text)
+        self.assertIn("--json", self.calls[-1])
+
+    def test_find_similar_detects_real_score_in_json_shape(self):
+        def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
+            self.calls.append(list(args))
+            return ('[{"_score": 0.834521, "body": "x"}]', False)
+
+        bm.run_bzrk = fake_run_bzrk
+        text, err = bm.handle_call("find_similar", {"description": "timeouts"})
+        self.assertFalse(err, text)
+        self.assertNotIn("Semantic indexing is not enabled", text)
+
+    def test_find_similar_detects_real_score_in_table_shape(self):
+        # Legacy fallback path only (old bzrk builds without --json support):
+        # single-line "_score" immediately adjacent to its value, matching
+        # what the pre-existing regex was already written to detect -- a
+        # genuine multi-row table with the header ("_score:double") and the
+        # value on separate lines was never something either regex handled,
+        # and isn't this test's concern; it only guards against regressing
+        # the adjacency case the original code already covered.
+        def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
+            self.calls.append(list(args))
+            return ("_score       0.834521   body_text_here", False)
+
+        bm.run_bzrk = fake_run_bzrk
+        text, err = bm.handle_call("find_similar", {"description": "timeouts"})
+        self.assertFalse(err, text)
+        self.assertNotIn("Semantic indexing is not enabled", text)
+
+    def test_find_similar_falls_back_when_no_real_score_present(self):
+        def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
+            self.calls.append(list(args))
+            return ('[{"_score": 0, "body": "x"}]', False)
+
+        bm.run_bzrk = fake_run_bzrk
+        text, err = bm.handle_call("find_similar", {"description": "timeouts"})
+        self.assertFalse(err, text)
+        self.assertIn("Semantic indexing is not enabled", text)
+
+
+class JsonUnsupportedFallbackTest(unittest.TestCase):
+    def test_clap_style_unexpected_argument_triggers_fallback(self):
+        self.assertTrue(bm._JSON_UNSUPPORTED_RE.search(
+            "error: unexpected argument '--json' found\n\nUsage: bzrk search [OPTIONS] <QUERY>"
+        ))
+
+    def test_reversed_clap_style_found_argument_triggers_fallback(self):
+        # Older clap builds phrase the same rejection in the opposite order.
+        self.assertTrue(bm._JSON_UNSUPPORTED_RE.search(
+            "Found argument '--json' which wasn't expected, or isn't valid in this context"
+        ))
+
+    def test_unrelated_error_mentioning_json_does_not_trigger_fallback(self):
+        self.assertFalse(bm._JSON_UNSUPPORTED_RE.search(
+            "backend unavailable while processing --json request"
+        ))
+
+    def test_unrelated_error_without_json_does_not_trigger_fallback(self):
+        self.assertFalse(bm._JSON_UNSUPPORTED_RE.search(
+            "error: invalid value for '--profile'"
+        ))
 
 
 class SinceNormalizerTest(unittest.TestCase):
