@@ -851,6 +851,47 @@ def q_find_similar(description, service=None, k=10):
     )
 
 
+# Legacy fallback only: pre-existing bzrk builds that reject --json return
+# plain table text from bzrk_search_json's fallback, where a `_score` column
+# renders as a single line ("_score   0.83") immediately adjacent to its
+# value -- unlike --json's Tables/schema/rows shape, where the column name
+# and its value are never textually adjacent (see _find_similar_has_real_score).
+_FIND_SIMILAR_SCORE_TABLE_RE = re.compile(
+    r"_score\s+(-?[1-9]\d*(?:\.\d+)?|0?\.\d*[1-9]\d*)"
+)
+
+
+def _find_similar_has_real_score(out):
+    """True if a genuinely non-zero `_score` value is present. bzrk's real
+    --json output is the Kusto-style {"Tables": [{"schema": {"columns":
+    [...]}, "rows": [[...]]}]} shape (confirmed live 2026-07-17, see
+    agent_analytics._json_records) -- rows are positional arrays zipped
+    against column order, so the column name "_score" and its value are
+    never textually adjacent and can't be found by pattern-matching the raw
+    text. Reuses the same column/row-zip helper agent_analytics already
+    validates against real output, rather than re-parsing it here. Falls
+    back to the table-adjacency regex only when `out` isn't parseable JSON
+    at all, i.e. bzrk_search_json degraded to its legacy table fallback."""
+    whole = str(out or "").strip()
+    if not whole or whole[0] not in "[{":
+        return bool(_FIND_SIMILAR_SCORE_TABLE_RE.search(out))
+    try:
+        records = agent_analytics._json_records(json.loads(whole))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return bool(_FIND_SIMILAR_SCORE_TABLE_RE.search(out))
+    if records is None:
+        return bool(_FIND_SIMILAR_SCORE_TABLE_RE.search(out))
+    for row in records:
+        if not isinstance(row, dict) or "_score" not in row:
+            continue
+        try:
+            if float(row["_score"]) != 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def _forecast_fit_rows(text):
     """Extract native ``series_fit_line`` coefficients from bzrk JSON.
 
@@ -1185,18 +1226,18 @@ def bzrk_search(kql, since, extra=None):
     return out, is_err
 
 
-# bzrk builds that don't support --json reject it with an argument-parse error;
-# detect that so we can transparently fall back to the default table output.
-# Requires an actual rejection word AND the literal --json token on the same
-# line, in either order (clap phrases this both ways across versions) -- a
-# bare `--json` substring match is too broad and can misclassify an unrelated
-# runtime error (e.g. a backend failure that happens to mention the flag) as
-# an unsupported-flag case, silently masking the real failure.
-_JSON_UNSUPPORTED_RE = re.compile(
-    r"(?i)(unrecognized|unexpected|unknown|invalid|wasn't expected|isn't expected)"
-    r"[^\n]*?--json"
-    r"|--json[^\n]*?(unrecognized|unexpected|unknown|invalid|wasn't expected|isn't expected)"
-)
+# bzrk builds that don't support --json reject it with an argument-parse
+# error; detect that so we can transparently fall back to the default table
+# output. Both known clap phrasings put the literal word "argument"
+# immediately next to the (usually quoted) flag it's rejecting -- "unexpected
+# argument '--json' found" / "Found argument '--json' which wasn't
+# expected" -- so anchoring on "argument '--json'" is both narrower and more
+# reliable than matching on rejection-word vocabulary. A prior version tried
+# to match on words like "invalid" appearing anywhere near "--json", which
+# also matched unrelated runtime errors that merely mention the flag in
+# passing (e.g. "backend returned invalid JSON while processing --json
+# request"), silently masking the real failure as an unsupported-flag case.
+_JSON_UNSUPPORTED_RE = re.compile(r"(?i)argument\s*['\"]?--json['\"]?")
 
 
 def bzrk_search_json(kql, since):
@@ -1674,13 +1715,20 @@ SIMPLE = {
     "trace_find_errors": (Q_TRACE_FIND_ERRORS, "1h ago"),
 }
 
-# SIMPLE tools whose fixed query includes a `body` column, even though it's
-# already substring-capped at the KQL level (200-500 chars). Confirmed
+# SIMPLE tools whose fixed query derives output from `body`, even though
+# it's already substring-capped at the KQL level (200-500 chars). Confirmed
 # empirically that the runtime table renderer can still clip those capped
 # values further depending on the calling process's terminal-width detection
-# -- unrelated to the KQL-level cap. The rest of SIMPLE is aggregation-only
-# and never carries body content, so it stays on the more compact table mode.
-_SIMPLE_JSON_TOOLS = {"claude_errors", "soc_high_severity_logs"}
+# -- unrelated to the KQL-level cap. sre_top_error_messages and
+# soc_repeated_errors derive their `example` column from
+# substring(tostring(body), ...) rather than projecting a literal `body`
+# column, which is easy to miss on a quick scan. The rest of SIMPLE is
+# aggregation-only and never carries body-derived content, so it stays on
+# the more compact table mode.
+_SIMPLE_JSON_TOOLS = {
+    "claude_errors", "soc_high_severity_logs",
+    "sre_top_error_messages", "soc_repeated_errors",
+}
 
 _QUERY_RISK_BUDGET_MULTIPLIERS = {
     "low": 1.0,
@@ -2284,10 +2332,7 @@ def _handle_call_uncached(name, arguments):
                     "search with has '<term>' for exact terms.", False
                 )
             return out, True
-        # Matches a real score in either table cell ("_score   0.83") or JSON
-        # field ("_score": 0.83) shape -- the quote/colon between the key and
-        # value are both optional so either rendering satisfies it.
-        if "_score" in out and not re.search(r'_score["\']?\s*:?\s*(-?[1-9]\d*(?:\.\d+)?|0?\.\d*[1-9]\d*)', out):
+        if "_score" in out and not _find_similar_has_real_score(out):
             return (
                 "Semantic indexing is not enabled on this Berserk cluster — falling "
                 "back is not possible for meaning-based search; use search with "

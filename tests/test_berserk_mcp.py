@@ -3695,6 +3695,20 @@ class BodyPreservingJsonModeTest(unittest.TestCase):
         self.assertFalse(err, text)
         self.assertIn("--json", self.calls[-1])
 
+    def test_sre_top_error_messages_simple_dispatch_uses_json(self):
+        # Q_SRE_TOP_ERRORS derives its `example` column from body via
+        # substring(min(tostring(body)), 0, 240) -- same shape as the other
+        # body-bearing SIMPLE tools, just easy to miss since "body" never
+        # appears as a bare column name.
+        text, err = bm.handle_call("sre_top_error_messages", {})
+        self.assertFalse(err, text)
+        self.assertIn("--json", self.calls[-1])
+
+    def test_soc_repeated_errors_simple_dispatch_uses_json(self):
+        text, err = bm.handle_call("soc_repeated_errors", {})
+        self.assertFalse(err, text)
+        self.assertIn("--json", self.calls[-1])
+
     def test_trace_analyze_spans_table_logs_json(self):
         text, err = bm.handle_call("trace_analyze", {"trace_id": "abc123"})
         self.assertFalse(err, text)
@@ -3716,9 +3730,24 @@ class BodyPreservingJsonModeTest(unittest.TestCase):
         self.assertIn("--json", self.calls[-1])
 
     def test_find_similar_detects_real_score_in_json_shape(self):
+        # bzrk's actual --json output (see agent_analytics._json_records and
+        # its docstring, confirmed live 2026-07-17) is a Kusto-style
+        # {"Tables": [{"schema": {"columns": [...]}, "rows": [[...]]}]}
+        # shape -- rows are positional arrays, not row objects, so the
+        # column name "_score" and its value are never textually adjacent.
+        # A regex that assumes {"_score": value} inline objects can't parse
+        # this correctly; the real fix reuses agent_analytics._parse_rows,
+        # which already zips columns against rows.
+        doc = {
+            "Tables": [{
+                "schema": {"columns": [{"name": "body"}, {"name": "_score"}]},
+                "rows": [["match text", 0.834521]],
+            }]
+        }
+
         def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
             self.calls.append(list(args))
-            return ('[{"_score": 0.834521, "body": "x"}]', False)
+            return (json.dumps(doc), False)
 
         bm.run_bzrk = fake_run_bzrk
         text, err = bm.handle_call("find_similar", {"description": "timeouts"})
@@ -3743,9 +3772,36 @@ class BodyPreservingJsonModeTest(unittest.TestCase):
         self.assertNotIn("Semantic indexing is not enabled", text)
 
     def test_find_similar_falls_back_when_no_real_score_present(self):
+        doc = {
+            "Tables": [{
+                "schema": {"columns": [{"name": "body"}, {"name": "_score"}]},
+                "rows": [["no real ranking", 0]],
+            }]
+        }
+
         def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
             self.calls.append(list(args))
-            return ('[{"_score": 0, "body": "x"}]', False)
+            return (json.dumps(doc), False)
+
+        bm.run_bzrk = fake_run_bzrk
+        text, err = bm.handle_call("find_similar", {"description": "timeouts"})
+        self.assertFalse(err, text)
+        self.assertIn("Semantic indexing is not enabled", text)
+
+    def test_find_similar_does_not_match_score_mentioned_only_in_body_text(self):
+        # Regression for the exact false-positive Codex's review demonstrated:
+        # a body value that happens to contain the substring "_score" must
+        # never be read as a real ranking score.
+        doc = {
+            "Tables": [{
+                "schema": {"columns": [{"name": "body"}, {"name": "_score"}]},
+                "rows": [["upstream payload mentions _score: 1 in its text", 0]],
+            }]
+        }
+
+        def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
+            self.calls.append(list(args))
+            return (json.dumps(doc), False)
 
         bm.run_bzrk = fake_run_bzrk
         text, err = bm.handle_call("find_similar", {"description": "timeouts"})
@@ -3773,6 +3829,16 @@ class JsonUnsupportedFallbackTest(unittest.TestCase):
     def test_unrelated_error_without_json_does_not_trigger_fallback(self):
         self.assertFalse(bm._JSON_UNSUPPORTED_RE.search(
             "error: invalid value for '--profile'"
+        ))
+
+    def test_invalid_json_response_error_does_not_trigger_fallback(self):
+        # A rejection word ("invalid") and "--json" can both appear in an
+        # unrelated message without either referring to an unsupported CLI
+        # flag -- here "invalid" describes the backend's JSON response, and
+        # "--json" is just naming the request flag that was used, not being
+        # rejected. Must not be misread as an unsupported-flag error.
+        self.assertFalse(bm._JSON_UNSUPPORTED_RE.search(
+            "backend returned invalid JSON while processing --json request"
         ))
 
 
