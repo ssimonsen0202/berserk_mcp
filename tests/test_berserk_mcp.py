@@ -4006,5 +4006,466 @@ class SinceNormalizerTest(unittest.TestCase):
             bm.run_bzrk = orig
 
 
+class DoctorPreflightTest(unittest.TestCase):
+    """--doctor / self_check: ordered preflight checks with pass/fail/skip
+    status, one remediation line per failure, and an exit code a fleet
+    readiness probe or container healthcheck can act on."""
+
+    def setUp(self):
+        self.calls = []
+        self._orig_run_bzrk = bm.run_bzrk
+        self._tmp = tempfile.TemporaryDirectory()
+
+        # Isolate every check the aggregator (_run_doctor_checks/run_doctor/
+        # self_check) can reach from whatever the real machine happens to
+        # have: bzrk on PATH varies (present on a dev machine, absent on a
+        # clean CI runner -- this exact gap failed CI while passing
+        # locally), and a persisted Hermes/CanonLoom config is real
+        # operator state a test must never depend on or disturb. Individual
+        # checks that need the un-isolated real behavior (e.g.
+        # test_bzrk_resolvable_fail_when_not_found) pass which=/etc.
+        # directly to the single-check function, which overrides this.
+        self._orig_which = bm.shutil.which
+        bm.shutil.which = lambda name: "/usr/bin/bzrk"
+        self._orig_llm_config = bm.parser_factory._llm_config
+        bm.parser_factory._llm_config = lambda: {}
+        self._orig_hermes_env = os.environ.pop("BERSERK_LLM_HERMES_URL", None)
+        self._orig_canonloom_env = os.environ.pop("CANONLOOM_SERVER_URL", None)
+
+    def tearDown(self):
+        bm.run_bzrk = self._orig_run_bzrk
+        bm.shutil.which = self._orig_which
+        bm.parser_factory._llm_config = self._orig_llm_config
+        if self._orig_hermes_env is not None:
+            os.environ["BERSERK_LLM_HERMES_URL"] = self._orig_hermes_env
+        if self._orig_canonloom_env is not None:
+            os.environ["CANONLOOM_SERVER_URL"] = self._orig_canonloom_env
+        self._tmp.cleanup()
+
+    def _fake_run_bzrk(self, response_map):
+        """response_map: dict of substring-in-argv -> (text, is_err), checked
+        in insertion order; first match wins. Falls back to realistic
+        default responses for --version and a --json `| count` query (the
+        two bzrk_version/recent_rows now validate the shape of, not just
+        the exit code) so tests exercising the full aggregator don't need
+        to know about that validation unless they're specifically testing it."""
+        def fake(args, timeout=bm.DEFAULT_TIMEOUT):
+            self.calls.append(list(args))
+            joined = " ".join(str(a) for a in args)
+            for needle, result in response_map.items():
+                if needle in joined:
+                    return result
+            if "--version" in joined:
+                return ("bzrk 2026-06-30.abc123", False)
+            if "--json" in joined and "count" in joined:
+                doc = {"Tables": [{"schema": {"columns": [{"name": "Count"}]}, "rows": [[1]]}]}
+                return (json.dumps(doc), False)
+            return ("OK", False)
+        return fake
+
+    # ---- bzrk resolvable ----
+    def test_bzrk_resolvable_pass_when_found_on_path(self):
+        # A hardcoded POSIX path like "/usr/local/bin/bzrk" isn't absolute on
+        # Windows (no drive letter), so Path.resolve() rewrites it relative
+        # to the current drive instead of preserving it -- use a path that's
+        # genuinely absolute on whichever platform the test runs on. Pre-
+        # resolve it (e.g. macOS /tmp -> /private/tmp) so the function's own
+        # .resolve() call is a no-op and can't change the string out from
+        # under the assertion.
+        fake_path = str((Path(self._tmp.name) / "bzrk").resolve(strict=False))
+        result = bm._doctor_check_bzrk_resolvable("bzrk", which=lambda name: fake_path)
+        self.assertEqual(result["status"], "pass")
+        self.assertIn(fake_path, result["detail"])
+
+    def test_bzrk_resolvable_fail_when_not_found(self):
+        result = bm._doctor_check_bzrk_resolvable("bzrk", which=lambda name: None)
+        self.assertEqual(result["status"], "fail")
+        self.assertIn("remediation", result)
+        self.assertTrue(result["remediation"])
+
+    # ---- bzrk version ----
+    def test_bzrk_version_pass_on_success(self):
+        bm.run_bzrk = self._fake_run_bzrk({"--version": ("bzrk 2026-06-30.abc123", False)})
+        result = bm._doctor_check_bzrk_version()
+        self.assertEqual(result["status"], "pass")
+        self.assertIn("2026-06-30.abc123", result["detail"])
+
+    def test_bzrk_version_fail_on_error(self):
+        bm.run_bzrk = self._fake_run_bzrk({"--version": ("command not found", True)})
+        result = bm._doctor_check_bzrk_version()
+        self.assertEqual(result["status"], "fail")
+
+    # ---- auth ----
+    def test_auth_pass_when_query_succeeds(self):
+        bm.run_bzrk = self._fake_run_bzrk({})
+        result = bm._doctor_check_auth()
+        self.assertEqual(result["status"], "pass")
+
+    def test_auth_fail_on_auth_failure_message(self):
+        bm.run_bzrk = self._fake_run_bzrk({"search": (bm.AUTH_FAILURE_MESSAGE, True)})
+        result = bm._doctor_check_auth()
+        self.assertEqual(result["status"], "fail")
+        self.assertIn("bzrk login", result["remediation"])
+
+    def test_auth_failure_skips_dependent_checks_instead_of_relabeling_them(self):
+        # Codex review finding #4: table_reachable and recent_rows run their
+        # own query against the same profile, so a stale login makes all
+        # three independently "fail" -- three misleading remediations for
+        # one root cause. Once auth has failed, the dependent checks should
+        # report skip (unknown, not independently broken) rather than
+        # re-running the same doomed query.
+        bm.run_bzrk = self._fake_run_bzrk({"search": (bm.AUTH_FAILURE_MESSAGE, True)})
+        results = bm._run_doctor_checks()
+        by_name = {r["name"]: r for r in results}
+        self.assertEqual(by_name["auth"]["status"], "fail")
+        self.assertEqual(by_name["table_reachable"]["status"], "skip")
+        self.assertEqual(by_name["recent_rows"]["status"], "skip")
+
+    # ---- table reachable ----
+    def test_table_reachable_pass(self):
+        bm.run_bzrk = self._fake_run_bzrk({})
+        result = bm._doctor_check_table_reachable()
+        self.assertEqual(result["status"], "pass")
+
+    def test_table_reachable_fail(self):
+        bm.run_bzrk = self._fake_run_bzrk({"search": ("PARSE ERROR", True)})
+        result = bm._doctor_check_table_reachable()
+        self.assertEqual(result["status"], "fail")
+
+    # ---- recent rows ----
+    def test_recent_rows_reports_count_on_success(self):
+        # Real bzrk shape for `| count` with --json (confirmed live):
+        # {"Tables": [{"schema": {"columns": [{"name": "Count"}]}, "rows": [[42]]}]}
+        doc = {"Tables": [{"schema": {"columns": [{"name": "Count"}]}, "rows": [[42]]}]}
+        bm.run_bzrk = self._fake_run_bzrk({"--json": (json.dumps(doc), False)})
+        result = bm._doctor_check_recent_rows()
+        self.assertEqual(result["status"], "pass")
+        self.assertIn("42", result["detail"])
+
+    def test_recent_rows_fail_when_query_errors(self):
+        bm.run_bzrk = self._fake_run_bzrk({"--json": ("PARSE ERROR", True)})
+        result = bm._doctor_check_recent_rows()
+        self.assertEqual(result["status"], "fail")
+
+    # ---- primers dir ----
+    def test_primers_dir_skip_for_role_without_a_primer(self):
+        orig = bm.ACTIVE_ROLE
+        try:
+            bm.ACTIVE_ROLE = "all"
+            result = bm._doctor_check_primers_dir()
+            self.assertEqual(result["status"], "skip")
+        finally:
+            bm.ACTIVE_ROLE = orig
+
+    def test_primers_dir_pass_for_builtin_role_primer(self):
+        orig = bm.ACTIVE_ROLE
+        try:
+            bm.ACTIVE_ROLE = "sre"
+            result = bm._doctor_check_primers_dir()
+            self.assertEqual(result["status"], "pass")
+        finally:
+            bm.ACTIVE_ROLE = orig
+
+    def test_primers_dir_fail_when_explicit_dir_missing_file(self):
+        orig_role = bm.ACTIVE_ROLE
+        orig_env = os.environ.get("BERSERK_MCP_PRIMERS_DIR")
+        try:
+            bm.ACTIVE_ROLE = "sre"
+            os.environ["BERSERK_MCP_PRIMERS_DIR"] = self._tmp.name
+            result = bm._doctor_check_primers_dir()
+            self.assertEqual(result["status"], "fail")
+        finally:
+            bm.ACTIVE_ROLE = orig_role
+            if orig_env is None:
+                os.environ.pop("BERSERK_MCP_PRIMERS_DIR", None)
+            else:
+                os.environ["BERSERK_MCP_PRIMERS_DIR"] = orig_env
+
+    # ---- learned store writable ----
+    def test_learned_store_writable_pass(self):
+        orig = bm.LEARNED_PATH
+        try:
+            bm.LEARNED_PATH = Path(self._tmp.name) / "sub" / "learned.json"
+            result = bm._doctor_check_learned_store_writable()
+            self.assertEqual(result["status"], "pass")
+        finally:
+            bm.LEARNED_PATH = orig
+
+    def test_learned_store_writable_fail_when_target_is_a_directory(self):
+        # Codex review finding #5: checking only LEARNED_PATH.parent misses
+        # the case where LEARNED_PATH itself already exists as a directory
+        # -- the parent is writable, so the old check passed, but the
+        # actual atomic save then fails with IsADirectoryError.
+        orig = bm.LEARNED_PATH
+        target_as_dir = Path(self._tmp.name) / "learned.json"
+        target_as_dir.mkdir()
+        try:
+            bm.LEARNED_PATH = target_as_dir
+            result = bm._doctor_check_learned_store_writable()
+            self.assertEqual(result["status"], "fail")
+        finally:
+            bm.LEARNED_PATH = orig
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "POSIX permission bits aren't enforced the same way on Windows; "
+        "chmod doesn't reliably block directory-content creation there.",
+    )
+    def test_learned_store_writable_fail_when_parent_not_writable(self):
+        orig = bm.LEARNED_PATH
+        readonly_dir = Path(self._tmp.name) / "readonly"
+        readonly_dir.mkdir()
+        readonly_dir.chmod(0o500)
+        try:
+            bm.LEARNED_PATH = readonly_dir / "nested" / "learned.json"
+            result = bm._doctor_check_learned_store_writable()
+            self.assertEqual(result["status"], "fail")
+        finally:
+            readonly_dir.chmod(0o700)
+            bm.LEARNED_PATH = orig
+
+    # ---- http config ----
+    def test_http_config_skip_when_disabled(self):
+        orig = bm.HTTP_ENABLE
+        try:
+            bm.HTTP_ENABLE = False
+            result = bm._doctor_check_http_config()
+            self.assertEqual(result["status"], "skip")
+        finally:
+            bm.HTTP_ENABLE = orig
+
+    def test_http_config_pass_when_enabled_and_coherent(self):
+        orig = bm.HTTP_ENABLE
+        try:
+            bm.HTTP_ENABLE = True
+            result = bm._doctor_check_http_config()
+            self.assertEqual(result["status"], "pass")
+        finally:
+            bm.HTTP_ENABLE = orig
+
+    def test_http_config_fail_when_enabled_and_incoherent(self):
+        orig_enable = bm.HTTP_ENABLE
+        orig_bind = bm.HTTP_BIND
+        try:
+            bm.HTTP_ENABLE = True
+            bm.HTTP_BIND = "not-a-valid-bind"
+            result = bm._doctor_check_http_config()
+            self.assertEqual(result["status"], "fail")
+        finally:
+            bm.HTTP_ENABLE = orig_enable
+            bm.HTTP_BIND = orig_bind
+
+    # ---- wall-clock timeout wrapper ----
+    def test_with_wall_clock_timeout_returns_promptly_on_a_slow_call(self):
+        # Codex review finding #6: urllib's timeout= only bounds individual
+        # socket read/connect operations, not total wall-clock time -- a
+        # server trickling bytes just inside that window per read (measured:
+        # 8.02s wall clock against a 5s per-op timeout) can keep a request
+        # open far longer than the advertised deadline implies. This wrapper
+        # bounds how long the CALLER waits, even though the underlying call
+        # may keep running in the background (Python can't forcibly kill a
+        # thread -- that's an accepted, documented tradeoff, not a leak bug).
+        import time as _time
+
+        def slow_call():
+            _time.sleep(2)
+            return "done"
+
+        start = _time.monotonic()
+        result = bm._with_wall_clock_timeout(slow_call, timeout=0.2)
+        elapsed = _time.monotonic() - start
+        self.assertIsNone(result)
+        self.assertLess(elapsed, 1.0, "wrapper should not wait for the slow call to finish")
+
+    def test_with_wall_clock_timeout_returns_the_real_result_when_fast_enough(self):
+        result = bm._with_wall_clock_timeout(lambda: ("value", None), timeout=5)
+        self.assertEqual(result, ("value", None))
+
+    # ---- LLM/CanonLoom reachability ----
+    def test_llm_reachability_probes_implicit_default_when_unconfigured(self):
+        # Codex review finding #3: runtime parser_factory._hermes_url()
+        # always resolves to SOME URL, falling back to a hardcoded
+        # localhost default -- generation features attempt that default
+        # even with nothing explicitly configured. The old "skip when no
+        # explicit config" behavior meant Doctor reported exit_code=0 while
+        # generation would fail outright hitting an unreachable default.
+        # It must never silently skip -- always attempt the real effective
+        # URL, staying optional (required=False) so an operator who never
+        # uses generation features still isn't pushed to "broken".
+        #
+        # Isolate from whatever is actually persisted on the machine
+        # running the tests (parser_factory._llm_config() reads a real
+        # per-user config file -- not something a test should depend on).
+        orig_env = os.environ.pop("BERSERK_LLM_HERMES_URL", None)
+        orig_llm_config = bm.parser_factory._llm_config
+        bm.parser_factory._llm_config = lambda: {}
+        try:
+            result = bm._doctor_check_llm_reachability()
+            self.assertNotEqual(result["status"], "skip")
+            self.assertFalse(result.get("required", True))
+        finally:
+            bm.parser_factory._llm_config = orig_llm_config
+            if orig_env is not None:
+                os.environ["BERSERK_LLM_HERMES_URL"] = orig_env
+
+    def test_canonloom_reachability_skip_when_unconfigured(self):
+        orig = os.environ.pop("CANONLOOM_SERVER_URL", None)
+        try:
+            result = bm._doctor_check_canonloom_reachability()
+            self.assertEqual(result["status"], "skip")
+        finally:
+            if orig is not None:
+                os.environ["CANONLOOM_SERVER_URL"] = orig
+
+    # ---- aggregation and exit code ----
+    def test_run_doctor_checks_returns_all_checks_in_order(self):
+        bm.run_bzrk = self._fake_run_bzrk({})
+        results = bm._run_doctor_checks()
+        names = [r["name"] for r in results]
+        self.assertEqual(len(names), len(set(names)), "duplicate check names")
+        self.assertIn("bzrk_resolvable", names)
+        self.assertIn("llm_hermes_reachability", names)
+        self.assertIn("canonloom_reachability", names)
+
+    def test_one_check_raising_does_not_abort_the_whole_report(self):
+        # Codex review finding #2: a malformed bzrk response can make
+        # agent_analytics._json_records raise AttributeError deep inside
+        # _doctor_check_recent_rows. Without per-check isolation that
+        # crashes _run_doctor_checks entirely -- the whole report is lost
+        # over one bad check, defeating the point of a preflight tool that
+        # should never itself crash.
+        bm.run_bzrk = self._fake_run_bzrk({
+            "--json": ('{"Tables":[{"schema":"changed-shape","rows":[]}]}', False)
+        })
+        results = bm._run_doctor_checks()
+        names = [r["name"] for r in results]
+        self.assertIn("bzrk_resolvable", names)
+        self.assertIn("canonloom_reachability", names)
+        recent_rows = next(r for r in results if r["name"] == "recent_rows")
+        self.assertEqual(recent_rows["status"], "fail")
+
+    def test_bzrk_version_fails_on_output_that_is_not_a_version_string(self):
+        # Codex review finding #2: any exit-zero output (including
+        # run_bzrk's synthetic "(no rows)") was accepted as a valid version,
+        # letting an unrelated executable (e.g. BZRK_BIN=/usr/bin/true)
+        # satisfy this required check.
+        bm.run_bzrk = self._fake_run_bzrk({"--version": ("(no rows)", False)})
+        result = bm._doctor_check_bzrk_version()
+        self.assertEqual(result["status"], "fail")
+
+    def test_bzrk_version_fails_on_empty_output(self):
+        bm.run_bzrk = self._fake_run_bzrk({"--version": ("", False)})
+        result = bm._doctor_check_bzrk_version()
+        self.assertEqual(result["status"], "fail")
+
+    def test_recent_rows_fails_when_count_field_is_missing(self):
+        # Previously reported "pass" with "row count unavailable" -- for a
+        # *required* check that's a silent pass on missing evidence, exactly
+        # the kind of unrelated-executable-satisfies-everything gap Codex
+        # flagged for bzrk_version.
+        doc = {"Tables": [{"schema": {"columns": [{"name": "NotCount"}]}, "rows": [[1]]}]}
+        bm.run_bzrk = self._fake_run_bzrk({"--json": (json.dumps(doc), False)})
+        result = bm._doctor_check_recent_rows()
+        self.assertEqual(result["status"], "fail")
+
+    def test_exit_code_zero_when_all_pass_or_skip(self):
+        results = [
+            {"name": "a", "status": "pass", "required": True},
+            {"name": "b", "status": "skip", "required": False},
+        ]
+        self.assertEqual(bm._doctor_exit_code(results), 0)
+
+    def test_exit_code_two_when_a_required_check_fails(self):
+        results = [
+            {"name": "a", "status": "fail", "required": True, "remediation": "x"},
+            {"name": "b", "status": "pass", "required": False},
+        ]
+        self.assertEqual(bm._doctor_exit_code(results), 2)
+
+    def test_exit_code_one_when_only_an_optional_check_fails(self):
+        results = [
+            {"name": "a", "status": "pass", "required": True},
+            {"name": "b", "status": "fail", "required": False, "remediation": "x"},
+        ]
+        self.assertEqual(bm._doctor_exit_code(results), 1)
+
+    # ---- self_check tool ----
+    def test_self_check_tool_returns_json_report(self):
+        bm.run_bzrk = self._fake_run_bzrk({})
+        text, err = bm.handle_call("self_check", {})
+        self.assertFalse(err)
+        report = json.loads(text)
+        self.assertIn("checks", report)
+        self.assertIn("exit_code", report)
+
+    # ---- run_doctor (CLI entry point) ----
+    def test_run_doctor_returns_exit_code_and_prints_table(self):
+        bm.run_bzrk = self._fake_run_bzrk({})
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = bm.run_doctor()
+        self.assertIsInstance(code, int)
+        self.assertIn("bzrk_resolvable", buf.getvalue())
+
+
+class EnvExampleDriftTest(unittest.TestCase):
+    """Every env var this codebase actually reads must be documented in
+    .env.example, or an operator has no way to discover it short of reading
+    ~4,000 lines of source. Catches the gap silently reopening as new env
+    reads are added without a matching doc line.
+
+    Known limitation (Codex review, not fixed): parser_factory.py builds one
+    env var name dynamically -- f"BERSERK_LLM_{provider.upper()}_MODEL" --
+    from the active BERSERK_LLM_LADDER provider. A static regex can never
+    prove what that resolves to. In practice it's covered anyway: the
+    ladder's three providers (hermes/openai/anthropic) each already have
+    their MODEL var documented as a literal elsewhere in this file. An
+    entirely new provider name would need its own literal os.environ.get
+    call to work at all, which this guard would then catch normally."""
+
+    _ENV_READ_RE = re.compile(
+        r"os\.environ(?:\.get)?\s*[\(\[]\s*[\"']([A-Z_][A-Z0-9_]*)[\"']"
+        r"|os\.getenv\s*\(\s*[\"']([A-Z_][A-Z0-9_]*)[\"']"
+        r"|_(?:nonnegative_int_env|nonnegative_float_env|choice_env|"
+        r"optional_absolute_env_path)\s*"
+        r"\(\s*[\"']([A-Z_][A-Z0-9_]*)[\"']",
+        re.DOTALL,
+    )
+    _REPO_ROOT = Path(__file__).resolve().parent.parent
+
+    def _vars_read_in_source(self):
+        # Scan every top-level production module rather than a hand-kept
+        # file list, so a newly added module can't silently bypass this
+        # guard the way _store.py did (never in the original list, and its
+        # own env reads went undetected until this fix).
+        found = set()
+        for path in sorted(self._REPO_ROOT.glob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            for m in self._ENV_READ_RE.finditer(text):
+                found.add(next(g for g in m.groups() if g))
+        return found
+
+    def _vars_documented_in_env_example(self):
+        path = self._REPO_ROOT / ".env.example"
+        text = path.read_text(encoding="utf-8")
+        return set(re.findall(r"^#?\s*([A-Z_][A-Z0-9_]*)=", text, re.MULTILINE))
+
+    def test_every_source_env_read_is_documented(self):
+        missing = self._vars_read_in_source() - self._vars_documented_in_env_example()
+        self.assertEqual(
+            missing, set(),
+            f".env.example is missing: {sorted(missing)}",
+        )
+
+    def test_no_stale_entries_for_vars_no_longer_read(self):
+        stale = self._vars_documented_in_env_example() - self._vars_read_in_source()
+        self.assertEqual(
+            stale, set(),
+            f".env.example documents vars no longer read in source: {sorted(stale)}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
