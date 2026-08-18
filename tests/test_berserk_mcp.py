@@ -4016,8 +4016,30 @@ class DoctorPreflightTest(unittest.TestCase):
         self._orig_run_bzrk = bm.run_bzrk
         self._tmp = tempfile.TemporaryDirectory()
 
+        # Isolate every check the aggregator (_run_doctor_checks/run_doctor/
+        # self_check) can reach from whatever the real machine happens to
+        # have: bzrk on PATH varies (present on a dev machine, absent on a
+        # clean CI runner -- this exact gap failed CI while passing
+        # locally), and a persisted Hermes/CanonLoom config is real
+        # operator state a test must never depend on or disturb. Individual
+        # checks that need the un-isolated real behavior (e.g.
+        # test_bzrk_resolvable_fail_when_not_found) pass which=/etc.
+        # directly to the single-check function, which overrides this.
+        self._orig_which = bm.shutil.which
+        bm.shutil.which = lambda name: "/usr/bin/bzrk"
+        self._orig_llm_config = bm.parser_factory._llm_config
+        bm.parser_factory._llm_config = lambda: {}
+        self._orig_hermes_env = os.environ.pop("BERSERK_LLM_HERMES_URL", None)
+        self._orig_canonloom_env = os.environ.pop("CANONLOOM_SERVER_URL", None)
+
     def tearDown(self):
         bm.run_bzrk = self._orig_run_bzrk
+        bm.shutil.which = self._orig_which
+        bm.parser_factory._llm_config = self._orig_llm_config
+        if self._orig_hermes_env is not None:
+            os.environ["BERSERK_LLM_HERMES_URL"] = self._orig_hermes_env
+        if self._orig_canonloom_env is not None:
+            os.environ["CANONLOOM_SERVER_URL"] = self._orig_canonloom_env
         self._tmp.cleanup()
 
     def _fake_run_bzrk(self, response_map):
