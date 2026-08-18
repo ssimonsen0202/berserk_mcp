@@ -4056,11 +4056,17 @@ class DoctorPreflightTest(unittest.TestCase):
 
     # ---- bzrk resolvable ----
     def test_bzrk_resolvable_pass_when_found_on_path(self):
-        result = bm._doctor_check_bzrk_resolvable(
-            "bzrk", which=lambda name: "/usr/local/bin/bzrk"
-        )
+        # A hardcoded POSIX path like "/usr/local/bin/bzrk" isn't absolute on
+        # Windows (no drive letter), so Path.resolve() rewrites it relative
+        # to the current drive instead of preserving it -- use a path that's
+        # genuinely absolute on whichever platform the test runs on. Pre-
+        # resolve it (e.g. macOS /tmp -> /private/tmp) so the function's own
+        # .resolve() call is a no-op and can't change the string out from
+        # under the assertion.
+        fake_path = str((Path(self._tmp.name) / "bzrk").resolve(strict=False))
+        result = bm._doctor_check_bzrk_resolvable("bzrk", which=lambda name: fake_path)
         self.assertEqual(result["status"], "pass")
-        self.assertIn("/usr/local/bin/bzrk", result["detail"])
+        self.assertIn(fake_path, result["detail"])
 
     def test_bzrk_resolvable_fail_when_not_found(self):
         result = bm._doctor_check_bzrk_resolvable("bzrk", which=lambda name: None)
@@ -4162,6 +4168,11 @@ class DoctorPreflightTest(unittest.TestCase):
         finally:
             bm.LEARNED_PATH = orig
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "POSIX permission bits aren't enforced the same way on Windows; "
+        "chmod doesn't reliably block directory-content creation there.",
+    )
     def test_learned_store_writable_fail_when_parent_not_writable(self):
         orig = bm.LEARNED_PATH
         readonly_dir = Path(self._tmp.name) / "readonly"
