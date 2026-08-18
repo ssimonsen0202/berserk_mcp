@@ -3712,6 +3712,33 @@ def _serve_http():
 _DOCTOR_REACHABILITY_TIMEOUT = 5
 
 
+def _with_wall_clock_timeout(fn, timeout):
+    """Run fn() with a genuine wall-clock deadline. urllib's own timeout=
+    only bounds individual socket connect/read operations, not total time
+    -- a server that sends the next byte just inside that window on every
+    read can keep a request open far longer than the advertised timeout
+    implies (measured: 8.02s wall clock against a 5s per-operation
+    timeout). Returns None if fn() hasn't finished within `timeout`
+    seconds. A plain daemon thread, not concurrent.futures.ThreadPoolExecutor:
+    the executor registers an atexit hook that joins pending work, which
+    would make the whole process hang waiting for exactly the slow call
+    this exists to stop waiting on. The tradeoff this accepts: Python
+    cannot forcibly kill a thread, so a truly stuck call keeps running in
+    the background after this returns -- harmless for a one-shot preflight
+    check, since the daemon thread cannot block process exit either."""
+    box = {}
+
+    def runner():
+        box["result"] = fn()
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        return None
+    return box.get("result")
+
+
 def _doctor_result(name, status, detail, remediation=None, required=True):
     result = {"name": name, "status": status, "detail": detail, "required": required}
     if remediation:
@@ -3743,7 +3770,17 @@ def _doctor_check_bzrk_version():
             "bzrk_version", "fail", str(out)[:200],
             remediation="confirm `bzrk --version` runs from this environment",
         )
-    return _doctor_result("bzrk_version", "pass", str(out).strip())
+    # An exit-zero process that isn't actually bzrk (e.g. BZRK_BIN pointed
+    # at /usr/bin/true, or run_bzrk's own synthetic "(no rows)") must not
+    # satisfy this check just because nothing errored.
+    text = str(out).strip()
+    if not text.lower().startswith("bzrk"):
+        return _doctor_result(
+            "bzrk_version", "fail",
+            f"output does not look like a bzrk version string: {text[:200]!r}",
+            remediation="confirm BZRK_BIN actually points at the Berserk CLI",
+        )
+    return _doctor_result("bzrk_version", "pass", text)
 
 
 def _doctor_check_auth():
@@ -3787,14 +3824,22 @@ def _doctor_check_recent_rows():
     count = None
     try:
         records = agent_analytics._json_records(json.loads(out))
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError, AttributeError, json.JSONDecodeError):
         records = None
     if records:
         row = records[0]
         if isinstance(row, dict):
             count = row.get("Count", row.get("count"))
+    # This is a required check: a query that "succeeds" without yielding a
+    # real count is not evidence the table is reachable and ingesting --
+    # same failure mode as bzrk_version accepting any exit-zero output.
     if count is None:
-        return _doctor_result("recent_rows", "pass", "query succeeded; row count unavailable from response")
+        return _doctor_result(
+            "recent_rows", "fail",
+            f"query succeeded but no usable Count in the response: {str(out)[:150]!r}",
+            remediation=f"confirm BERSERK_TABLE={TABLE!r} and the bzrk build return the "
+                         "expected --json shape for `| count`",
+        )
     return _doctor_result("recent_rows", "pass", f"{count} row(s) in the last 1h")
 
 
@@ -3837,6 +3882,13 @@ def _doctor_check_primers_dir():
 
 
 def _doctor_check_learned_store_writable():
+    if LEARNED_PATH.is_dir():
+        return _doctor_result(
+            "learned_store_writable", "fail",
+            f"{LEARNED_PATH} already exists as a directory",
+            remediation="BERSERK_MCP_LEARNED_PATH must name a file, not a "
+                         "directory -- the atomic save would fail with IsADirectoryError",
+        )
     parent = LEARNED_PATH.parent
     try:
         parent.mkdir(parents=True, exist_ok=True)
@@ -3885,16 +3937,22 @@ def _doctor_check_http_config():
 
 
 def _doctor_check_llm_reachability():
+    # parser_factory._hermes_url() always resolves to SOME URL -- it falls
+    # back to a hardcoded localhost default when nothing is explicitly
+    # configured, and generation features attempt that default outright.
+    # So "unconfigured" never means "nothing will be attempted"; skipping
+    # in that case would report exit_code=0 while generation would still
+    # fail hitting an unreachable default. Always probe the real effective
+    # URL, staying optional (required=False) so an operator who doesn't use
+    # generation features still isn't pushed to "broken" by it.
     configured = bool(os.environ.get("BERSERK_LLM_HERMES_URL")) or bool(
         parser_factory._llm_config().get("hermes_url")
     )
-    if not configured:
-        return _doctor_result(
-            "llm_hermes_reachability", "skip",
-            "BERSERK_LLM_HERMES_URL not set; generation features are optional",
-            required=False,
-        )
     url = parser_factory._hermes_url()
+    if not configured:
+        url_note = f" (using the unconfigured default {url!r})"
+    else:
+        url_note = ""
     models_url = url.rsplit("/", 3)[0] + "/api/models" if "/api/" in url else None
     if not models_url:
         return _doctor_result(
@@ -3904,14 +3962,30 @@ def _doctor_check_llm_reachability():
         )
     key = os.environ.get("HERMES_API_KEY", "")
     headers = {"Authorization": f"Bearer {key}"} if key else {}
-    _out, err = _http.http_get_json(models_url, headers, timeout=_DOCTOR_REACHABILITY_TIMEOUT)
-    if err:
+    outcome = _with_wall_clock_timeout(
+        lambda: _http.http_get_json(models_url, headers, timeout=_DOCTOR_REACHABILITY_TIMEOUT),
+        _DOCTOR_REACHABILITY_TIMEOUT,
+    )
+    if outcome is None:
         return _doctor_result(
-            "llm_hermes_reachability", "fail", f"unreachable at {models_url}: {err}",
-            remediation="confirm Hermes is running and BERSERK_LLM_HERMES_URL is correct",
+            "llm_hermes_reachability", "fail",
+            f"timed out after {_DOCTOR_REACHABILITY_TIMEOUT}s probing {models_url}{url_note}",
+            remediation="Hermes is not responding in time; confirm it's running and reachable",
             required=False,
         )
-    return _doctor_result("llm_hermes_reachability", "pass", f"reachable at {models_url}", required=False)
+    _out, err = outcome
+    if err:
+        return _doctor_result(
+            "llm_hermes_reachability", "fail", f"unreachable at {models_url}{url_note}: {err}",
+            remediation="confirm Hermes is running and BERSERK_LLM_HERMES_URL is correct"
+                         if configured else
+                         "set BERSERK_LLM_HERMES_URL (or run `berserk-mcp --set-hermes-url`) "
+                         "if you use generation features, or ignore this if you don't",
+            required=False,
+        )
+    return _doctor_result(
+        "llm_hermes_reachability", "pass", f"reachable at {models_url}{url_note}", required=False,
+    )
 
 
 def _doctor_check_canonloom_reachability():
@@ -3926,9 +4000,20 @@ def _doctor_check_canonloom_reachability():
     api_key = os.environ.get("CANONLOOM_API_KEY")
     if api_key:
         headers["X-API-Key"] = api_key
-    _out, err = _http.http_get_json(
-        server_url + "/artifacts", headers, timeout=_DOCTOR_REACHABILITY_TIMEOUT
+    outcome = _with_wall_clock_timeout(
+        lambda: _http.http_get_json(
+            server_url + "/artifacts", headers, timeout=_DOCTOR_REACHABILITY_TIMEOUT
+        ),
+        _DOCTOR_REACHABILITY_TIMEOUT,
     )
+    if outcome is None:
+        return _doctor_result(
+            "canonloom_reachability", "fail",
+            f"timed out after {_DOCTOR_REACHABILITY_TIMEOUT}s probing {server_url}",
+            remediation="CanonLoom is not responding in time; confirm it's running and reachable",
+            required=False,
+        )
+    _out, err = outcome
     if err:
         return _doctor_result(
             "canonloom_reachability", "fail", f"unreachable at {server_url}: {err}",
@@ -3938,22 +4023,55 @@ def _doctor_check_canonloom_reachability():
     return _doctor_result("canonloom_reachability", "pass", f"reachable at {server_url}", required=False)
 
 
+_DOCTOR_CHECK_FUNCS = (
+    ("bzrk_resolvable", _doctor_check_bzrk_resolvable),
+    ("bzrk_version", _doctor_check_bzrk_version),
+    ("auth", _doctor_check_auth),
+    ("table_reachable", _doctor_check_table_reachable),
+    ("recent_rows", _doctor_check_recent_rows),
+    ("primers_dir", _doctor_check_primers_dir),
+    ("learned_store_writable", _doctor_check_learned_store_writable),
+    ("http_config", _doctor_check_http_config),
+    ("llm_hermes_reachability", _doctor_check_llm_reachability),
+    ("canonloom_reachability", _doctor_check_canonloom_reachability),
+)
+
+# table_reachable and recent_rows query the same profile as auth. If auth
+# has already failed, re-running them would just fail the same way for the
+# same reason -- reporting three separate "fail" rows for one root cause
+# is misleading, not more informative. Skip them and point at auth instead.
+_DOCTOR_AUTH_DEPENDENT_CHECKS = frozenset({"table_reachable", "recent_rows"})
+
+
 def _run_doctor_checks():
-    """Ordered preflight checks. Each runs independently -- one failing
-    check does not skip the rest, so a single invocation gives the fullest
-    possible picture in one pass."""
-    return [
-        _doctor_check_bzrk_resolvable(),
-        _doctor_check_bzrk_version(),
-        _doctor_check_auth(),
-        _doctor_check_table_reachable(),
-        _doctor_check_recent_rows(),
-        _doctor_check_primers_dir(),
-        _doctor_check_learned_store_writable(),
-        _doctor_check_http_config(),
-        _doctor_check_llm_reachability(),
-        _doctor_check_canonloom_reachability(),
-    ]
+    """Ordered preflight checks. Each runs independently and is isolated
+    from the others: one check failing does not skip the rest (except the
+    deliberate auth-dependency short-circuit below), and one check raising
+    an unexpected exception produces a failed result for just that check
+    rather than losing the whole report -- a preflight tool must never
+    itself crash."""
+    results = []
+    auth_failed = False
+    for name, fn in _DOCTOR_CHECK_FUNCS:
+        if name in _DOCTOR_AUTH_DEPENDENT_CHECKS and auth_failed:
+            results.append(_doctor_result(
+                name, "skip",
+                "skipped: auth already failed, so this check's own result "
+                "would be uninformative -- see the auth check above",
+            ))
+            continue
+        try:
+            result = fn()
+        except Exception as exc:
+            result = _doctor_result(
+                name, "fail", f"check raised {type(exc).__name__}: {exc}"[:200],
+                remediation="this looks like a bug in berserk-mcp's own "
+                             "doctor check, not your configuration; please report it",
+            )
+        results.append(result)
+        if name == "auth":
+            auth_failed = result["status"] == "fail"
+    return results
 
 
 def _doctor_exit_code(results):
@@ -3980,7 +4098,20 @@ def _format_doctor_table(results):
 def run_doctor(json_output=False):
     """Preflight readiness check. Prints a pass/fail/skip table (or JSON
     with --json) and returns 0/1/2 -- usable as a fleet readiness probe or
-    a container healthcheck, not just interactive output."""
+    a container healthcheck, not just interactive output.
+
+    Cannot help with every misconfiguration: an invalid BZRK_BIN (line
+    ~132) or a BERSERK_MCP_PRIMERS_DIR pointed at a missing primer file
+    (line ~430) both fail the whole process at import time, before main()
+    ever parses --doctor. That's deliberate, predates this function, and
+    isn't something a preflight check run from inside the same process can
+    route around -- weakening either to let --doctor limp past would also
+    weaken the fail-fast guarantee for every other code path that isn't
+    --doctor. Those two cases exit with a direct, specific error message on
+    stderr instead; --doctor covers everything that doesn't already fail
+    that way (see _doctor_check_bzrk_resolvable and _doctor_check_primers_dir
+    for the cases that don't hard-exit -- bzrk simply missing from PATH, or
+    a missing built-in primer with no PRIMERS_DIR override)."""
     results = _run_doctor_checks()
     code = _doctor_exit_code(results)
     if json_output:
