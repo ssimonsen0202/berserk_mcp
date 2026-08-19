@@ -1473,9 +1473,27 @@ _DESCRIPTION_CAP = 240
 _DESCRIPTION_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _DESCRIPTION_STRUCTURAL_TOKENS = ("inputSchema", '"tools"', "\n\n---")
 
+# Bounds save_query's input, not the projected 240-char display cap above.
+# LEARNED_STORE_CAP (500) bounds entry count only, not bytes -- an unbounded
+# description compounds with it into a store tools/list must fully parse on
+# every call, a mandatory path for every client.
+SAVE_QUERY_DESCRIPTION_MAX_CHARS = 2000
+
 
 def _saved_query_description(item):
     text = str(item.get("description", ""))
+    # tools/call output (e.g. list_saved) is redacted via
+    # secret_scan.apply_output_filter at the dispatch() boundary; tools/list
+    # has no equivalent boundary, so a saved description must be redacted
+    # here or a credential in it goes to every client on every listing --
+    # not just the rare caller of list_saved.
+    text = secret_scan.apply_output_filter(
+        text, mode=REDACT_MODE, include_entropy=REDACT_ENTROPY, pii_types=REDACT_PII_TYPES,
+    )
+    # Normalize line endings before anything that pattern-matches on them --
+    # a CRLF-styled "\r\n\r\n---\r\n" must be caught by the same structural-
+    # token check as its LF form, not survive as an unrecognized variant.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = _DESCRIPTION_CONTROL_CHARS_RE.sub("", text)
     text = text[:_DESCRIPTION_CAP]
     for token in _DESCRIPTION_STRUCTURAL_TOKENS:
@@ -1585,19 +1603,32 @@ def persist_learned_query(entry, action_source):
         "action": "generated" if action_source == "generated" else ("updated" if is_amendment else "created"),
         "role": ACTIVE_ROLE,
     }
+    # save_learned(items) above already succeeded -- the query is persisted
+    # from here on regardless of what follows. The amendments log is a
+    # best-effort audit trail (already evicted on a rolling basis below);
+    # its failure must not undo the save, raise past the caller, or -- as a
+    # prior version did -- skip the list_changed notification for a change
+    # that genuinely happened. Wrapped the same way the notification itself
+    # already was.
     amendments_path = Path(LEARNED_PATH).parent / "amendments_log.json"
-    with _FileLock(amendments_path):
-        amendments = load_json_list(amendments_path)
-        amendments.append(log_entry)
-        amendments = amendments[-1000:]  # cap to prevent unbounded growth
-        save_json_list(amendments_path, amendments)
+    try:
+        with _FileLock(amendments_path):
+            amendments = load_json_list(amendments_path)
+            amendments.append(log_entry)
+            amendments = amendments[-1000:]  # cap to prevent unbounded growth
+            save_json_list(amendments_path, amendments)
+    except Exception as exc:
+        log(f"failed to write amendments log: {type(exc).__name__}: {exc}")
     # This is the single write path for both save_query and the generated
     # writes from generate_parser/run_discovery_worker, and is only reached
     # after a persist actually succeeds -- a rejected save (validation
     # failure, execution failure, refused overwrite) returns before this
-    # point, so it never notifies. Best-effort: a notification failure must
-    # never undo or fail a save that already landed on disk.
-    if _TRANSPORT == "stdio":
+    # point, so it never notifies. _list_changed_supported() (not a bare
+    # transport check) so this can never fire when the capability was
+    # advertised as unsupported, e.g. SAVED_TOOL_PROJECTION_CAP=0. Best-
+    # effort: a notification failure must never undo or fail a save that
+    # already landed on disk.
+    if _list_changed_supported():
         try:
             send({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
         except Exception as exc:
@@ -2018,6 +2049,12 @@ TITLES = {
 
 def annotations_for(name):
     """Read-only by default; only the two store-management tools differ."""
+    if isinstance(name, str) and name.startswith("saved__"):
+        # A projected saved query is a deterministic replay of a verified
+        # local query, same as list_saved/run_saved -- not an open-world
+        # call, which the bare _READ default (openWorldHint=True) would
+        # otherwise imply.
+        return _READ_LOCAL
     return _ANNOTATIONS.get(name, _READ)
 
 
@@ -2152,6 +2189,13 @@ def _handle_call_uncached(name, arguments):
         since = arguments.get("since") or "1h ago"
         if not kql or not desc:
             return "save_query needs name, description, and kql.", True
+        if len(desc) > SAVE_QUERY_DESCRIPTION_MAX_CHARS:
+            return (
+                f"description is too long (maximum {SAVE_QUERY_DESCRIPTION_MAX_CHARS} "
+                "characters). LEARNED_STORE_CAP (500) bounds entry count, not size -- "
+                "tools/list parses the whole store on every call, so an unbounded "
+                "description compounds into a mandatory-path cost for every client."
+            ), True
         validation_report = None
         if KQL_VALIDATION_MODE != "off":
             validation_report = _validate_user_kql(kql, since)

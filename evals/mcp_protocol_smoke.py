@@ -124,11 +124,19 @@ def run_stdio_smoke(command):
     # Pre-seed one saved query so the saved__<name> projection (issue #5)
     # has something to project, without needing a real save_query call
     # (which would run a live, authenticated verification query -- this
-    # script is deliberately offline).
-    learned_path = Path(tempfile.gettempdir()) / "berserk-mcp-protocol-smoke-learned.json"
-    learned_path.write_text(json.dumps([
-        {"name": "smoke_probe", "description": "protocol smoke probe", "kql": "default | take 1"}
-    ]))
+    # script is deliberately offline). A private, unpredictable path --
+    # not a fixed name in the shared temp dir, which another local user or
+    # process could pre-create as a symlink to a victim-writable file and
+    # have write_text() follow it.
+    learned_fd, learned_name = tempfile.mkstemp(
+        prefix="berserk-mcp-protocol-smoke-learned-", suffix=".json"
+    )
+    learned_path = Path(learned_name)
+    with os.fdopen(learned_fd, "w") as f:
+        json.dump(
+            [{"name": "smoke_probe", "description": "protocol smoke probe", "kql": "default | take 1"}],
+            f,
+        )
     env["BERSERK_MCP_LEARNED_PATH"] = str(learned_path)
     client = StdioClient(command, env)
     report = {"transport": "stdio", "checks": [], "failed": False}
@@ -211,7 +219,14 @@ def run_stdio_smoke(command):
         check(
             report,
             "saved query directly callable",
-            "unknown tool" not in saved_text.lower(),
+            # A missing "result" (top-level JSON-RPC error, e.g. an
+            # uncaught exception in the saved__ dispatch branch) must fail
+            # this check -- the substring test alone treats an empty/absent
+            # result the same as a real successful reply, since "unknown
+            # tool" is trivially absent from "".
+            "error" not in saved_call
+            and "result" in saved_call
+            and "unknown tool" not in saved_text.lower(),
             json.dumps(saved_call)[:300],
         )
 
@@ -288,6 +303,7 @@ def run_stdio_smoke(command):
             )
     finally:
         client.close()
+        learned_path.unlink(missing_ok=True)
     return report
 
 

@@ -4595,6 +4595,107 @@ class SavedQueryProjectionTest(unittest.TestCase):
         self.assertNotIn("saved__disk_pressure_by_host", bm._STRUCTURED_OUTPUT_TOOLS)
         self.assertNotIn("saved__disk_pressure_by_host", bm._TASK_ELIGIBLE_TOOLS)
 
+    # ---- Codex review round 2 findings ----
+
+    def test_projected_description_is_redacted_for_secrets(self):
+        # P1: tools/call output (e.g. list_saved) is redacted via
+        # secret_scan.apply_output_filter at the dispatch() boundary, but
+        # tools/list bypassed it entirely -- a saved description containing
+        # a credential was returned verbatim to every client on every
+        # tools/list call, not just the rare caller of list_saved.
+        self._seed("leaky", description="uses key AKIAABCDEFGHIJKLMNOP for auth")
+        resp = bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        tool = next(t for t in resp["result"]["tools"] if t["name"] == "saved__leaky")
+        self.assertNotIn("AKIAABCDEFGHIJKLMNOP", tool["description"])
+
+    def test_description_neutralizes_crlf_structural_separator(self):
+        # P2: the control-char strip excluded \r, and the structural-token
+        # check only matched the literal LF-based "\n\n---", so a
+        # CRLF-styled "\r\n\r\n---\r\n" survived untouched -- a client that
+        # normalizes line endings before rendering would still see the
+        # forbidden divider.
+        self._seed("crlf_query", description="safe\r\n\r\n---\r\ntext")
+        desc = self._projected_description("saved__crlf_query")
+        self.assertNotIn("---", desc)
+        self.assertNotIn("\r", desc)
+
+    def test_save_query_rejects_description_over_length_limit(self):
+        # P2: an unbounded description compounds with LEARNED_STORE_CAP
+        # (500, a count not a byte budget) into a store tools/list -- a
+        # mandatory path for every client -- must fully parse on every call.
+        text, err = bm.handle_call("save_query", {
+            "name": "too_long", "description": "x" * 3000,
+            "kql": f"{bm.TABLE} | take 1",
+        })
+        self.assertTrue(err)
+        self.assertIn("description", text.lower())
+
+    def test_notification_not_sent_when_projection_disabled_even_on_stdio(self):
+        # P2: listChanged was correctly advertised as False when the
+        # projection is disabled (cap=0), but the notification itself was
+        # gated only on transport, so it fired anyway -- announcing a
+        # capability you don't support, then exercising it.
+        orig_transport = bm._TRANSPORT
+        orig_cap = bm.SAVED_TOOL_PROJECTION_CAP
+        sent = []
+        orig_send = bm.send
+        bm.send = lambda msg: sent.append(msg)
+        try:
+            bm._TRANSPORT = "stdio"
+            bm.SAVED_TOOL_PROJECTION_CAP = 0
+            bm.handle_call("save_query", {
+                "name": "notif_cap0", "description": "d",
+                "kql": f"{bm.TABLE} | take 1",
+            })
+            self.assertEqual(sent, [])
+        finally:
+            bm._TRANSPORT = orig_transport
+            bm.SAVED_TOOL_PROJECTION_CAP = orig_cap
+            bm.send = orig_send
+
+    def test_notification_still_sent_when_amendments_log_write_fails(self):
+        # P2: the query was persisted (save_learned succeeded) before the
+        # amendments-log write, but the notification was hooked after it --
+        # an amendments-log failure raised past the notification entirely,
+        # leaving clients with a stale tools/list despite the real change.
+        orig_transport = bm._TRANSPORT
+        sent = []
+        orig_send = bm.send
+        bm.send = lambda msg: sent.append(msg)
+
+        orig_save_json_list = bm.save_json_list
+        amendments_path = Path(bm.LEARNED_PATH).parent / "amendments_log.json"
+
+        def failing_save_json_list(path, items):
+            if Path(path) == amendments_path:
+                raise OSError("disk full")
+            return orig_save_json_list(path, items)
+
+        bm.save_json_list = failing_save_json_list
+        try:
+            bm._TRANSPORT = "stdio"
+            bm.persist_learned_query(
+                {"name": "notif_despite_log_fail", "description": "d", "kql": "default | take 1"},
+                action_source="manual",
+            )
+            self.assertTrue(any(
+                m.get("method") == "notifications/tools/list_changed" for m in sent
+            ))
+            # And the query really was persisted despite the amendments-log failure.
+            names = [it["name"] for it in bm.load_learned()]
+            self.assertIn("notif_despite_log_fail", names)
+        finally:
+            bm._TRANSPORT = orig_transport
+            bm.save_json_list = orig_save_json_list
+            bm.send = orig_send
+
+    def test_saved_tool_annotation_is_read_local(self):
+        # The spec calls for the read-only *local* annotation set
+        # (openWorldHint=False) on saved__* tools, matching list_saved --
+        # the default (_READ, openWorldHint=True) was never overridden.
+        annotation = bm.annotations_for("saved__anything")
+        self.assertEqual(annotation, bm._READ_LOCAL)
+
     # ---- FR-6: instructions mention saved__* tools exist ----
     def test_base_instructions_mention_saved_query_tools(self):
         self.assertIn("saved__", bm._BASE_INSTRUCTIONS)
