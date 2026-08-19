@@ -121,6 +121,15 @@ def run_stdio_smoke(command):
         "BERSERK_MCP_REPORT_DIR",
         str(Path(tempfile.gettempdir()) / "berserk-mcp-protocol-smoke-reports"),
     )
+    # Pre-seed one saved query so the saved__<name> projection (issue #5)
+    # has something to project, without needing a real save_query call
+    # (which would run a live, authenticated verification query -- this
+    # script is deliberately offline).
+    learned_path = Path(tempfile.gettempdir()) / "berserk-mcp-protocol-smoke-learned.json"
+    learned_path.write_text(json.dumps([
+        {"name": "smoke_probe", "description": "protocol smoke probe", "kql": "default | take 1"}
+    ]))
+    env["BERSERK_MCP_LEARNED_PATH"] = str(learned_path)
     client = StdioClient(command, env)
     report = {"transport": "stdio", "checks": [], "failed": False}
     meta = modern_meta()
@@ -179,6 +188,31 @@ def run_stdio_smoke(command):
             "modern outputSchema for reporting tools",
             "outputSchema" in tools.get("claude_management_report", {}),
             "claude_management_report metadata",
+        )
+        check(
+            report,
+            "saved query projected into tools/list",
+            "saved__smoke_probe" in tools,
+            json.dumps(sorted(n for n in tools if n.startswith("saved__")))[:300],
+        )
+
+        saved_call = client.request(
+            "tools/call",
+            {
+                "_meta": meta,
+                "name": "saved__smoke_probe",
+                "arguments": {},
+            },
+        )
+        saved_result = saved_call.get("result", {})
+        saved_text = "".join(
+            c.get("text", "") for c in saved_result.get("content", []) if isinstance(c, dict)
+        )
+        check(
+            report,
+            "saved query directly callable",
+            "unknown tool" not in saved_text.lower(),
+            json.dumps(saved_call)[:300],
         )
 
         call = client.request(

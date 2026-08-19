@@ -390,7 +390,9 @@ _BASE_INSTRUCTIONS = (
     "per-container metrics (top_cpu, top_memory) are different — pick by what's asked. "
     "Every query tool takes an optional `since` like '15m ago' or '2h ago'. For a "
     "recurring custom question, get it working with `search`, then `save_query` so it "
-    "can be re-run deterministically with `run_saved`. If you do use `search`: fields "
+    "can be re-run deterministically with `run_saved`. Saved queries appear as "
+    "`saved__<name>` tools; call one directly, or use `list_saved` to see all of them. "
+    "If you do use `search`: fields "
     "are nested resource/log attributes, not flat columns — resource['service.name'], "
     "resource['host.name'], attributes['systemd.unit'], etc. A bare column name like "
     "service_name is not an error, it just silently matches zero rows — if a query you "
@@ -1454,6 +1456,66 @@ def _make_room(existing_items, room_needed, protect_human):
 
 LEARNED_STORE_CAP = 500
 
+# Saved queries projected into tools/list as saved__<name> (issue #5). Not
+# `_nonnegative_int_env(...) or 25` -- that pattern (used for KQL_MAX_CHARS
+# etc.) treats an explicit 0 as "use the default", which is wrong here: 0
+# must disable the projection entirely, a real and intended configuration.
+SAVED_TOOL_PROJECTION_CAP = _nonnegative_int_env("BERSERK_MCP_SAVED_TOOL_CAP", 25)
+
+
+# FR-4: a generated entry's description was authored by an LLM and is
+# therefore untrusted (list_saved already fences it for the same reason).
+# Projecting it into tools/list moves that untrusted text into a model's
+# tool-selection context -- a stronger position than a tool *result* -- so
+# the same fencing posture applies here, plus the extra care a routing
+# surface needs: no structural tokens a client could misparse.
+_DESCRIPTION_CAP = 240
+_DESCRIPTION_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_DESCRIPTION_STRUCTURAL_TOKENS = ("inputSchema", '"tools"', "\n\n---")
+
+
+def _saved_query_description(item):
+    text = str(item.get("description", ""))
+    text = _DESCRIPTION_CONTROL_CHARS_RE.sub("", text)
+    text = text[:_DESCRIPTION_CAP]
+    for token in _DESCRIPTION_STRUCTURAL_TOKENS:
+        text = text.replace(token, " ")
+    if item.get("origin") == "generated":
+        # Neutralize literal angle brackets in the untrusted text before
+        # wrapping, so a forged "</generated-description>" inside the
+        # description can't masquerade as the real closing tag and make
+        # trailing injected text look like it fell outside the fence.
+        text = text.replace("<", "(").replace(">", ")")
+        text = "<generated-description>" + text + "</generated-description>"
+    return text
+
+
+def _saved_query_tools():
+    """Tool definitions projected from the learned-query store, most recent
+    first-class. Never raises: a missing or malformed store must not break
+    tools/list, which every client depends on to function at all."""
+    if SAVED_TOOL_PROJECTION_CAP <= 0:
+        return []
+    try:
+        items = [it for it in load_learned() if item_visible(it)]
+    except Exception:
+        return []
+    tools = []
+    for item in items[-SAVED_TOOL_PROJECTION_CAP:]:
+        try:
+            nm = sanitize_name(item["name"])
+        except (KeyError, TypeError):
+            continue
+        tool = {
+            "name": "saved__" + nm,
+            "description": _saved_query_description(item),
+            "inputSchema": {"type": "object", "properties": _since()},
+        }
+        if item.get("roles"):
+            tool["roles"] = item["roles"]
+        tools.append(tool)
+    return tools
+
 
 def persist_learned_query(entry, action_source):
     """Storage core shared by the save_query tool and the parser-factory
@@ -1529,6 +1591,17 @@ def persist_learned_query(entry, action_source):
         amendments.append(log_entry)
         amendments = amendments[-1000:]  # cap to prevent unbounded growth
         save_json_list(amendments_path, amendments)
+    # This is the single write path for both save_query and the generated
+    # writes from generate_parser/run_discovery_worker, and is only reached
+    # after a persist actually succeeds -- a rejected save (validation
+    # failure, execution failure, refused overwrite) returns before this
+    # point, so it never notifies. Best-effort: a notification failure must
+    # never undo or fail a save that already landed on disk.
+    if _TRANSPORT == "stdio":
+        try:
+            send({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+        except Exception as exc:
+            log(f"failed to send tools/list_changed notification: {type(exc).__name__}: {exc}")
     return log_entry
 
 
@@ -2011,6 +2084,28 @@ def _drain_pending_jobs(max_jobs):
     return outcomes, any_needs_human
 
 
+def _run_saved_entry(match, since_arg):
+    """Execute one resolved saved-query entry. Shared by run_saved and the
+    saved__<name> projected-tool dispatch (issue #5) so the two code paths
+    can never drift -- see docs/claude-code-review-feedback-loop.md fault 2
+    for what happens when a fix lands at only one call site."""
+    since = since_arg or match.get("since") or "1h ago"
+    prefix = ""
+    if KQL_VALIDATION_MODE != "off":
+        report = _validate_user_kql(match["kql"], since)
+        stored_hash = match.get("schema_hash")
+        current_hash = report.get("schema", {}).get("schema_hash")
+        if stored_hash and current_hash and stored_hash != current_hash:
+            prefix = (
+                f"Schema drift warning: saved query schema_hash={stored_hash}, "
+                f"current={current_hash}. Revalidated before execution.\n"
+            )
+        if _blocking_validation(report):
+            return prefix + _format_validation_rejection(report), True
+    out, err = bzrk_search_json(match["kql"], since)
+    return prefix + out, err
+
+
 def _handle_call_uncached(name, arguments):
     """Dispatch a tools/call. Returns (text, is_error)."""
     # --- learning-loop management tools ---
@@ -2035,21 +2130,21 @@ def _handle_call_uncached(name, arguments):
         if not match:
             avail = ", ".join(it["name"] for it in items) or "(none)"
             return "No saved query named '" + qn + "'. Available: " + avail, True
-        since = arguments.get("since") or match.get("since") or "1h ago"
-        prefix = ""
-        if KQL_VALIDATION_MODE != "off":
-            report = _validate_user_kql(match["kql"], since)
-            stored_hash = match.get("schema_hash")
-            current_hash = report.get("schema", {}).get("schema_hash")
-            if stored_hash and current_hash and stored_hash != current_hash:
-                prefix = (
-                    f"Schema drift warning: saved query schema_hash={stored_hash}, "
-                    f"current={current_hash}. Revalidated before execution.\n"
-                )
-            if _blocking_validation(report):
-                return prefix + _format_validation_rejection(report), True
-        out, err = bzrk_search_json(match["kql"], since)
-        return prefix + out, err
+        return _run_saved_entry(match, arguments.get("since"))
+    if name.startswith("saved__"):
+        # Dispatch target for a projected saved-query tool (see
+        # _saved_query_tools / issue #5). Resolves against the same
+        # role-filtered list run_saved uses, so a role-hidden entry is
+        # indistinguishable from a name that was never saved -- this is the
+        # enforcement F-008 relies on for callers that reach
+        # _handle_call_uncached directly, bypassing dispatch()'s matched_tool
+        # lookup (e.g. a direct handle_call() call, as most tests make).
+        target = name[len("saved__"):]
+        items = [it for it in load_learned() if item_visible(it)]
+        match = next((it for it in items if sanitize_name(it["name"]) == target), None)
+        if not match:
+            return "unknown tool: " + name, True
+        return _run_saved_entry(match, arguments.get("since"))
     if name == "save_query":
         nm = sanitize_name(arguments.get("name", ""))
         desc = str(arguments.get("description", "")).strip()
@@ -2888,9 +2983,18 @@ def _valid_modern_meta(params):
     )
 
 
+def _list_changed_supported():
+    """True only when a save could plausibly reach the client: stdio can
+    push notifications/tools/list_changed at any time (see _TRANSPORT),
+    and there must be something for it to announce -- a saved__* projection
+    disabled via SAVED_TOOL_PROJECTION_CAP=0 never changes tools/list at
+    all, so advertising the capability would just be noise."""
+    return _TRANSPORT == "stdio" and SAVED_TOOL_PROJECTION_CAP > 0
+
+
 def _discover_result():
     capabilities = {
-        "tools": {"listChanged": False},
+        "tools": {"listChanged": _list_changed_supported()},
         "extensions": {
             "tasks": {
                 "uri": MCP_TASK_EXTENSION_URI,
@@ -3063,7 +3167,7 @@ def _task_id_from_params(params):
 
 
 def _tool_list_result(mode):
-    allt = [t for t in TOOLS + MGMT_TOOLS if tool_visible(t)]
+    allt = [t for t in TOOLS + MGMT_TOOLS + _saved_query_tools() if tool_visible(t)]
     tl = []
     for t in allt:
         visible_tool = _with_output_schema(t) if mode == PROTOCOL_MODE_MODERN else t
@@ -3289,7 +3393,7 @@ def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE
             return _jsonrpc_error(-32602, "Invalid params", id_)
         return _jsonrpc_result(id_, {
             "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {"tools": {"listChanged": False}},
+            "capabilities": {"tools": {"listChanged": _list_changed_supported()}},
             "serverInfo": SERVER_INFO,
             "instructions": INSTRUCTIONS,
         })
@@ -3352,8 +3456,13 @@ def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE
         # supposed to be visible in this role's lane just by naming it
         # directly. A role-hidden tool is treated exactly like an unknown
         # one (same message, same isError=true) -- it doesn't leak that a
-        # tool with that name exists but is merely hidden.
+        # tool with that name exists but is merely hidden. saved__* tools
+        # are projected, not static, so they aren't in TOOLS + MGMT_TOOLS --
+        # look them up the same way tools/list built them, so one predicate
+        # (tool_visible) governs both static and projected tools.
         matched_tool = next((t for t in TOOLS + MGMT_TOOLS if t["name"] == name), None)
+        if matched_tool is None and name.startswith("saved__"):
+            matched_tool = next((t for t in _saved_query_tools() if t["name"] == name), None)
         if matched_tool is not None and not tool_visible(matched_tool):
             text, is_err = "unknown tool: " + name, True
         else:
@@ -3391,7 +3500,18 @@ def send(msg):
     sys.stdout.flush()
 
 
+# Which transport is serving this process, set by _serve_mcp()/_serve_http()
+# -- None until one of them starts (e.g. under test, or during import).
+# Governs whether tools.listChanged is advertised truthfully: stdio can push
+# a notification at any time via send(); HTTP's do_POST is one request, one
+# response, with no server-initiated channel -- advertising listChanged
+# there would promise a notification that can never arrive.
+_TRANSPORT = None
+
+
 def _serve_mcp():
+    global _TRANSPORT
+    _TRANSPORT = "stdio"
     log(f"starting v{__version__} (profile={PROFILE}, table={TABLE}, bzrk={BZRK_BIN})")
     while True:
         line = sys.stdin.readline()
@@ -3687,6 +3807,8 @@ def _make_http_handler(config):
 
 
 def _serve_http():
+    global _TRANSPORT
+    _TRANSPORT = "http"
     config = _build_http_config()
     if not config["enabled"]:
         raise HttpConfigError("HTTP transport is disabled; set BERSERK_MCP_HTTP_ENABLE=1")
