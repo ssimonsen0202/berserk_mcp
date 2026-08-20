@@ -161,17 +161,41 @@ BM-15–17: withdrawn.)
 blocks only BM-12 (scoped HTTP principals), not BM-6, BM-8, or BM-11. That
 loosens the brief's rigid "BM-10 first" gate significantly.
 
+**Reconciliation note, 2026-08-20 (post-filing).** The dev-brief's own §5
+priority list argues eval-into-CI and wrong-answer containment should land
+*before* any surface change (tiers, discovery) — "everything else would ship
+blind" without a regression gate, and both items are cheap (docs+tests, no
+`berserk_mcp.py` behavior change for most of it). Milestone 1 below already
+reflects that ordering. Cross-referencing the dev-brief against the backlog
+also surfaced a genuinely untracked item — no BM number, no prior issue —
+now filed as [issue #11](https://github.com/ssimonsen0202/berserk_mcp/issues/11):
+returned log/body content reaches the model with secret/PII redaction but no
+untrusted-data fencing, confirmed directly (`grep` for any such marker
+returns zero hits). Folded into Milestone 1 below, same cost profile as BM-5.
+
 ### Milestone 0 — Already done (no action)
 BM-1 (in flight, PR #10), BM-2, BM-3, BM-4. Verify PR #10 merges; nothing
 else to do here.
 
-### Milestone 1 — Measurement (BM-9 partial, BM-5)
-**Goal:** every subsequent milestone has something to be measured against.
-**Issues:** BM-5 (wrong-answer containment naming/docs/tests), BM-9's CI-gate
-half (wire `run_eval.py --backend mock` into `.github/workflows/ci.yml`
-against the *existing* 41 cases — don't wait for the 135-case expansion).
+### Milestone 1 — Measurement and cheap security/reliability wins (BM-9 partial, BM-5, #11)
+**Goal:** every subsequent milestone has something to be measured against,
+and the cheapest, highest-leverage items land before any surface change.
+**Issues:**
+- BM-9's CI-gate half — wire `run_eval.py --backend mock` into
+  `.github/workflows/ci.yml` against the *existing* 41 cases (don't wait for
+  the 135-case expansion in Milestone 4).
+- BM-5 — wrong-answer containment naming/docs/tests.
+- **#11** — fence returned body/log content as untrusted data, same posture
+  as the existing `<generated-description>` fencing from issue #5. No new
+  query, no LLM call, no behavior change to what data is returned.
+
 **Exit criteria:** CI fails on a router regression; README has a named
-"Wrong-answer containment" section with one test per listed control.
+"Wrong-answer containment" section with one test per listed control; every
+body-bearing tool (cross-checked against `_SIMPLE_JSON_TOOLS` and the
+JSON-mode paths from issue #1) wraps returned content in an untrusted-data
+fence, with a test asserting the fence survives content that tries to forge
+its own closing tag (same pattern already used in `_saved_query_description`'s
+injection test).
 **Escalate if:** any listed containment control does *not* already have a
 test that fails without it — that's new engineering work, not docs, and
 changes BM-5's size from S to at least M.
