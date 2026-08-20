@@ -173,21 +173,24 @@ returned log/body content reaches the model with secret/PII redaction but no
 untrusted-data fencing, confirmed directly (`grep` for any such marker
 returns zero hits). Folded into Milestone 1 below, same cost profile as BM-5.
 
-### Milestone 0 — Already done (no action)
-BM-1 (in flight, PR #10), BM-2, BM-3, BM-4. Verify PR #10 merges; nothing
-else to do here.
+### Milestone 0 — Already done (merged)
+Issues #7 (BM-2), #1 (result envelope predecessor), #8 (BM-3), #5 (BM-4),
+#2 (BM-1). All merged 2026-08-20 or earlier. Nothing to do here.
 
-### Milestone 1 — Measurement and cheap security/reliability wins (BM-9 partial, BM-5, #11)
+### Milestone 1 — Measurement and cheap security/reliability wins
 **Goal:** every subsequent milestone has something to be measured against,
 and the cheapest, highest-leverage items land before any surface change.
 **Issues:**
-- BM-9's CI-gate half — wire `run_eval.py --backend mock` into
+- [#13](https://github.com/ssimonsen0202/berserk_mcp/issues/13) (BM-9's
+  CI-gate half) — wire `run_eval.py --backend mock` into
   `.github/workflows/ci.yml` against the *existing* 41 cases (don't wait for
-  the 135-case expansion in Milestone 4).
-- BM-5 — wrong-answer containment naming/docs/tests.
-- **#11** — fence returned body/log content as untrusted data, same posture
-  as the existing `<generated-description>` fencing from issue #5. No new
-  query, no LLM call, no behavior change to what data is returned.
+  the 135-case expansion, tracked separately in the same issue as Phase 2).
+- [#12](https://github.com/ssimonsen0202/berserk_mcp/issues/12) (BM-5) —
+  wrong-answer containment naming/docs/tests.
+- [#11](https://github.com/ssimonsen0202/berserk_mcp/issues/11) — fence
+  returned body/log content as untrusted data, same posture as the existing
+  `<generated-description>` fencing from issue #5. No new query, no LLM
+  call, no behavior change to what data is returned.
 
 **Exit criteria:** CI fails on a router regression; README has a named
 "Wrong-answer containment" section with one test per listed control; every
@@ -200,9 +203,10 @@ injection test).
 test that fails without it — that's new engineering work, not docs, and
 changes BM-5's size from S to at least M.
 
-### Milestone 2 — Tool tiers (BM-8)
+### Milestone 2 — Tool tiers
 **Goal:** gate the KQL-authoring escape hatches, now unblocked since #5 shipped.
-**Issues:** BM-8, following the already-written spec exactly.
+**Issues:** [#4](https://github.com/ssimonsen0202/berserk_mcp/issues/4) (BM-8),
+following the already-written spec exactly.
 **Exit criteria:** matches `docs/tool-tiers-implementation-spec.md`'s
 acceptance section — per-lane byte-size table in the PR, `saved__*`/
 `discover_schema` confirmed to stay visible in the small tier.
@@ -210,9 +214,10 @@ acceptance section — per-lane byte-size table in the PR, `saved__*`/
 projected (spec estimates ~12-13KB removed per operational lane) — if it's
 materially less, the tier split may not be worth the added config surface.
 
-### Milestone 3 — Discovery (BM-6, BM-7)
+### Milestone 3 — Discovery
 **Goal:** the dominant lever on small-model reliability, per the market brief.
-**Issues:** BM-6, BM-7 same release.
+**Issues:** [#14](https://github.com/ssimonsen0202/berserk_mcp/issues/14) (BM-6),
+[#15](https://github.com/ssimonsen0202/berserk_mcp/issues/15) (BM-7), same release.
 **Exit criteria:** recall gate ≥99% at K≤5 in CI (per the market brief's own
 target, tighter than the backlog's original ≥95%); no tool name in
 `_BASE_INSTRUCTIONS` outside the anchor set, enforced by a test; two-hop
@@ -222,18 +227,21 @@ per the brief's own framing, a discovery hop below ~99% recall makes
 per-question accuracy *worse* than today's single hop, which would mean
 shipping BM-6 actively regresses the product.
 
-### Milestone 4 — Router eval expansion (rest of BM-9)
+### Milestone 4 — Router eval expansion (full coverage)
 **Goal:** the CI-gate infrastructure everything above is judged against, at
 full coverage.
-**Issues:** expand to ≥3 phrasings per small-tier tool, add lane labels
-(now meaningful post-BM-8), two-hop scoring (now meaningful post-BM-6).
+**Issues:** [#13](https://github.com/ssimonsen0202/berserk_mcp/issues/13)
+(BM-9, Phase 2 half) — expand to ≥3 phrasings per small-tier tool, add lane
+labels (now meaningful post-#4), two-hop scoring (now meaningful post-#14).
 **Exit criteria:** published baseline in `evals/results/`, ratcheting
 threshold in CI.
 
-### Milestone 5 — Principal refactor (BM-10)
-**Goal:** structural prerequisite for BM-12 only (not BM-6/8/11, per the
-Phase 2 finding) — but still the right foundation before scoped HTTP auth.
-**Issues:** BM-10, shipped as its own commit, zero behavioral diff.
+### Milestone 5 — Principal refactor
+**Goal:** structural prerequisite for scoped HTTP principals only (not
+discovery/tiers/ledger, per the Phase 2 finding) — but still the right
+foundation before scoped HTTP auth.
+**Issues:** [#16](https://github.com/ssimonsen0202/berserk_mcp/issues/16)
+(BM-10), shipped as its own commit, zero behavioral diff.
 **Exit criteria:** full existing test suite + protocol smoke pass
 unmodified; grep test confirms no remaining module-level `ACTIVE_ROLE` reads
 outside default-principal construction.
@@ -241,20 +249,24 @@ outside default-principal construction.
 own acceptance criterion, that means the refactor changed behavior and must
 be re-scoped before proceeding.
 
-### Milestone 6 — Audit ledger (BM-11, BM-13, BM-14)
+### Milestone 6 — Audit ledger
 **Goal:** the clearest differentiator in the position matrix, and (per
-BM-14) the path to a real eval corpus instead of synthetic cases.
-**Issues:** BM-11 first (design the record schema with BM-14's future use
-explicit, per the brief's own note), then BM-13, then BM-14 (needs BM-6 too).
+issue #20) the path to a real eval corpus instead of synthetic cases.
+**Issues:** [#17](https://github.com/ssimonsen0202/berserk_mcp/issues/17)
+(BM-11) first (design the record schema with #20's future use explicit, per
+the brief's own note), then
+[#19](https://github.com/ssimonsen0202/berserk_mcp/issues/19) (BM-13), then
+[#20](https://github.com/ssimonsen0202/berserk_mcp/issues/20) (BM-14, needs
+#14/discovery too).
 **Exit criteria:** chain-tamper test detects mutation; property test proves
 no row content in any record class; retention is configurable with no
 silent default.
 **Escalate if:** any design draft puts telemetry content in the ledger —
 this is the one invariant the brief calls out as unrecoverable if violated.
 
-### Milestone 7 — Scoped HTTP principals (BM-12)
-**Goal:** the one item that genuinely needs BM-10's `Principal` object.
-**Issues:** BM-12.
+### Milestone 7 — Scoped HTTP principals
+**Goal:** the one item that genuinely needs the `Principal` object from #16.
+**Issues:** [#18](https://github.com/ssimonsen0202/berserk_mcp/issues/18) (BM-12).
 **Exit criteria:** backwards-compat test — existing single-token config
 behaves identically; per-scope denial tests are ledger-recorded (needs
 Milestone 6 to have landed).
@@ -263,8 +275,10 @@ requirements (S5 in the review rubric) aren't met — this is the
 highest-severity review category in the whole backlog.
 
 ### Deferred, not scheduled
-BM-18 (README split) and BM-19 (routing reliability analyzer) — no
-dependencies, no urgency, do opportunistically between milestones.
+[#21](https://github.com/ssimonsen0202/berserk_mcp/issues/21) (BM-18, README
+split) and [#22](https://github.com/ssimonsen0202/berserk_mcp/issues/22)
+(BM-19, routing reliability analyzer) — no dependencies, no urgency, do
+opportunistically between milestones.
 
 ## What I could not verify from the code alone
 
