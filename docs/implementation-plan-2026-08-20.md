@@ -280,6 +280,30 @@ split) and [#22](https://github.com/ssimonsen0202/berserk_mcp/issues/22)
 (BM-19, routing reliability analyzer) — no dependencies, no urgency, do
 opportunistically between milestones.
 
+### Dev-brief-only items — no BM number, filed 2026-08-20
+
+Two items exist only in `docs/berserk-dev-brief-2026-08-20.md`'s §3/§5, not
+in the BM-1..19 backlog at all (surfaced by cross-referencing the two
+documents against each other, per the user's request):
+
+- [#23](https://github.com/ssimonsen0202/berserk_mcp/issues/23) — the
+  OpenRouter model-ladder eval harness from the brief's §4. Distinct from
+  #13: #13 covers the *existing* `run_eval.py` harness, #23 is the
+  capability-ladder measurement layer the brief spends its longest section
+  on (3B-through-frontier sweep, provider-pinning guardrails, local-
+  quantization parity step). Answers the brief's central open question —
+  "is the `since` normalizer worth ~7B parameters?"
+- [#24](https://github.com/ssimonsen0202/berserk_mcp/issues/24) — the
+  investigation decision tree (composition-ceiling answer, no code
+  execution). Explicitly unscoped: the design question ("does a decision
+  tree solve the composition problem or just relocate it?") needs resolving
+  before this is sizeable, per `START-HERE.md`'s own instruction to
+  challenge that claim adversarially rather than assume it.
+
+Neither slots cleanly into Milestones 1-7 above; #23 is closer to Milestone
+4's neighborhood (eval infrastructure) once #13 lands, and #24 is more
+valuable once #14/#15 (discovery) exist, per each issue's own note.
+
 ## What I could not verify from the code alone
 
 - **Whether the discovery recall target (≥99% at K≤5) is achievable at all**
