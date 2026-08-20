@@ -304,6 +304,33 @@ Neither slots cleanly into Milestones 1-7 above; #23 is closer to Milestone
 4's neighborhood (eval infrastructure) once #13 lands, and #24 is more
 valuable once #14/#15 (discovery) exist, per each issue's own note.
 
+A third gap surfaced the same way, checking the dev-brief's own closing
+paragraph against the 24 filed issues:
+[#25](https://github.com/ssimonsen0202/berserk_mcp/issues/25) — the
+dev-brief names silent-failure rate (≤0.5%) as "the only hard gate" in its
+own §4 metrics table, and its closing paragraph restates it as the metric
+that matters most. Nothing in #12/#13/#23 actually computes or CI-gates
+that number — each covers a related but different metric (control
+existence, tool-selection success, cost-per-correct-answer). Depends on
+#13's eval-case infrastructure.
+
+## A documented disagreement between the two source documents
+
+`berserk-mcp-strategy-and-backlog.md`'s position matrix states: *"Epic D is
+therefore not optional; it is the gate on external usefulness."* Epic D
+(BM-15/16/17, multi-backend support) is withdrawn per `START-HERE.md`'s
+scope constraint.
+
+`berserk-dev-brief-2026-08-20.md`'s own closing paragraph accepts this as a
+settled trade: *"That caps our reach to Berserk deployments, which is a
+Berserk-level bet rather than an MCP-level one."*
+
+Same source, same day, two documents that disagree with each other on
+whether the withdrawal is a solved decision or an open, unaddressed risk to
+external adoption. Flagging rather than resolving — this is a call for
+whoever owns the product decision, not something the code or this plan can
+settle.
+
 ## What I could not verify from the code alone
 
 - **Whether the discovery recall target (≥99% at K≤5) is achievable at all**
