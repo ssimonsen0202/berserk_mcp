@@ -1559,6 +1559,56 @@ external scanner pass:
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
+## Wrong-answer containment
+
+berserk-mcp's own controls against a *confident false negative* — an agent
+reporting a clean bill of health because a query silently matched zero rows,
+went stale, or was fixed by a query the tool refused to run — consolidated
+under one name. Every competitor's stated hallucination defense (rate
+limiting, query timeouts, read-only execution) protects backend stability;
+none of it addresses this failure mode, which is the one that actually pages
+someone at 4am. Each control below is scattered through the sections above;
+this list exists so it can be reviewed, tested, and cited as one thing.
+
+- **Field-access guidance.** Berserk's fields are nested resource/log
+  attributes, not flat columns. A bare column name like `service_name` is
+  not a KQL error — it silently matches zero rows. `_BASE_INSTRUCTIONS` and
+  the `search` tool description both warn about this explicitly and point
+  at `discover_schema` before guessing again. Prompt-level, not code-
+  enforced — the query engine's own behavior can't be changed from here —
+  so the control is the warning existing and staying worded precisely,
+  which is why it has a locking test: `WrongAnswerContainmentTest.
+  test_base_instructions_warn_about_bare_column_names`.
+- **KQL validation rejects blockers before execution.** A query against the
+  wrong table, or one carrying a source-introducing operator, is rejected
+  by static validation before it reaches `bzrk` — rather than running and
+  returning an empty or unrelated result that looks like a real answer. See
+  `## Security`'s "Schema-grounded KQL validation" above;
+  `WrongAnswerContainmentTest.test_validate_kql_rejects_wrong_table_prefix`
+  is the containment-framed regression test.
+- **Schema-drift warning on saved queries.** A saved query is revalidated
+  against the *current* schema every time it runs. If the schema has
+  changed since the query was saved, the response is prefixed with an
+  explicit warning naming both hashes, rather than silently returning
+  whatever the (possibly now-wrong) query still happens to match.
+  `WrongAnswerContainmentTest.test_schema_drift_warning_fires_when_stored_hash_differs`
+  proves the warning fires on drift; the companion
+  `test_schema_drift_warning_silent_when_hashes_match` proves it stays
+  silent otherwise, so it doesn't become noise nobody reads.
+- **The result envelope disambiguates the bare `(no rows)` sentinel.** An
+  empty result used to be indistinguishable between healthy, wrong window,
+  wrong tool, and a source that stopped reporting. Every fixed-query tool
+  now echoes its resolved window and, on empty results, a concrete
+  per-tool next step naming a real tool or argument. See "Result envelope"
+  in `## Tools` and `ResultEnvelopeTest` for full coverage.
+- **Returned telemetry is fenced as untrusted data.** Not a containment
+  control in the same sense as the others — it defends against an agent
+  *acting on an instruction smuggled into a log line*, not against a query
+  silently returning the wrong thing — but it belongs in the same "can we
+  trust what came back" conversation. Real telemetry rows are wrapped in an
+  explicit `<untrusted_log_data>` marker before reaching the model, with a
+  matching instruction to treat the content strictly as data.
+
 ## Testing
 
 ```bash
