@@ -225,6 +225,9 @@ MAX_BZRK_RESULT_BYTES = (
 FINOPS_REDACT_ENTROPY = os.environ.get(
     "BERSERK_MCP_FINOPS_REDACT_ENTROPY", "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
+ENVELOPE_ENABLED = os.environ.get(
+    "BERSERK_MCP_ENVELOPE", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
 _QUERY_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_QUERIES) if MAX_CONCURRENT_QUERIES > 0 else None
 
 # Fleet controls are deliberately in-process. An MCP stdio server is one
@@ -1838,6 +1841,82 @@ _SIMPLE_JSON_TOOLS = {
     "sre_top_error_messages", "soc_repeated_errors",
 }
 
+_EMPTY_NEXT_STEP = {
+    "list_containers":
+        "Widen with since='1h ago', or check list_hosts for hosts without containers.",
+    "top_cpu":
+        "For whole-machine CPU use host_cpu; top_cpu is per-container.",
+    "top_memory":
+        "For whole-machine memory use host_memory; top_memory is per-container.",
+    "errors_by_service":
+        "Widen with since='24h ago', or confirm the source is reporting with list_services.",
+    "list_services":
+        "Widen with since='6h ago', or check list_hosts if services are attached to hosts.",
+    "list_hosts":
+        "Widen with since='6h ago', or verify ingest health with sre_ingest_health.",
+    "host_cpu":
+        "For per-container CPU use top_cpu; host_cpu is per-host.",
+    "host_memory":
+        "For per-container memory use top_memory; host_memory is per-host.",
+    "container_hosts":
+        "Widen with since='6h ago', or check list_containers for active containers.",
+    "list_metrics":
+        "Widen with since='6h ago', or verify the source is ingesting with sre_ingest_health.",
+    "bzrk_query_perf":
+        "Widen with since='6h ago'; no query traffic means no perf data to show.",
+    "sre_error_rate":
+        "Widen with since='6h ago', or check errors_by_service for breakdown by service.",
+    "sre_host_headroom":
+        "Widen with since='2h ago'; no headroom data means no host metrics arrived.",
+    "sre_ingest_health":
+        "Widen with since='6h ago'; check list_hosts to see if any hosts are reporting.",
+    "sre_top_error_messages":
+        "Widen with since='6h ago', or check errors_by_service for aggregate counts.",
+    "soc_high_severity_logs":
+        "Widen with since='6h ago', or check soc_log_spike for volume anomalies.",
+    "soc_log_spike":
+        "Widen with since='6h ago'; no spike means no volume anomaly in this window.",
+    "soc_repeated_errors":
+        "Widen with since='24h ago', or check errors_by_service for recent counts.",
+    "claude_recent":
+        "Widen with since='6h ago', or check claude_sessions for session-level activity.",
+    "claude_sessions":
+        "Widen with since='24h ago', or check claude_recent for recent events.",
+    "claude_tools":
+        "Widen with since='24h ago'; no tool data means no Claude Code sessions in this window.",
+    "claude_errors":
+        "Widen with since='24h ago', or check claude_recent to see if sessions are active.",
+    "trace_find_slow":
+        "Widen with since='6h ago'; no slow traces means all spans finished within threshold.",
+    "trace_find_errors":
+        "Widen with since='6h ago', or check errors_by_service for error counts.",
+}
+
+
+def _envelope(tool, since, out):
+    """Wrap SIMPLE tool output with a window/rows header. Never raises."""
+    try:
+        if out.strip() == "(no rows)":
+            next_step = _EMPTY_NEXT_STEP.get(tool, "Try a wider window with since='24h ago'.")
+            return f"No rows in window {since}. {next_step}"
+        stripped = out.strip()
+        if stripped and stripped[0] in "[{":
+            try:
+                records = agent_analytics._json_records(json.loads(stripped))
+                rows = len(records) if records is not None else None
+            except Exception:
+                rows = None
+        else:
+            data_lines = [ln for ln in stripped.splitlines() if ln.strip()]
+            rows = max(0, len(data_lines) - 1)
+        header = f"window={since}"
+        if rows is not None:
+            header = f"{header}  rows={rows}"
+        return f"{header}\n\n{out}"
+    except Exception:
+        return out
+
+
 _QUERY_RISK_BUDGET_MULTIPLIERS = {
     "low": 1.0,
     "medium": 1.5,
@@ -2489,8 +2568,18 @@ def _handle_call_uncached(name, arguments):
         kql, default_since = SIMPLE[name]
         since = arguments.get("since") or default_since
         if name in _SIMPLE_JSON_TOOLS:
-            return bzrk_search_json(kql, since)
-        return bzrk_search(kql, since)
+            out, err = bzrk_search_json(kql, since)
+        else:
+            out, err = bzrk_search(kql, since)
+        if ENVELOPE_ENABLED:
+            if err and out.startswith("bzrk result exceeded"):
+                out = (
+                    f"Result exceeded BERSERK_MCP_MAX_RESULT_BYTES={MAX_BZRK_RESULT_BYTES}."
+                    f" This tool's query is fixed — narrow the window, e.g. since='15m ago'."
+                )
+            elif not err:
+                out = _envelope(name, since, out)
+        return out, err
 
     if name == "soc_new_services":
         since = arguments.get("since") or "24h ago"

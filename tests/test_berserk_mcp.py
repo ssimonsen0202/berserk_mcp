@@ -1283,7 +1283,9 @@ class BerserkMcpTest(unittest.TestCase):
             bm.ENABLE_MCP_2026_07_28 = orig_enabled
         result = resp["result"]
         self.assertEqual(result["resultType"], "complete")
-        self.assertEqual(result["content"], [{"type": "text", "text": "OK"}])
+        self.assertEqual(len(result["content"]), 1)
+        self.assertEqual(result["content"][0]["type"], "text")
+        self.assertIn("OK", result["content"][0]["text"])  # envelope wraps; raw text preserved
         self.assertFalse(result["isError"])
         self.assertNotIn("structuredContent", result)
 
@@ -1345,7 +1347,9 @@ class BerserkMcpTest(unittest.TestCase):
         finally:
             bm.ENABLE_MCP_2026_07_28 = orig_enabled
         result = resp["result"]
-        self.assertEqual(result["content"], [{"type": "text", "text": "OK"}])
+        self.assertEqual(len(result["content"]), 1)
+        self.assertEqual(result["content"][0]["type"], "text")
+        self.assertIn("OK", result["content"][0]["text"])  # envelope wraps; raw text preserved
         self.assertNotIn("resultType", result)
         self.assertNotIn("structuredContent", result)
 
@@ -3271,7 +3275,7 @@ class FleetControlsTest(unittest.TestCase):
         first, err1 = bm.handle_call("sre_error_rate", {})
         second, err2 = bm.handle_call("sre_error_rate", {})
         self.assertFalse(err1 or err2)
-        self.assertEqual(first, "result")
+        self.assertIn("result", first)  # envelope wraps raw output; raw text is preserved
         self.assertIn("cached", second)
         self.assertEqual(len(self.calls), 1)
 
@@ -4858,6 +4862,129 @@ class SavedQueryProjectionTest(unittest.TestCase):
         finally:
             bm._TRANSPORT = orig_transport
             bm.send = orig_send
+
+
+class ResultEnvelopeTest(unittest.TestCase):
+    """FR-1 through FR-4: result envelope for the SIMPLE fixed-query path."""
+
+    def setUp(self):
+        self._next_return = ("col_a\nrow1\nrow2", False)
+
+        def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
+            self.calls.append(list(args))
+            return self._next_return
+
+        self.calls = []
+        self._orig_run = bm.run_bzrk
+        bm.run_bzrk = fake_run_bzrk
+
+        self._orig_cache_ttl = bm.CACHE_TTL_SECONDS
+        bm.CACHE_TTL_SECONDS = 0
+        bm._RESULT_CACHE.clear()
+        bm._FAIL_COOLDOWN.clear()
+
+        self._orig_envelope = bm.ENVELOPE_ENABLED
+        bm.ENVELOPE_ENABLED = True
+
+    def tearDown(self):
+        bm.run_bzrk = self._orig_run
+        bm.CACHE_TTL_SECONDS = self._orig_cache_ttl
+        bm._RESULT_CACHE.clear()
+        bm._FAIL_COOLDOWN.clear()
+        bm.ENVELOPE_ENABLED = self._orig_envelope
+
+    def test_01_rows_present_header_and_verbatim_body(self):
+        self._next_return = ("col_a\nrow1\nrow2", False)
+        text, err = bm.handle_call("list_hosts", {})
+        self.assertFalse(err)
+        self.assertTrue(text.startswith("window=1h ago  rows=2\n\n"))
+        self.assertTrue(text.endswith("col_a\nrow1\nrow2"))
+
+    def test_02_explicit_since_appears_in_header(self):
+        self._next_return = ("col_a\nrow1", False)
+        text, err = bm.handle_call("list_hosts", {"since": "6h ago"})
+        self.assertFalse(err)
+        self.assertTrue(text.startswith("window=6h ago  rows=1\n\n"))
+
+    def test_03_no_rows_returns_interpreted_sentence(self):
+        self._next_return = ("(no rows)", False)
+        text, err = bm.handle_call("list_hosts", {})
+        self.assertFalse(err)
+        self.assertIn("No rows in window 1h ago", text)
+        self.assertIn(bm._EMPTY_NEXT_STEP["list_hosts"][:20], text)
+
+    def test_04_every_simple_tool_has_next_step(self):
+        self.assertEqual(set(bm._EMPTY_NEXT_STEP), set(bm.SIMPLE))
+
+    def test_05_overflow_simple_returns_since_only_message(self):
+        overflow_msg = (
+            f"bzrk result exceeded BERSERK_MCP_MAX_RESULT_BYTES="
+            f"{bm.MAX_BZRK_RESULT_BYTES}; narrow the time window, project fewer "
+            "columns, or add a smaller take/top/tail bound."
+        )
+        self._next_return = (overflow_msg, True)
+        text, err = bm.handle_call("list_hosts", {})
+        self.assertTrue(err)
+        self.assertIn("fixed", text)
+        self.assertIn("since=", text)
+        self.assertNotIn("project fewer columns", text)
+        self.assertNotIn("take/top/tail", text)
+
+    def test_06_overflow_search_keeps_three_lever_message(self):
+        overflow_msg = (
+            f"bzrk result exceeded BERSERK_MCP_MAX_RESULT_BYTES="
+            f"{bm.MAX_BZRK_RESULT_BYTES}; narrow the time window, project fewer "
+            "columns, or add a smaller take/top/tail bound."
+        )
+        self._next_return = (overflow_msg, True)
+        text, err = bm.handle_call("search", {"kql": f"{bm.TABLE} | take 1"})
+        self.assertTrue(err)
+        self.assertIn("project fewer columns", text)
+        self.assertIn("take/top/tail", text)
+
+    def test_07_gate_off_restores_prior_output(self):
+        bm.ENVELOPE_ENABLED = False
+        self._next_return = ("col_a\nrow1\nrow2", False)
+        text, err = bm.handle_call("list_hosts", {})
+        self.assertFalse(err)
+        self.assertEqual(text, "col_a\nrow1\nrow2")
+        bm._RESULT_CACHE.clear()
+        self._next_return = ("(no rows)", False)
+        text, err = bm.handle_call("list_hosts", {"since": "30m ago"})
+        self.assertFalse(err)
+        self.assertEqual(text, "(no rows)")
+
+    def test_08_json_tool_gets_envelope_with_json_row_count(self):
+        kusto_json = (
+            '{"Tables":[{"schema":{"columns":[{"name":"svc","type":"string"}]},'
+            '"rows":[["svcA"],["svcB"]]}]}'
+        )
+        self._next_return = (kusto_json, False)
+        text, err = bm.handle_call("claude_errors", {})
+        self.assertFalse(err)
+        last_call = self.calls[-1]
+        self.assertIn("--json", last_call)
+        self.assertTrue(text.startswith("window=6h ago  rows=2\n\n"))
+        self.assertTrue(text.endswith(kusto_json))
+
+    def test_09_auth_failure_unenveloped(self):
+        self._next_return = (bm.AUTH_FAILURE_MESSAGE, True)
+        text, err = bm.handle_call("list_hosts", {})
+        self.assertTrue(err)
+        self.assertEqual(text, bm.AUTH_FAILURE_MESSAGE)
+
+    def test_10_envelope_never_raises_on_construction_failure(self):
+        class _RaisingDict:
+            def get(self, *args, **kwargs):
+                raise RuntimeError("injected failure")
+
+        orig = bm._EMPTY_NEXT_STEP
+        try:
+            bm._EMPTY_NEXT_STEP = _RaisingDict()
+            result = bm._envelope("list_hosts", "1h ago", "(no rows)")
+            self.assertEqual(result, "(no rows)")
+        finally:
+            bm._EMPTY_NEXT_STEP = orig
 
 
 if __name__ == "__main__":
