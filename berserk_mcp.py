@@ -1845,9 +1845,9 @@ _EMPTY_NEXT_STEP = {
     "list_containers":
         "Widen with since='1h ago', or check list_hosts for hosts without containers.",
     "top_cpu":
-        "For whole-machine CPU use host_cpu; top_cpu is per-container.",
+        "For whole-machine CPU use host_cpu; top_cpu is per-container. If both are empty, widen with since='1h ago'.",
     "top_memory":
-        "For whole-machine memory use host_memory; top_memory is per-container.",
+        "For whole-machine memory use host_memory; top_memory is per-container. If both are empty, widen with since='1h ago'.",
     "errors_by_service":
         "Widen with since='24h ago', or confirm the source is reporting with list_services.",
     "list_services":
@@ -1855,9 +1855,9 @@ _EMPTY_NEXT_STEP = {
     "list_hosts":
         "Widen with since='6h ago', or verify ingest health with sre_ingest_health.",
     "host_cpu":
-        "For per-container CPU use top_cpu; host_cpu is per-host.",
+        "For per-container CPU use top_cpu; host_cpu is per-host. If both are empty, widen with since='1h ago'.",
     "host_memory":
-        "For per-container memory use top_memory; host_memory is per-host.",
+        "For per-container memory use top_memory; host_memory is per-host. If both are empty, widen with since='1h ago'.",
     "container_hosts":
         "Widen with since='6h ago', or check list_containers for active containers.",
     "list_metrics":
