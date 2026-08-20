@@ -64,6 +64,7 @@ import random
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hmac
 import ipaddress
+import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -411,22 +412,55 @@ _BASE_INSTRUCTIONS = (
 # marks it as untrusted -- a log line containing "ignore previous
 # instructions and ..." was indistinguishable from the server's own tool
 # descriptions. Same fencing posture as _saved_query_description's
-# <generated-description> tags. Applied only at dispatch branches that
-# return real bzrk_search_json row content (verified by grepping every
-# bzrk_search_json call site) -- not uniformly, so the marker keeps a
-# precise meaning instead of being diluted onto every tool result.
+# <generated-description> tags. Applied at every dispatch branch that can
+# return real bzrk output -- including its error path, since run_bzrk's
+# own diagnostic concatenates raw stdout with stderr on a failed query
+# (Codex review round 2, finding 4: partial real rows can appear there,
+# not just a clean error message).
 _UNTRUSTED_DATA_OPEN = "<untrusted_log_data>"
 _UNTRUSTED_DATA_CLOSE = "</untrusted_log_data>"
-_UNTRUSTED_DATA_CLOSE_RE = re.compile(re.escape(_UNTRUSTED_DATA_CLOSE), re.IGNORECASE)
+# Round 2 finding 2: a literal-string-only match let an HTML-entity-encoded
+# or fullwidth-Unicode closing tag survive unneutralized -- content a model
+# reading entities semantically (routine for LLMs, not a hard parser bypass)
+# could still mistake for a real fence boundary. `<`/`>` match their literal
+# form or any common HTML-entity encoding (decimal, hex, or named), with
+# optional whitespace around the slash and before the closing delimiter,
+# matching the exact shape of Codex's repro (`&lt;/untrusted_log_data &gt;`).
+# NFKC normalization (applied to the whole body before this regex runs)
+# separately collapses fullwidth/compatibility Unicode lookalikes down to
+# their ASCII form so this same pattern catches those too.
+_ANGLE_OPEN_RE = r"(?:<|&lt;|&#0*60;|&#x0*3c;)"
+_ANGLE_CLOSE_RE = r"(?:>|&gt;|&#0*62;|&#x0*3e;)"
+_UNTRUSTED_DATA_CLOSE_RE = re.compile(
+    rf"{_ANGLE_OPEN_RE}\s*/\s*untrusted_log_data\s*{_ANGLE_CLOSE_RE}",
+    re.IGNORECASE,
+)
 
 
-def _fence_untrusted(text):
+def _fence_untrusted(text, inline=False):
     """Wrap real telemetry content in an explicit untrusted-data marker.
-    Neutralizes a forged closing tag inside the content itself (case-
-    insensitive) so attacker-controlled text can't escape the fence and
-    make trailing injected text look like it fell outside it."""
-    body = _UNTRUSTED_DATA_CLOSE_RE.sub("(/untrusted_log_data)", str(text))
-    return f"{_UNTRUSTED_DATA_OPEN}\n{body}\n{_UNTRUSTED_DATA_CLOSE}"
+
+    Skips fencing for known-safe sentinels -- the empty-result marker, the
+    fixed auth-failure message, and the overflow message -- rather than
+    real bzrk output, checked by exact content so this never depends on
+    the caller correctly tracking an err flag (round 2 finding 4: err=True
+    does not always mean "no real content", so callers should fence
+    unconditionally and let this function make the actual decision).
+
+    inline=True omits the surrounding newlines, for content embedded
+    inside a single report line rather than standing alone (agent_analytics
+    snippet embedding, issue #11 round 2 finding 1).
+    """
+    stripped = str(text).strip()
+    if (stripped == "(no rows)" or stripped == AUTH_FAILURE_MESSAGE
+            or stripped.startswith("bzrk result exceeded")):
+        return text
+    normalized = unicodedata.normalize("NFKC", str(text))
+    body = _UNTRUSTED_DATA_CLOSE_RE.sub("(/untrusted_log_data)", normalized)
+    sep = "" if inline else "\n"
+    return f"{_UNTRUSTED_DATA_OPEN}{sep}{body}{sep}{_UNTRUSTED_DATA_CLOSE}"
+
+
 _ROLE_PREFIX = {
     "sre": "You are in the SRE lane; focus on reliability, headroom, saturation, error rates, and rollback signals. ",
     "soc": "You are in the SOC lane; focus on anomalies, spikes, first-seen behavior, repeated failures, and incident timelines. ",
@@ -1689,6 +1723,7 @@ agent_analytics.configure(
     redact=lambda text: secret_scan.redact(
         text, include_entropy=True, pii_types=secret_scan.ALL_PII_TYPES,
     )[0],
+    fence=lambda text: _fence_untrusted(text, inline=True),
 )
 ai_finops.configure(
     search=bzrk_search_json,
@@ -2250,7 +2285,7 @@ def _run_saved_entry(match, since_arg):
         if _blocking_validation(report):
             return prefix + _format_validation_rejection(report), True
     out, err = bzrk_search_json(match["kql"], since)
-    return prefix + (_fence_untrusted(out) if not err else out), err
+    return prefix + _fence_untrusted(out), err
 
 
 def _handle_call_uncached(name, arguments):
@@ -2534,21 +2569,25 @@ def _handle_call_uncached(name, arguments):
         since = arguments.get("since") or "7d ago"
         out, err = bzrk_search_json(q_forecast_capacity(metric, host or None), since)
         if err:
-            return out, True
+            return _fence_untrusted(out), True
         if not out or out.strip() == "(no rows)":
             return f"No {metric} data found for forecast window {since}.", False
         fits = _forecast_fit_rows(out)
         if fits:
             lines = []
             for fit in fits:
+                # host=tostring(resource['host.name']) is a real string
+                # field, not numeric fit data -- attacker-influenceable via
+                # container/host naming (round 2 finding 3).
+                fenced_host = _fence_untrusted(fit["host"], inline=True)
                 if fit["r2"] < 0.6 or fit["slope"] <= 0:
                     lines.append(
-                        f"{fit['host']}: no reliable trend — not forecastable "
+                        f"{fenced_host}: no reliable trend — not forecastable "
                         f"(R²={fit['r2']:.3f}, slope={fit['slope']:.3g})."
                     )
                 else:
                     lines.append(
-                        f"{fit['host']}: reliable upward trend "
+                        f"{fenced_host}: reliable upward trend "
                         f"(R²={fit['r2']:.3f}, slope={fit['slope']:.3g}); "
                         "native fit array returned, but no ceiling/date is inferred."
                     )
@@ -2558,7 +2597,7 @@ def _handle_call_uncached(name, arguments):
         return (
             f"Capacity trend for {metric} (window {since}). Native fit arrays include "
             "R² and slope; unable to parse coefficients from this renderer, so no "
-            "forecast date is inferred:\n" + out
+            "forecast date is inferred:\n" + _fence_untrusted(out)
         ), False
 
     if name == "find_similar":
@@ -2585,7 +2624,7 @@ def _handle_call_uncached(name, arguments):
                     "falling back is not possible for meaning-based search; use "
                     "search with has '<term>' for exact terms.", False
                 )
-            return out, True
+            return _fence_untrusted(out), True
         if "_score" in out and not _find_similar_has_real_score(out):
             return (
                 "Semantic indexing is not enabled on this Berserk cluster — falling "
@@ -2605,16 +2644,19 @@ def _handle_call_uncached(name, arguments):
         # Fencing (issue #11) is independent of ENVELOPE_ENABLED -- an
         # operator disabling the envelope for byte-identical prior output
         # must not also silently disable untrusted-data marking on the
-        # body-bearing subset.
-        if ENVELOPE_ENABLED:
-            if err and out.startswith("bzrk result exceeded"):
-                out = (
-                    f"Result exceeded BERSERK_MCP_MAX_RESULT_BYTES={MAX_BZRK_RESULT_BYTES}."
-                    f" This tool's query is fixed — narrow the window, e.g. since='15m ago'."
-                )
-            elif not err:
-                out = _envelope(name, since, out, fence_body=(name in _SIMPLE_JSON_TOOLS))
-        elif not err and name in _SIMPLE_JSON_TOOLS:
+        # body-bearing subset. Also applies on the error path (round 2
+        # finding 4): the overflow rewrite below replaces `out` with a
+        # clean server message, safe as-is, but any other error diagnostic
+        # can still embed partial real rows (run_bzrk concatenates raw
+        # stdout with stderr on a failed query) and must be fenced too.
+        if err and out.startswith("bzrk result exceeded"):
+            out = (
+                f"Result exceeded BERSERK_MCP_MAX_RESULT_BYTES={MAX_BZRK_RESULT_BYTES}."
+                f" This tool's query is fixed — narrow the window, e.g. since='15m ago'."
+            )
+        elif ENVELOPE_ENABLED and not err:
+            out = _envelope(name, since, out, fence_body=(name in _SIMPLE_JSON_TOOLS))
+        elif name in _SIMPLE_JSON_TOOLS:
             out = _fence_untrusted(out)
         return out, err
 
@@ -2672,7 +2714,7 @@ def _handle_call_uncached(name, arguments):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "1h ago"
         out, err = bzrk_search_json(q_logs(str(svc)), since)
-        return (_fence_untrusted(out) if not err else out), err
+        return _fence_untrusted(out), err
     if name == "sre_service_health":
         svc = arguments.get("service")
         if not svc:
@@ -2689,7 +2731,7 @@ def _handle_call_uncached(name, arguments):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "6h ago"
         out, err = bzrk_search_json(q_soc_timeline(str(svc)), since)
-        return (_fence_untrusted(out) if not err else out), err
+        return _fence_untrusted(out), err
     if name == "trace_analyze":
         trace_id = arguments.get("trace_id")
         if not trace_id:
@@ -2706,8 +2748,9 @@ def _handle_call_uncached(name, arguments):
         out2, e2 = bzrk_search_json(q_trace_logs(str(trace_id)), "30d ago")
         # Only the correlated-logs half carries real body content -- the
         # span tree is structural (trace/span ids, durations), never fenced.
-        if not e2:
-            out2 = _fence_untrusted(out2)
+        # Fenced regardless of e2 (round 2 finding 4): a failed log query
+        # can still return partial real rows mixed into the diagnostic.
+        out2 = _fence_untrusted(out2)
         return f"== spans ==\n{out1}\n\n== correlated logs ==\n{out2}", (e1 and e2)
     if name == "search":
         kql = arguments.get("kql")
@@ -2730,7 +2773,7 @@ def _handle_call_uncached(name, arguments):
         # user KQL always gets full-fidelity output.
         out, err = bzrk_search_json(str(kql), since)
         if err:
-            return out, err
+            return _fence_untrusted(out), err
         out = _fence_untrusted(out)
         if warning:
             return warning + "\n\n" + out, False
@@ -2745,7 +2788,7 @@ def _handle_call_uncached(name, arguments):
             return "term may not contain quotes, pipe, backslash, or backtick", True
         since = arguments.get("since") or "6h ago"
         out, err = bzrk_search_json(q_cc_search(str(term)), since)
-        return (_fence_untrusted(out) if not err else out), err
+        return _fence_untrusted(out), err
     if name == "claude_loop_check":
         since = arguments.get("since") or "6h ago"
         if not valid_since(since):
