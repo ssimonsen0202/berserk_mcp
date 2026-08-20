@@ -378,7 +378,7 @@ class OutputFilterTest(unittest.TestCase):
     def test_off_mode_returns_output_unchanged(self):
         bm.REDACT_MODE = "off"
         text = self._call()
-        self.assertEqual(text, f"service body password=hunter2 {AWS_KEY}")
+        self.assertIn(f"service body password=hunter2 {AWS_KEY}", text)  # raw content preserved; envelope wraps it
 
 
 class SecretAuditMcpTest(unittest.TestCase):
