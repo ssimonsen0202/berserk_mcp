@@ -439,12 +439,16 @@ def _sanitize_log_line(s):
     return _HTTP_LOG_CTRL_RE.sub(lambda m: f"\\x{ord(m.group()):02x}", s)
 
 
-# Matches the exact overflow sentinel produced by run_bzrk (line ~1106).
-# Using a precise regex rather than startswith("bzrk result exceeded") means
-# an attacker-controlled host/service name that begins with those words is
-# NOT treated as a safe sentinel and is still fenced.
+# Matches the exact overflow sentinel produced by run_bzrk (line ~1141) --
+# the full fixed message, not a prefix. Using a precise, fully-anchored
+# regex rather than startswith("bzrk result exceeded") or a wildcard tail
+# means an attacker-controlled value that merely begins with (or appends
+# after) that text is NOT treated as a safe sentinel and is still fenced --
+# round-3 review found a wildcard tail (`.*$`) let arbitrary attacker text
+# ride along after the real message and still pass as "safe".
 _OVERFLOW_SENTINEL_RE = re.compile(
-    r"bzrk result exceeded BERSERK_MCP_MAX_RESULT_BYTES=\d+; narrow the time window.*$", re.DOTALL
+    r"bzrk result exceeded BERSERK_MCP_MAX_RESULT_BYTES=\d+; narrow the time window, "
+    r"project fewer columns, or add a smaller take/top/tail bound\."
 )
 
 _ANGLE_OPEN_RE = r"(?:<|&lt;?|&#0*60;?|&#x0*3c;?|&amp;lt;?|&amp;#0*60;?|&amp;#x0*3c;?)"
@@ -2753,8 +2757,14 @@ def _handle_call_uncached(name, arguments):
         out1, e1 = bzrk_search(q_discover_fieldstats(svc_str), since)
         out2, e2 = bzrk_search(q_discover_sample(svc_str), since)
         # Fence output if either query failed (may contain partial telemetry)
-        fenced1 = _fence_untrusted(out1) if e1 else out1
-        fenced2 = _fence_untrusted(out2) if e2 else out2
+        # Fence both unconditionally, not gated on that half's own error
+        # flag -- round-3 review found gating on e1/e2 individually left the
+        # OTHER half unfenced whenever only one of the two calls failed
+        # (round 2 finding 4's same lesson: err doesn't reliably indicate
+        # "no real content", so let _fence_untrusted's own content check
+        # decide, on every path, every time).
+        fenced1 = _fence_untrusted(out1)
+        fenced2 = _fence_untrusted(out2)
         return f"== resource fieldstats ==\n{fenced1}\n\n== sample rows ==\n{fenced2}", (e1 and e2)
     if name == "logs_for_service":
         svc = arguments.get("service")

@@ -5465,10 +5465,15 @@ class UntrustedDataFencingRound3FindingsTest(unittest.TestCase):
     def test_real_overflow_sentinel_still_not_fenced(self):
         # The real overflow message must still pass -- it contains
         # "BERSERK_MCP_MAX_RESULT_BYTES=<digits>" which the attacker can't
-        # spoof without knowing the exact configured limit.
+        # spoof without knowing the exact configured limit. This must be
+        # the COMPLETE real message run_bzrk actually produces (:1141), not
+        # a truncated approximation -- round-3 review found a truncated
+        # version here masked a wildcard-tail regex bug that let arbitrary
+        # attacker text ride along after the true message and still pass.
         overflow = (
             f"bzrk result exceeded BERSERK_MCP_MAX_RESULT_BYTES="
-            f"{bm.MAX_BZRK_RESULT_BYTES}; narrow the time window."
+            f"{bm.MAX_BZRK_RESULT_BYTES}; narrow the time window, project fewer "
+            "columns, or add a smaller take/top/tail bound."
         )
         result = bm._fence_untrusted(overflow, inline=True)
         self.assertNotIn(bm._UNTRUSTED_DATA_OPEN, result)
