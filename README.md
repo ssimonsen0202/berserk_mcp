@@ -1564,11 +1564,12 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 berserk-mcp's own controls against a *confident false negative* — an agent
 reporting a clean bill of health because a query silently matched zero rows,
 went stale, or was fixed by a query the tool refused to run — consolidated
-under one name. Every competitor's stated hallucination defense (rate
-limiting, query timeouts, read-only execution) protects backend stability;
-none of it addresses this failure mode, which is the one that actually pages
-someone at 4am. Each control below is scattered through the sections above;
-this list exists so it can be reviewed, tested, and cited as one thing.
+under one name. Most open-source observability MCP implementations' stated
+hallucination defenses (rate limiting, query timeouts, read-only execution)
+protect backend stability; few address this query-result failure mode, which
+is the one that actually pages someone at 4am. Each control below is scattered
+through the sections above; this list exists so it can be reviewed, tested,
+and cited as one thing.
 
 - **Field-access guidance.** Berserk's fields are nested resource/log
   attributes, not flat columns. A bare column name like `service_name` is
@@ -1585,7 +1586,9 @@ this list exists so it can be reviewed, tested, and cited as one thing.
   returning an empty or unrelated result that looks like a real answer. See
   `## Security`'s "Schema-grounded KQL validation" above;
   `WrongAnswerContainmentTest.test_validate_kql_rejects_wrong_table_prefix`
-  is the containment-framed regression test.
+  is the containment-framed regression test. This validation can be disabled
+  via `BERSERK_MCP_KQL_VALIDATION=off` (not recommended — an escape hatch for
+  debugging only).
 - **Schema-drift warning on saved queries.** A saved query is revalidated
   against the *current* schema every time it runs. If the schema has
   changed since the query was saved, the response is prefixed with an
@@ -1594,20 +1597,28 @@ this list exists so it can be reviewed, tested, and cited as one thing.
   `WrongAnswerContainmentTest.test_schema_drift_warning_fires_when_stored_hash_differs`
   proves the warning fires on drift; the companion
   `test_schema_drift_warning_silent_when_hashes_match` proves it stays
-  silent otherwise, so it doesn't become noise nobody reads.
+  silent otherwise, so it doesn't become noise nobody reads. **Known limitation:**
+  Schema snapshots are cached for up to one hour (`BERSERK_MCP_SCHEMA_CACHE_TTL_SECONDS`,
+  default 3600); if the current schema hash lookup fails or is missing,
+  the warning does not fire (fail-open behavior). This affects queries saved
+  before the schema-hash feature existed, or when the schema validation
+  backend is temporarily unavailable.
 - **The result envelope disambiguates the bare `(no rows)` sentinel.** An
   empty result used to be indistinguishable between healthy, wrong window,
-  wrong tool, and a source that stopped reporting. Every fixed-query tool
-  now echoes its resolved window and, on empty results, a concrete
-  per-tool next step naming a real tool or argument. See "Result envelope"
-  in `## Tools` and `ResultEnvelopeTest` for full coverage.
+  wrong tool, and a source that stopped reporting. Fixed-query tools dispatched
+  through the `SIMPLE` path (e.g., `list_hosts`, `errors_by_service`) now echo
+  their resolved window and, on empty results, a concrete per-tool next step
+  naming a real tool or argument. Tools outside this path (e.g., `logs_for_service`,
+  `search`) and environments with `BERSERK_MCP_ENVELOPE=0` return results
+  unenveloped. See "Result envelope" in `## Tools` and `ResultEnvelopeTest` for full coverage.
 - **Returned telemetry is fenced as untrusted data.** Not a containment
   control in the same sense as the others — it defends against an agent
   *acting on an instruction smuggled into a log line*, not against a query
   silently returning the wrong thing — but it belongs in the same "can we
   trust what came back" conversation. Real telemetry rows are wrapped in an
   explicit `<untrusted_log_data>` marker before reaching the model, with a
-  matching instruction to treat the content strictly as data.
+  matching instruction to treat the content strictly as data. This fencing
+  is implemented as issue #11 (see PR #26).
 
 ## Testing
 

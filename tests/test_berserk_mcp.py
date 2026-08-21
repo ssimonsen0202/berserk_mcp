@@ -5062,10 +5062,14 @@ class WrongAnswerContainmentTest(unittest.TestCase):
 
     def test_base_instructions_warn_about_bare_column_names(self):
         self.assertIn("silently matches zero rows", bm._BASE_INSTRUCTIONS)
+        # Verify the remediation (discover_schema) is mentioned, not just the warning
+        self.assertIn("discover_schema", bm._BASE_INSTRUCTIONS.lower())
 
     def test_search_tool_description_repeats_the_same_warning(self):
         search_tool = next(t for t in bm.TOOLS if t["name"] == "search")
         self.assertIn("silently match zero rows", search_tool["description"])
+        # Verify discovery guidance is present
+        self.assertIn("discover", search_tool["description"].lower())
 
     # ---- control 3: KQL validation rejects blockers before execution ----
 
@@ -5103,16 +5107,93 @@ class WrongAnswerContainmentTest(unittest.TestCase):
         self.assertNotEqual(result.strip(), "(no rows)")
         self.assertIn("1h ago", result)
 
-    # ---- documentation: every listed control is actually named ----
+    # ---- control 2b: schema-hash lookup failure behavior ----
+    # The happy-path test above (test_schema_drift_warning_fires_when_stored_hash_differs)
+    # stubs a successful lookup. This test characterizes what *actually* happens when the
+    # lookup fails or the hash is missing — it currently fails silent (no warning),
+    # which is a known limitation documented in the README but worth testing.
+
+    def test_schema_drift_missing_stored_hash_fails_silent(self):
+        # If the stored hash is missing (e.g., old saved query), the warning doesn't fire.
+        # This is expected but worth documenting as a gap -- old queries won't trigger
+        # drift warnings until they're re-saved.
+        orig_validate = bm._validate_user_kql
+        bm._validate_user_kql = lambda kql, since, **kw: {
+            "schema": {"schema_hash": "current_hash_xyz"}
+        }
+        orig_run_bzrk = bm.run_bzrk
+        bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: ("(no rows)", False)
+        try:
+            bm.persist_learned_query(
+                {"name": "no_stored_hash", "description": "d", "kql": "default | take 1"},
+                action_source="manual",
+            )
+            text, err = bm.handle_call("run_saved", {"name": "no_stored_hash"})
+            self.assertFalse(err)
+            self.assertNotIn("Schema drift warning", text)
+        finally:
+            bm._validate_user_kql = orig_validate
+            bm.run_bzrk = orig_run_bzrk
+
+    def test_schema_drift_missing_current_hash_fails_silent(self):
+        # If the current-hash lookup fails or returns missing (e.g., schema validation
+        # unavailable), the warning doesn't fire. This is a fail-open behavior documented
+        # as a known limitation.
+        orig_validate = bm._validate_user_kql
+        bm._validate_user_kql = lambda kql, since, **kw: {
+            "schema": {}  # schema present but no schema_hash field
+        }
+        orig_run_bzrk = bm.run_bzrk
+        bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: ("(no rows)", False)
+        try:
+            bm.persist_learned_query(
+                {"name": "missing_current", "description": "d", "kql": "default | take 1",
+                 "schema_hash": "stored_hash_abc"},
+                action_source="manual",
+            )
+            text, err = bm.handle_call("run_saved", {"name": "missing_current"})
+            self.assertFalse(err)
+            # No warning because current_hash is missing, even though stored_hash exists
+            self.assertNotIn("Schema drift warning", text)
+        finally:
+            bm._validate_user_kql = orig_validate
+            bm.run_bzrk = orig_run_bzrk
+
+    # ---- control 4b: envelope scope limitation test ----
+    # The envelope is applied only to tools in SIMPLE, not all tools. This test
+    # demonstrates that a non-SIMPLE tool (logs_for_service) returns bare (no rows)
+    # without the envelope's window/next-step guidance, documenting the scope gap.
+
+    def test_non_simple_tool_empty_result_unenveloped(self):
+        # logs_for_service is not in SIMPLE; it returns raw bzrk_search_json output
+        # without envelope processing, even when empty.
+        orig_bzrk_search_json = bm.bzrk_search_json
+        bm.bzrk_search_json = lambda kql, since: ("(no rows)", False)
+        try:
+            text, err = bm.handle_call("logs_for_service", {"service": "nginx"})
+            self.assertFalse(err)
+            # Bare (no rows) with no window or guidance, unlike SIMPLE tools with envelope
+            self.assertEqual(text, "(no rows)")
+        finally:
+            bm.bzrk_search_json = orig_bzrk_search_json
+
+    # ---- documentation: every listed control is actually named, with accurate scoping ----
 
     def test_readme_names_wrong_answer_containment_section(self):
         readme = Path(__file__).resolve().parent.parent / "README.md"
         text = readme.read_text(encoding="utf-8")
         self.assertIn("Wrong-answer containment", text)
+        # Check for all controls
         for control in (
             "schema", "bare column", "envelope", "validation",
         ):
             self.assertIn(control, text.lower())
+        # Check that enveloping is scoped correctly (not "every" tool but specific path)
+        self.assertIn("fixed-query tool", text.lower())
+        # Check that schema-hash behavior documents caching/fail-open with "Known limitation"
+        self.assertIn("Known limitation", text)
+        # Check that untrusted_log_data is hedged with reference to PR #26
+        self.assertIn("PR #26", text)
 
 
 if __name__ == "__main__":
