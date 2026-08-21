@@ -1571,9 +1571,13 @@ is the one that actually pages someone at 4am. Each control below is scattered
 through the sections above; this list exists so it can be reviewed, tested,
 and cited as one thing.
 
-- **Field-access guidance.** Berserk's fields are nested resource/log
-  attributes, not flat columns. A bare column name like `service_name` is
-  not a KQL error — it silently matches zero rows. `_BASE_INSTRUCTIONS` and
+- **Field-access guidance.** OTLP resource/log attributes such as service
+  and host names — the fields models most often guess wrong — live nested
+  under `resource[...]`/`attributes[...]`, not as flat columns; a small
+  handful of genuinely top-level fields (`metric_name`, `value`, `body`,
+  `severity_text`, `timestamp`, `trace_id`) are the exception. A bare column
+  name like `service_name` is not a KQL error — it silently matches zero
+  rows. `_BASE_INSTRUCTIONS` and
   the `search` tool description both warn about this explicitly and point
   at `discover_schema` before guessing again. Prompt-level, not code-
   enforced — the query engine's own behavior can't be changed from here —
@@ -1597,14 +1601,16 @@ and cited as one thing.
   `WrongAnswerContainmentTest.test_schema_drift_warning_fires_when_stored_hash_differs`
   proves the warning fires on drift; the companion
   `test_schema_drift_warning_silent_when_hashes_match` proves it stays
-  silent otherwise, so it doesn't become noise nobody reads. **Known limitation:**
+  silent otherwise, so it doesn't become noise nobody reads. **Known limitations:**
   Schema snapshots are cached for up to one hour (`DEFAULT_TTL_SECONDS` in
-  `schema_registry.py`; not currently exposed as an environment variable);
-  if the current-schema hash lookup fails or the backend is temporarily
-  unavailable, the snapshot falls back to a stale or "unavailable" cached
-  copy rather than raising, so the drift warning can silently fail to fire
-  (fail-open behavior). This affects queries saved before the schema-hash
-  feature existed, or when the schema validation backend is degraded.
+  `schema_registry.py`; not currently exposed as an environment variable).
+  When the schema backend is unavailable and there is no cache to fall back
+  to, the current-hash lookup still succeeds — it returns a hash of an
+  *empty* schema rather than failing — so a saved query with a real stored
+  hash will trigger a drift warning even though nothing about the query
+  itself changed (a false positive, not a silent skip). The warning is
+  silently skipped only when the *saved query* has no stored hash at all
+  (queries saved before this feature existed).
 - **The result envelope disambiguates the bare `(no rows)` sentinel.** An
   empty result used to be indistinguishable between healthy, wrong window,
   wrong tool, and a source that stopped reporting. Fixed-query tools dispatched

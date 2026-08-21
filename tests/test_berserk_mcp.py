@@ -19,6 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import berserk_mcp as bm  # noqa: E402
+import schema_registry  # noqa: E402
 
 
 SHIPPED_QUERY_GUARDRAIL_CODES = {
@@ -4991,7 +4992,18 @@ class WrongAnswerContainmentTest(unittest.TestCase):
     """Issue #12: Berserk already has real answer-level defenses against a
     confident false negative -- they were scattered and unnamed. This class
     is the "named failing-without-it test" the issue's acceptance criterion
-    requires for each control, consolidated under one name."""
+    requires for each control, consolidated under one name.
+
+    Known gap (flagged in review, deliberately not closed here): these are
+    unit tests proving each control's mechanism fires -- not model-facing
+    evals proving an agent actually stops treating an empty/rejected/stale
+    result as a healthy answer. That needs real eval-harness cases (see
+    evals/router_cases.jsonl's format) exercising an actual model turn, which
+    is a meaningfully different and larger piece of work than this docs+test
+    issue scoped. Tracked as issue #31, not invented here to avoid scope
+    creep into an eval-suite design decision this PR shouldn't make
+    unilaterally.
+    """
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -5085,6 +5097,25 @@ class WrongAnswerContainmentTest(unittest.TestCase):
         )
         self.assertTrue(bm._blocking_validation(report))
 
+    def test_search_dispatch_blocks_source_introducing_operator_before_execution(self):
+        # The unit-level test above only proves validate_kql_static() flags
+        # the query; it doesn't prove the *dispatch path* actually stops
+        # before reaching bzrk. A prior review found the wrong-table case
+        # used here would also be rejected independently by bzrk_search's
+        # own prefix guard, so it didn't prove static validation specifically
+        # was in the loop. `union` is a source-introducing operator with no
+        # separate prefix-guard rejection, so this isolates KQL validation
+        # as the thing doing the blocking.
+        orig_run_bzrk = bm.run_bzrk
+        called = []
+        bm.run_bzrk = lambda *a, **kw: called.append((a, kw)) or ("should not run", False)
+        try:
+            text, err = bm.handle_call("search", {"kql": f"{bm.TABLE} | union {bm.TABLE} | take 1"})
+            self.assertTrue(err)
+            self.assertEqual(called, [], "run_bzrk must not be called for a blocked query")
+        finally:
+            bm.run_bzrk = orig_run_bzrk
+
     def test_validate_kql_static_does_not_block_a_normal_query(self):
         # Negative control: the containment controls must not be so eager
         # they reject legitimate queries -- that trades one failure mode
@@ -5137,26 +5168,35 @@ class WrongAnswerContainmentTest(unittest.TestCase):
             bm._validate_user_kql = orig_validate
             bm.run_bzrk = orig_run_bzrk
 
-    def test_schema_drift_missing_current_hash_fails_silent(self):
-        # If the current-hash lookup fails or returns missing (e.g., schema validation
-        # unavailable), the warning doesn't fire. This is a fail-open behavior documented
-        # as a known limitation.
+    def test_schema_drift_backend_unavailable_produces_false_positive_warning(self):
+        # When the schema backend is unavailable and there's no cache,
+        # schema_registry.get_schema_snapshot() still returns a snapshot
+        # with a real (non-missing) hash -- the hash of an *empty* schema --
+        # rather than raising or omitting the field. So an unavailable
+        # backend does NOT silently skip the drift warning; it produces a
+        # false-positive warning against any saved query with a real
+        # stored hash. This is the actual observed behavior (confirmed by
+        # calling schema_registry directly below), which is the opposite of
+        # "fails silently" -- see the README's "Known limitations".
+        empty_schema_hash = schema_registry.get_schema_snapshot(
+            force=True, table=bm.TABLE, config_dir="/tmp/nonexistent_cfg_dir_for_this_test",
+            fetcher=None,
+        )["schema_hash"]
         orig_validate = bm._validate_user_kql
         bm._validate_user_kql = lambda kql, since, **kw: {
-            "schema": {}  # schema present but no schema_hash field
+            "schema": {"schema_hash": empty_schema_hash}
         }
         orig_run_bzrk = bm.run_bzrk
         bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: ("(no rows)", False)
         try:
             bm.persist_learned_query(
-                {"name": "missing_current", "description": "d", "kql": "default | take 1",
-                 "schema_hash": "stored_hash_abc"},
+                {"name": "backend_unavailable_probe", "description": "d", "kql": "default | take 1",
+                 "schema_hash": "stored_hash_from_when_backend_was_healthy"},
                 action_source="manual",
             )
-            text, err = bm.handle_call("run_saved", {"name": "missing_current"})
+            text, err = bm.handle_call("run_saved", {"name": "backend_unavailable_probe"})
             self.assertFalse(err)
-            # No warning because current_hash is missing, even though stored_hash exists
-            self.assertNotIn("Schema drift warning", text)
+            self.assertIn("Schema drift warning", text)
         finally:
             bm._validate_user_kql = orig_validate
             bm.run_bzrk = orig_run_bzrk
