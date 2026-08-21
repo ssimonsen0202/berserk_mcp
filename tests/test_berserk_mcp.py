@@ -5364,6 +5364,75 @@ class UntrustedDataFencingReviewFindingsTest(unittest.TestCase):
         self.assertIn(bm._UNTRUSTED_DATA_OPEN, text)
 
 
+class UntrustedDataFencingP2FindingsTest(unittest.TestCase):
+    """P2 findings from Codex round 3 review of PR #26, all independently
+    verified before writing these tests."""
+
+    def setUp(self):
+        self._orig = bm.run_bzrk
+        self._orig_kql_mode = bm.KQL_VALIDATION_MODE
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_learned = bm.LEARNED_PATH
+        bm.LEARNED_PATH = Path(self._tmp.name) / "learned.json"
+
+    def tearDown(self):
+        bm.run_bzrk = self._orig
+        bm.KQL_VALIDATION_MODE = self._orig_kql_mode
+        bm.LEARNED_PATH = self._orig_learned
+        self._tmp.cleanup()
+
+    def _mock_bzrk(self, out, err=False):
+        bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: (out, err)
+
+    # ---- P2-A1: save_query verification error leaks unfenced partial rows ----
+
+    def test_save_query_error_fences_partial_rows(self):
+        bm.KQL_VALIDATION_MODE = "off"
+        self._mock_bzrk('{"rows":[["MARKER_PARTIAL"]]}\nbackend failed', err=True)
+        result, err = bm.handle_call("save_query", {
+            "name": "probe", "description": "d",
+            "kql": f"{bm.TABLE} | take 1",
+        })
+        self.assertTrue(err)
+        self.assertIn(bm._UNTRUSTED_DATA_OPEN, result)
+        self.assertIn("MARKER_PARTIAL", result)
+
+    # ---- P2-A3: analytics tool error paths leak unfenced partial rows ----
+
+    def test_claude_loop_check_error_fences_partial_rows(self):
+        self._mock_bzrk('{"rows":[["MARKER_LOOP"]]}\nquery failed', err=True)
+        result, err = bm.handle_call("claude_loop_check", {})
+        self.assertTrue(err)
+        self.assertIn(bm._UNTRUSTED_DATA_OPEN, result)
+        self.assertIn("MARKER_LOOP", result)
+
+    def test_claude_workflow_insights_error_fences_partial_rows(self):
+        self._mock_bzrk('{"rows":[["MARKER_WORKFLOW"]]}\nquery failed', err=True)
+        result, err = bm.handle_call("claude_workflow_insights", {})
+        self.assertTrue(err)
+        self.assertIn(bm._UNTRUSTED_DATA_OPEN, result)
+
+    # ---- P2-B: HTTP log_message forwards control chars verbatim ----
+
+    def test_sanitize_log_line_strips_ansi_escape(self):
+        raw = "GET /\x1b[31mPOISONED\x1b[0m HTTP/1.1"
+        sanitized = bm._sanitize_log_line(raw)
+        self.assertNotIn("\x1b", sanitized)
+        self.assertIn("\\x1b", sanitized)
+        self.assertIn("GET /", sanitized)
+
+    def test_sanitize_log_line_strips_other_control_chars(self):
+        raw = "GET /\x00\x08\x0d HTTP/1.1"
+        sanitized = bm._sanitize_log_line(raw)
+        self.assertNotIn("\x00", sanitized)
+        self.assertNotIn("\x08", sanitized)
+        self.assertNotIn("\x0d", sanitized)
+
+    def test_sanitize_log_line_preserves_normal_ascii(self):
+        raw = "GET /healthz HTTP/1.1"
+        self.assertEqual(bm._sanitize_log_line(raw), raw)
+
+
 class UntrustedDataFencingRound3FindingsTest(unittest.TestCase):
     """Codex review of PR #26 round 3 (3 P1s), all independently verified
     before writing these tests."""

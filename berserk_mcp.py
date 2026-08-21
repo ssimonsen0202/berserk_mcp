@@ -429,6 +429,16 @@ _UNTRUSTED_DATA_CLOSE = "</untrusted_log_data>"
 # NFKC normalization (applied to the whole body before this regex runs)
 # separately collapses fullwidth/compatibility Unicode lookalikes down to
 # their ASCII form so this same pattern catches those too.
+# HTTP access log sanitization: replace ASCII control chars with \xNN so that
+# a malicious request-target containing ANSI escape bytes cannot forge terminal
+# appearance or corrupt log-processing output.
+_HTTP_LOG_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _sanitize_log_line(s):
+    return _HTTP_LOG_CTRL_RE.sub(lambda m: f"\\x{ord(m.group()):02x}", s)
+
+
 # Matches the exact overflow sentinel produced by run_bzrk (line ~1106).
 # Using a precise regex rather than startswith("bzrk result exceeded") means
 # an attacker-controlled host/service name that begins with those words is
@@ -471,6 +481,18 @@ def _fence_untrusted(text, inline=False):
     body = _UNTRUSTED_DATA_CLOSE_RE.sub("(/untrusted_log_data)", normalized)
     sep = "" if inline else "\n"
     return f"{_UNTRUSTED_DATA_OPEN}{sep}{body}{sep}{_UNTRUSTED_DATA_CLOSE}"
+
+
+def _wrap_analytics(result):
+    """Fence the text of an analytics error result.
+
+    Analytics functions return raw bzrk_search output on the error path,
+    which can include partial stdout rows interleaved with the error message.
+    SUCCESS output is already fenced via the fence= dependency injection;
+    this covers only the error path.
+    """
+    text, is_err = result
+    return (_fence_untrusted(text) if is_err else text), is_err
 
 
 _ROLE_PREFIX = {
@@ -2360,7 +2382,7 @@ def _handle_call_uncached(name, arguments):
                 return _format_validation_rejection(validation_report), True
         out, is_err = bzrk_search_json(kql, since)
         if is_err:
-            return "NOT saved - the query failed when verified:\n" + out, True
+            return "NOT saved - the query failed when verified:\n" + _fence_untrusted(out), True
         all_items = load_learned()
         is_amendment = any(it["name"] == nm for it in all_items)
         # Require a real JSON boolean true — a string like "false" is truthy
@@ -2555,7 +2577,7 @@ def _handle_call_uncached(name, arguments):
                     "recommendation": "",
                 })
             if err:
-                report["runtime_error"] = out
+                report["runtime_error"] = _fence_untrusted(out)
             return json.dumps(report, indent=2), bool(err)
         return json.dumps(report, indent=2), False
 
@@ -2820,7 +2842,7 @@ def _handle_call_uncached(name, arguments):
                 f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
                 f"'2d ago', or 'now'."
             ), True
-        return agent_analytics.claude_loop_check(since)
+        return _wrap_analytics(agent_analytics.claude_loop_check(since))
     if name == "claude_model_fit":
         since = arguments.get("since") or "6h ago"
         if not valid_since(since):
@@ -2828,7 +2850,7 @@ def _handle_call_uncached(name, arguments):
                 f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
                 f"'2d ago', or 'now'."
             ), True
-        return agent_analytics.claude_model_fit(since)
+        return _wrap_analytics(agent_analytics.claude_model_fit(since))
     if name == "claude_token_burn":
         since = arguments.get("since") or "6h ago"
         if not valid_since(since):
@@ -2836,7 +2858,7 @@ def _handle_call_uncached(name, arguments):
                 f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
                 f"'2d ago', or 'now'."
             ), True
-        return agent_analytics.claude_token_burn(since)
+        return _wrap_analytics(agent_analytics.claude_token_burn(since))
     if name == "claude_cost_report":
         since = arguments.get("since") or "7d ago"
         if not valid_since(since):
@@ -2844,8 +2866,8 @@ def _handle_call_uncached(name, arguments):
                 f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
                 f"'2d ago', or 'now'."
             ), True
-        return agent_analytics.claude_cost_report(
-            since, group_by=arguments.get("group_by") or "day")
+        return _wrap_analytics(agent_analytics.claude_cost_report(
+            since, group_by=arguments.get("group_by") or "day"))
     if name == "claude_session_deep_dive":
         since = arguments.get("since") or "24h ago"
         if not valid_since(since):
@@ -2853,8 +2875,8 @@ def _handle_call_uncached(name, arguments):
                 f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
                 f"'2d ago', or 'now'."
             ), True
-        return agent_analytics.claude_session_deep_dive(
-            str(arguments.get("session_id") or ""), since)
+        return _wrap_analytics(agent_analytics.claude_session_deep_dive(
+            str(arguments.get("session_id") or ""), since))
     if name == "claude_workflow_insights":
         since = arguments.get("since") or "7d ago"
         if not valid_since(since):
@@ -2862,7 +2884,7 @@ def _handle_call_uncached(name, arguments):
                 f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
                 f"'2d ago', or 'now'."
             ), True
-        return agent_analytics.claude_workflow_insights(since)
+        return _wrap_analytics(agent_analytics.claude_workflow_insights(since))
     if name in {
         "claude_spend_overview", "claude_feature_cost", "claude_project_economics",
         "claude_efficiency_insights", "claude_harness_recommendations",
@@ -3986,7 +4008,7 @@ def _make_http_handler(config):
         sys_version = ""
 
         def log_message(self, fmt, *args):
-            log("http: " + fmt % args)
+            log("http: " + _sanitize_log_line(fmt % args))
 
         def do_GET(self):
             if self.path != "/healthz":

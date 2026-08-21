@@ -539,11 +539,14 @@ class AgentAnalyticsMcpTest(unittest.TestCase):
         self.assertIn("likely-looping", buf.getvalue())
         self.assertIn("Claude Code token burn", buf.getvalue())
 
-    def test_token_burn_propagates_query_errors(self):
+    def test_token_burn_fences_query_errors(self):
+        # Analytics error paths now fence their output (P2-A, round 3):
+        # raw bzrk error text can include partial rows.
         bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: ("query failed", True)
         text, err = bm.handle_call("claude_token_burn", {})
         self.assertTrue(err)
-        self.assertEqual(text, "query failed")
+        self.assertIn(bm._UNTRUSTED_DATA_OPEN, text)
+        self.assertIn("query failed", text)
 
 
 class _RewiredAnalytics(unittest.TestCase):
