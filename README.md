@@ -1597,7 +1597,9 @@ and cited as one thing.
   via `BERSERK_MCP_KQL_VALIDATION=off` (not recommended — an escape hatch for
   debugging only).
 - **Schema-drift warning on saved queries.** A saved query is revalidated
-  against the *current* schema every time it runs. If the schema has
+  against the *current* schema every time it runs (unless `BERSERK_MCP_KQL_VALIDATION=off`,
+  the same escape hatch as above, which skips this check and the hash
+  comparison entirely). If the schema has
   changed since the query was saved, the response is prefixed with an
   explicit warning naming both hashes, rather than silently returning
   whatever the (possibly now-wrong) query still happens to match.

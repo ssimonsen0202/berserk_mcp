@@ -5083,6 +5083,13 @@ class WrongAnswerContainmentTest(unittest.TestCase):
         # generic word "discover" (which "discovery"/"discovering" would
         # also match without actually naming the tool to call).
         self.assertIn("discover_schema", search_tool["description"])
+        # A prior review round changed the wording *only* in this top-level
+        # description and missed the nested kql-argument description,
+        # leaving a contradiction ("never a bare column name") undetected
+        # because no test looked at this second surface. Cover both.
+        kql_arg_desc = search_tool["inputSchema"]["properties"]["kql"]["description"]
+        self.assertIn("discover_schema", kql_arg_desc)
+        self.assertNotIn("never a bare column name", kql_arg_desc)
 
     # ---- control 3: KQL validation rejects blockers before execution ----
 
@@ -5185,24 +5192,40 @@ class WrongAnswerContainmentTest(unittest.TestCase):
         # tables"/"getschema" query text _schema_fetcher actually sends),
         # leaving the query's own execution call to succeed normally, so it
         # isolates the schema-fetch failure from the query result.
+        # All four of _schema_fetcher's calls fail (not just two), using the
+        # real production auth-failure message. Only the saved query's own
+        # execution call ("default | take 1" in its argv) succeeds, which
+        # isolates the schema-fetch failure from the query result and
+        # doesn't depend on knowing all four calls' exact query text.
+        SAVED_QUERY_KQL = "default | take 1"
         orig_run_bzrk = bm.run_bzrk
 
         def failing_schema_fetch(args, timeout=bm.DEFAULT_TIMEOUT):
             joined = " ".join(str(a) for a in args)
-            if ".show tables" in joined or "getschema" in joined:
-                return "bzrk: authentication failed", True
-            return "(no rows)", False
+            if SAVED_QUERY_KQL in joined:
+                return "(no rows)", False
+            return bm.AUTH_FAILURE_MESSAGE, True
 
         bm.run_bzrk = failing_schema_fetch
         try:
             bm.persist_learned_query(
-                {"name": "backend_unavailable_probe", "description": "d", "kql": "default | take 1",
+                {"name": "backend_unavailable_probe", "description": "d", "kql": SAVED_QUERY_KQL,
                  "schema_hash": "stored_hash_from_when_backend_was_healthy"},
                 action_source="manual",
             )
+            # Lock the actual mechanism, not just the final warning text:
+            # the snapshot backing this run is genuinely marked "fresh"
+            # (not "unavailable") despite every fetch call failing, and the
+            # warning's current= hash is exactly that snapshot's hash. If
+            # issue #32 is fixed (fetcher raises instead of swallowing the
+            # error), schema_status would become "unavailable"/"stale" and
+            # this assertion would correctly start failing.
+            snapshot = bm._schema_snapshot(force=True, allow_refresh=True)
+            self.assertEqual(snapshot["source_status"], "fresh")
             text, err = bm.handle_call("run_saved", {"name": "backend_unavailable_probe"})
             self.assertFalse(err)
             self.assertIn("Schema drift warning", text)
+            self.assertIn(f"current={snapshot['schema_hash']}", text)
         finally:
             bm.run_bzrk = orig_run_bzrk
 
