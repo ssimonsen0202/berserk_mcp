@@ -19,7 +19,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import berserk_mcp as bm  # noqa: E402
-import schema_registry  # noqa: E402
 
 
 SHIPPED_QUERY_GUARDRAIL_CODES = {
@@ -5169,25 +5168,32 @@ class WrongAnswerContainmentTest(unittest.TestCase):
             bm.run_bzrk = orig_run_bzrk
 
     def test_schema_drift_backend_unavailable_produces_false_positive_warning(self):
-        # When the schema backend is unavailable and there's no cache,
-        # schema_registry.get_schema_snapshot() still returns a snapshot
-        # with a real (non-missing) hash -- the hash of an *empty* schema --
-        # rather than raising or omitting the field. So an unavailable
-        # backend does NOT silently skip the drift warning; it produces a
-        # false-positive warning against any saved query with a real
-        # stored hash. This is the actual observed behavior (confirmed by
-        # calling schema_registry directly below), which is the opposite of
-        # "fails silently" -- see the README's "Known limitations".
-        empty_schema_hash = schema_registry.get_schema_snapshot(
-            force=True, table=bm.TABLE, config_dir="/tmp/nonexistent_cfg_dir_for_this_test",
-            fetcher=None,
-        )["schema_hash"]
-        orig_validate = bm._validate_user_kql
-        bm._validate_user_kql = lambda kql, since, **kw: {
-            "schema": {"schema_hash": empty_schema_hash}
-        }
+        # Exercises the REAL production path (a prior version of this test
+        # stubbed _validate_user_kql directly, which skipped _schema_fetcher
+        # entirely and didn't match what actually happens -- caught in
+        # review). _schema_fetcher (:1271) calls run_bzrk() for its four
+        # schema-discovery queries and ignores the returned error flag, so a
+        # genuine backend failure (auth error, timeout, etc.) doesn't raise
+        # and doesn't produce schema_registry's "unavailable" status either
+        # -- get_schema_snapshot() has no way to know the fetch failed, so it
+        # normalizes whatever error text came back as if it were real schema
+        # output and marks the result "fresh". The resulting hash is some
+        # value derived from that error text, essentially unpredictable, so
+        # it does not equal any real previously-stored hash -- producing a
+        # false-positive drift warning. This test only stubs run_bzrk for
+        # the schema-discovery calls specifically (matched by the ".show
+        # tables"/"getschema" query text _schema_fetcher actually sends),
+        # leaving the query's own execution call to succeed normally, so it
+        # isolates the schema-fetch failure from the query result.
         orig_run_bzrk = bm.run_bzrk
-        bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: ("(no rows)", False)
+
+        def failing_schema_fetch(args, timeout=bm.DEFAULT_TIMEOUT):
+            joined = " ".join(str(a) for a in args)
+            if ".show tables" in joined or "getschema" in joined:
+                return "bzrk: authentication failed", True
+            return "(no rows)", False
+
+        bm.run_bzrk = failing_schema_fetch
         try:
             bm.persist_learned_query(
                 {"name": "backend_unavailable_probe", "description": "d", "kql": "default | take 1",
@@ -5198,7 +5204,6 @@ class WrongAnswerContainmentTest(unittest.TestCase):
             self.assertFalse(err)
             self.assertIn("Schema drift warning", text)
         finally:
-            bm._validate_user_kql = orig_validate
             bm.run_bzrk = orig_run_bzrk
 
     # ---- control 4b: envelope scope limitation test ----

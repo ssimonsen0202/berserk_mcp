@@ -1573,11 +1573,14 @@ and cited as one thing.
 
 - **Field-access guidance.** OTLP resource/log attributes such as service
   and host names — the fields models most often guess wrong — live nested
-  under `resource[...]`/`attributes[...]`, not as flat columns; a small
-  handful of genuinely top-level fields (`metric_name`, `value`, `body`,
-  `severity_text`, `timestamp`, `trace_id`) are the exception. A bare column
-  name like `service_name` is not a KQL error — it silently matches zero
-  rows. `_BASE_INSTRUCTIONS` and
+  under `resource[...]`/`attributes[...]`, not as flat columns. Some fields
+  genuinely are top-level (log/metric fields like `metric_name`, `value`,
+  `body`, `timestamp`; trace/span fields like `trace_id`, `span_id`,
+  `span_name`, `duration`, `status_code`, and more) — an exhaustive list
+  goes stale as the schema grows, so the guidance doesn't attempt one; use
+  `discover_schema` rather than assuming either way. A bare column name
+  like `service_name` is not a KQL error — it silently matches zero rows.
+  `_BASE_INSTRUCTIONS` and
   the `search` tool description both warn about this explicitly and point
   at `discover_schema` before guessing again. Prompt-level, not code-
   enforced — the query engine's own behavior can't be changed from here —
@@ -1604,13 +1607,15 @@ and cited as one thing.
   silent otherwise, so it doesn't become noise nobody reads. **Known limitations:**
   Schema snapshots are cached for up to one hour (`DEFAULT_TTL_SECONDS` in
   `schema_registry.py`; not currently exposed as an environment variable).
-  When the schema backend is unavailable and there is no cache to fall back
-  to, the current-hash lookup still succeeds — it returns a hash of an
-  *empty* schema rather than failing — so a saved query with a real stored
-  hash will trigger a drift warning even though nothing about the query
-  itself changed (a false positive, not a silent skip). The warning is
-  silently skipped only when the *saved query* has no stored hash at all
-  (queries saved before this feature existed).
+  When the schema backend fails (auth error, timeout, etc.), the fetch does
+  not raise — see tracked bug [#32](https://github.com/ssimonsen0202/berserk_mcp/issues/32)
+  — so `get_schema_snapshot` has no way to know the fetch failed and marks
+  the result "fresh" using a hash derived from whatever error text came
+  back. That hash won't match any real previously-stored hash, so a saved
+  query with a real stored hash will trigger a drift warning even though
+  nothing about the query itself changed (a false positive, not a silent
+  skip). The warning is silently skipped only when the *saved query* has no
+  stored hash at all (queries saved before this feature existed).
 - **The result envelope disambiguates the bare `(no rows)` sentinel.** An
   empty result used to be indistinguishable between healthy, wrong window,
   wrong tool, and a source that stopped reporting. Fixed-query tools dispatched
