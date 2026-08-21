@@ -1598,11 +1598,13 @@ and cited as one thing.
   proves the warning fires on drift; the companion
   `test_schema_drift_warning_silent_when_hashes_match` proves it stays
   silent otherwise, so it doesn't become noise nobody reads. **Known limitation:**
-  Schema snapshots are cached for up to one hour (`BERSERK_MCP_SCHEMA_CACHE_TTL_SECONDS`,
-  default 3600); if the current schema hash lookup fails or is missing,
-  the warning does not fire (fail-open behavior). This affects queries saved
-  before the schema-hash feature existed, or when the schema validation
-  backend is temporarily unavailable.
+  Schema snapshots are cached for up to one hour (`DEFAULT_TTL_SECONDS` in
+  `schema_registry.py`; not currently exposed as an environment variable);
+  if the current-schema hash lookup fails or the backend is temporarily
+  unavailable, the snapshot falls back to a stale or "unavailable" cached
+  copy rather than raising, so the drift warning can silently fail to fire
+  (fail-open behavior). This affects queries saved before the schema-hash
+  feature existed, or when the schema validation backend is degraded.
 - **The result envelope disambiguates the bare `(no rows)` sentinel.** An
   empty result used to be indistinguishable between healthy, wrong window,
   wrong tool, and a source that stopped reporting. Fixed-query tools dispatched
@@ -1610,15 +1612,18 @@ and cited as one thing.
   their resolved window and, on empty results, a concrete per-tool next step
   naming a real tool or argument. Tools outside this path (e.g., `logs_for_service`,
   `search`) and environments with `BERSERK_MCP_ENVELOPE=0` return results
-  unenveloped. See "Result envelope" in `## Tools` and `ResultEnvelopeTest` for full coverage.
+  unenveloped. See `docs/result-envelope-implementation-spec.md` and
+  `ResultEnvelopeTest` for full coverage.
 - **Returned telemetry is fenced as untrusted data.** Not a containment
   control in the same sense as the others — it defends against an agent
   *acting on an instruction smuggled into a log line*, not against a query
   silently returning the wrong thing — but it belongs in the same "can we
   trust what came back" conversation. Real telemetry rows are wrapped in an
   explicit `<untrusted_log_data>` marker before reaching the model, with a
-  matching instruction to treat the content strictly as data. This fencing
-  is implemented as issue #11 (see PR #26).
+  matching instruction to treat the content strictly as data. **This fencing
+  is issue #11 and ships on the separate `feat/untrusted-data-fencing`
+  branch (PR #26), which is not yet merged as of this writing** — the
+  description above is not yet true of `main`.
 
 ## Testing
 

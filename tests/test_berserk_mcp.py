@@ -5068,8 +5068,10 @@ class WrongAnswerContainmentTest(unittest.TestCase):
     def test_search_tool_description_repeats_the_same_warning(self):
         search_tool = next(t for t in bm.TOOLS if t["name"] == "search")
         self.assertIn("silently match zero rows", search_tool["description"])
-        # Verify discovery guidance is present
-        self.assertIn("discover", search_tool["description"].lower())
+        # Verify the specific remediation tool is named, not just the
+        # generic word "discover" (which "discovery"/"discovering" would
+        # also match without actually naming the tool to call).
+        self.assertIn("discover_schema", search_tool["description"])
 
     # ---- control 3: KQL validation rejects blockers before execution ----
 
@@ -5188,12 +5190,22 @@ class WrongAnswerContainmentTest(unittest.TestCase):
             "schema", "bare column", "envelope", "validation",
         ):
             self.assertIn(control, text.lower())
-        # Check that enveloping is scoped correctly (not "every" tool but specific path)
+        # Check that enveloping is scoped correctly (not "every" tool but
+        # specific path) -- the section text must actually name the SIMPLE
+        # dispatch path, not just say "fixed-query tool" in the abstract.
         self.assertIn("fixed-query tool", text.lower())
+        self.assertIn("`SIMPLE`", text)
+        self.assertNotIn("Every fixed-query tool", text)
         # Check that schema-hash behavior documents caching/fail-open with "Known limitation"
         self.assertIn("Known limitation", text)
-        # Check that untrusted_log_data is hedged with reference to PR #26
+        # The TTL is a hardcoded constant, not an environment variable --
+        # the README must not claim a setting that doesn't exist.
+        self.assertNotIn("BERSERK_MCP_SCHEMA_CACHE_TTL_SECONDS", text)
+        self.assertIn("DEFAULT_TTL_SECONDS", text)
+        # Check that untrusted_log_data fencing is clearly hedged as an
+        # unmerged sibling PR, not just mentioned in passing.
         self.assertIn("PR #26", text)
+        self.assertIn("not yet merged", text.lower())
 
 
 if __name__ == "__main__":
