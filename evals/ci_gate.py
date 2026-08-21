@@ -10,12 +10,13 @@ support), and the CI-critical pass/fail decision should not be entangled
 with that. This script only reads run_eval.py's saved JSON results file;
 it never imports or modifies run_eval.py.
 
-Threshold history: 65% set 2026-08-20 against the 41-case suite at that
-time (measured 65.85%). Ratchet up as evals/router_cases.jsonl grows
-more targeted phrasings (issue #13's own Phase 2, tracked as the same
-issue).
+Threshold history: 65% set 2026-08-20 against the router_cases.jsonl
+suite as it stood then (31 cases, mock backend measured 87.1%). Ratchet
+up as evals/router_cases.jsonl grows more targeted phrasings (issue #13's
+own Phase 2, tracked as the same issue).
 """
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -35,6 +36,8 @@ def check_accuracy(results, min_accuracy=MIN_TOOL_ACCURACY):
     accuracy = results.get("tool_accuracy")
     if not isinstance(accuracy, (int, float)) or isinstance(accuracy, bool):
         return False, f"tool_accuracy missing or non-numeric in results: {accuracy!r}"
+    if not math.isfinite(accuracy) or not (0 <= accuracy <= 1):
+        return False, f"tool_accuracy out of the expected [0, 1] fraction range: {accuracy!r}"
     pct = accuracy * 100
     min_pct = min_accuracy * 100
     if accuracy < min_accuracy:
