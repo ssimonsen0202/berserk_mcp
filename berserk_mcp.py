@@ -429,10 +429,22 @@ _UNTRUSTED_DATA_CLOSE = "</untrusted_log_data>"
 # NFKC normalization (applied to the whole body before this regex runs)
 # separately collapses fullwidth/compatibility Unicode lookalikes down to
 # their ASCII form so this same pattern catches those too.
+# Matches the exact overflow sentinel produced by run_bzrk (line ~1106).
+# Using a precise regex rather than startswith("bzrk result exceeded") means
+# an attacker-controlled host/service name that begins with those words is
+# NOT treated as a safe sentinel and is still fenced.
+_OVERFLOW_SENTINEL_RE = re.compile(
+    r"bzrk result exceeded BERSERK_MCP_MAX_RESULT_BYTES=\d+"
+)
+
 _ANGLE_OPEN_RE = r"(?:<|&lt;|&#0*60;|&#x0*3c;)"
 _ANGLE_CLOSE_RE = r"(?:>|&gt;|&#0*62;|&#x0*3e;)"
+# Also match &#47; (decimal) and &#x2f; (hex) entity encodings of "/" so that
+# an attacker-controlled value cannot break out of the fence by encoding the
+# slash in the closing tag differently.
+_SLASH_RE = r"(?:/|&#0*47;|&#x0*2f;)"
 _UNTRUSTED_DATA_CLOSE_RE = re.compile(
-    rf"{_ANGLE_OPEN_RE}\s*/\s*untrusted_log_data\s*{_ANGLE_CLOSE_RE}",
+    rf"{_ANGLE_OPEN_RE}\s*{_SLASH_RE}\s*untrusted_log_data\s*{_ANGLE_CLOSE_RE}",
     re.IGNORECASE,
 )
 
@@ -453,7 +465,7 @@ def _fence_untrusted(text, inline=False):
     """
     stripped = str(text).strip()
     if (stripped == "(no rows)" or stripped == AUTH_FAILURE_MESSAGE
-            or stripped.startswith("bzrk result exceeded")):
+            or bool(_OVERFLOW_SENTINEL_RE.match(stripped))):
         return text
     normalized = unicodedata.normalize("NFKC", str(text))
     body = _UNTRUSTED_DATA_CLOSE_RE.sub("(/untrusted_log_data)", normalized)
@@ -2655,7 +2667,19 @@ def _handle_call_uncached(name, arguments):
                 f" This tool's query is fixed — narrow the window, e.g. since='15m ago'."
             )
         elif ENVELOPE_ENABLED and not err:
-            out = _envelope(name, since, out, fence_body=(name in _SIMPLE_JSON_TOOLS))
+            # fence_body=True for all SIMPLE tools: host names, container
+            # names, service names, and metric names are all attacker-
+            # influenceable even when they're not log body content.
+            out = _envelope(name, since, out, fence_body=True)
+        elif not err:
+            # Success output for all SIMPLE tools is fenced -- same reason.
+            # Error output for non-JSON tools is skipped here because it is
+            # typically a controlled budget/diagnostic message (the budget
+            # timeout check at handle_call line ~3102 requires the text to
+            # start with the tool name, which would fail if fenced).
+            # _SIMPLE_JSON_TOOLS error output is still fenced below because
+            # their error path can carry partial body rows.
+            out = _fence_untrusted(out)
         elif name in _SIMPLE_JSON_TOOLS:
             out = _fence_untrusted(out)
         return out, err
