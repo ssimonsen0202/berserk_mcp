@@ -33,6 +33,10 @@ jobs:
         run: python -m unittest discover -s tests
       - name: Run MCP protocol smoke from checkout
         run: python evals/mcp_protocol_smoke.py --include-http
+      - name: Run router eval CI gate unit tests
+        run: python evals/test_ci_gate.py
+      - name: Router eval CI gate (mock backend, no network/credentials)
+        run: python evals/ci_gate.py
       - name: Build the package
         run: |
           python -m pip install --upgrade pip build
