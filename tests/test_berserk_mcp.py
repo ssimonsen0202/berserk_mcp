@@ -5187,11 +5187,8 @@ class WrongAnswerContainmentTest(unittest.TestCase):
         # output and marks the result "fresh". The resulting hash is some
         # value derived from that error text, essentially unpredictable, so
         # it does not equal any real previously-stored hash -- producing a
-        # false-positive drift warning. This test only stubs run_bzrk for
-        # the schema-discovery calls specifically (matched by the ".show
-        # tables"/"getschema" query text _schema_fetcher actually sends),
-        # leaving the query's own execution call to succeed normally, so it
-        # isolates the schema-fetch failure from the query result.
+        # false-positive drift warning.
+        #
         # All four of _schema_fetcher's calls fail (not just two), using the
         # real production auth-failure message. Only the saved query's own
         # execution call ("default | take 1" in its argv) succeeds, which
