@@ -432,7 +432,7 @@ _UNTRUSTED_DATA_CLOSE = "</untrusted_log_data>"
 # HTTP access log sanitization: replace ASCII control chars with \xNN so that
 # a malicious request-target containing ANSI escape bytes cannot forge terminal
 # appearance or corrupt log-processing output.
-_HTTP_LOG_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_HTTP_LOG_CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def _sanitize_log_line(s):
@@ -444,15 +444,16 @@ def _sanitize_log_line(s):
 # an attacker-controlled host/service name that begins with those words is
 # NOT treated as a safe sentinel and is still fenced.
 _OVERFLOW_SENTINEL_RE = re.compile(
-    r"bzrk result exceeded BERSERK_MCP_MAX_RESULT_BYTES=\d+"
+    r"bzrk result exceeded BERSERK_MCP_MAX_RESULT_BYTES=\d+(?:;[^;]*)?$"
 )
 
-_ANGLE_OPEN_RE = r"(?:<|&lt;|&#0*60;|&#x0*3c;)"
-_ANGLE_CLOSE_RE = r"(?:>|&gt;|&#0*62;|&#x0*3e;)"
+_ANGLE_OPEN_RE = r"(?:<|&lt;?|&#0*60;?|&#x0*3c;?|&amp;lt;?|&amp;#0*60;?|&amp;x0*3c;?)"
+_ANGLE_CLOSE_RE = r"(?:>|&gt;?|&#0*62;?|&#x0*3e;?|&amp;gt;?|&amp;#0*62;?|&amp;x0*3e;?)"
 # Also match &#47; (decimal) and &#x2f; (hex) entity encodings of "/" so that
 # an attacker-controlled value cannot break out of the fence by encoding the
-# slash in the closing tag differently.
-_SLASH_RE = r"(?:/|&#0*47;|&#x0*2f;)"
+# slash in the closing tag differently. Includes semicolonless variants and
+# double-encoded variants (&amp;#47; etc).
+_SLASH_RE = r"(?:/|&#0*47;?|&#x0*2f;?|&amp;#0*47;?|&amp;x0*2f;?)"
 _UNTRUSTED_DATA_CLOSE_RE = re.compile(
     rf"{_ANGLE_OPEN_RE}\s*{_SLASH_RE}\s*untrusted_log_data\s*{_ANGLE_CLOSE_RE}",
     re.IGNORECASE,
@@ -475,7 +476,7 @@ def _fence_untrusted(text, inline=False):
     """
     stripped = str(text).strip()
     if (stripped == "(no rows)" or stripped == AUTH_FAILURE_MESSAGE
-            or bool(_OVERFLOW_SENTINEL_RE.match(stripped))):
+            or bool(_OVERFLOW_SENTINEL_RE.fullmatch(stripped))):
         return text
     normalized = unicodedata.normalize("NFKC", str(text))
     body = _UNTRUSTED_DATA_CLOSE_RE.sub("(/untrusted_log_data)", normalized)
@@ -2588,7 +2589,7 @@ def _handle_call_uncached(name, arguments):
         since = arguments.get("since") or "6h ago"
         out, err = bzrk_search(q_detect_anomalies(service or None), since)
         if err:
-            return out, True
+            return _fence_untrusted(out), True
         if not out or out.strip() == "(no rows)":
             return f"No anomalies detected (window {since}).", False
         return f"Anomaly decomposition for window {since}; non-zero anomaly markers indicate spikes:\n{out}", False
@@ -2710,7 +2711,7 @@ def _handle_call_uncached(name, arguments):
         since = arguments.get("since") or "24h ago"
         out, err = bzrk_search(Q_SOC_NEW_SERVICES, since)
         if err:
-            return out, True
+            return _fence_untrusted(out), True
         baseline = parser_factory.load_json_dict(parser_factory._known_sources_path())
         known = set(baseline.get("services", {}).keys())
         if not known:
@@ -2751,7 +2752,10 @@ def _handle_call_uncached(name, arguments):
         # inventory result while still showing which signal families exist.
         out1, e1 = bzrk_search(q_discover_fieldstats(svc_str), since)
         out2, e2 = bzrk_search(q_discover_sample(svc_str), since)
-        return f"== resource fieldstats ==\n{out1}\n\n== sample rows ==\n{out2}", (e1 and e2)
+        # Fence output if either query failed (may contain partial telemetry)
+        fenced1 = _fence_untrusted(out1) if e1 else out1
+        fenced2 = _fence_untrusted(out2) if e2 else out2
+        return f"== resource fieldstats ==\n{fenced1}\n\n== sample rows ==\n{fenced2}", (e1 and e2)
     if name == "logs_for_service":
         svc = arguments.get("service")
         if not svc:
@@ -2768,7 +2772,8 @@ def _handle_call_uncached(name, arguments):
         if not _valid_interpolated_name(svc):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "1h ago"
-        return bzrk_search(q_sre_service_health(str(svc)), since)
+        out, err = bzrk_search(q_sre_service_health(str(svc)), since)
+        return _fence_untrusted(out), err
     if name == "soc_timeline":
         svc = arguments.get("service")
         if not svc:
