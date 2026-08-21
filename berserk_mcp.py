@@ -444,16 +444,16 @@ def _sanitize_log_line(s):
 # an attacker-controlled host/service name that begins with those words is
 # NOT treated as a safe sentinel and is still fenced.
 _OVERFLOW_SENTINEL_RE = re.compile(
-    r"bzrk result exceeded BERSERK_MCP_MAX_RESULT_BYTES=\d+(?:;[^;]*)?$"
+    r"bzrk result exceeded BERSERK_MCP_MAX_RESULT_BYTES=\d+; narrow the time window.*$", re.DOTALL
 )
 
-_ANGLE_OPEN_RE = r"(?:<|&lt;?|&#0*60;?|&#x0*3c;?|&amp;lt;?|&amp;#0*60;?|&amp;x0*3c;?)"
-_ANGLE_CLOSE_RE = r"(?:>|&gt;?|&#0*62;?|&#x0*3e;?|&amp;gt;?|&amp;#0*62;?|&amp;x0*3e;?)"
+_ANGLE_OPEN_RE = r"(?:<|&lt;?|&#0*60;?|&#x0*3c;?|&amp;lt;?|&amp;#0*60;?|&amp;#x0*3c;?)"
+_ANGLE_CLOSE_RE = r"(?:>|&gt;?|&#0*62;?|&#x0*3e;?|&amp;gt;?|&amp;#0*62;?|&amp;#x0*3e;?)"
 # Also match &#47; (decimal) and &#x2f; (hex) entity encodings of "/" so that
 # an attacker-controlled value cannot break out of the fence by encoding the
 # slash in the closing tag differently. Includes semicolonless variants and
 # double-encoded variants (&amp;#47; etc).
-_SLASH_RE = r"(?:/|&#0*47;?|&#x0*2f;?|&amp;#0*47;?|&amp;x0*2f;?)"
+_SLASH_RE = r"(?:/|&#0*47;?|&#x0*2f;?|&amp;#0*47;?|&amp;#x0*2f;?)"
 _UNTRUSTED_DATA_CLOSE_RE = re.compile(
     rf"{_ANGLE_OPEN_RE}\s*{_SLASH_RE}\s*untrusted_log_data\s*{_ANGLE_CLOSE_RE}",
     re.IGNORECASE,
