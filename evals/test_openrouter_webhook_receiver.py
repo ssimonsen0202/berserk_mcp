@@ -1,10 +1,17 @@
+import json
+import os
+import tempfile
+import threading
 import unittest
+from http.client import HTTPConnection
 
 from openrouter_webhook_receiver import (
+    _make_handler,
     extract_spans,
     is_test_connection,
     verify_signature,
 )
+from http.server import ThreadingHTTPServer
 
 
 def _attr(key, value):
@@ -150,6 +157,68 @@ class VerifySignatureTest(unittest.TestCase):
     def test_header_lookup_is_case_insensitive(self):
         headers = {"x-webhook-signature": "s3cr3t"}
         self.assertTrue(verify_signature(headers, "s3cr3t"))
+
+
+class HandlerIntegrationTest(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.out_path = os.path.join(self.tmpdir, "spans.jsonl")
+        self.raw_path = os.path.join(self.tmpdir, "raw.jsonl")
+        handler = _make_handler(self.out_path, self.raw_path, "correct-secret", threading.Lock())
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.port = self.server.server_port
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def _post(self, headers, body=b""):
+        conn = HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request("POST", "/", body=body, headers=headers)
+        resp = conn.getresponse()
+        status = resp.status
+        resp.read()
+        conn.close()
+        return status
+
+    def test_test_connection_with_no_signature_header_succeeds(self):
+        self.assertEqual(self._post({"X-Test-Connection": "true"}), 200)
+
+    def test_test_connection_with_correct_signature_succeeds(self):
+        self.assertEqual(
+            self._post({"X-Test-Connection": "true", "X-Webhook-Signature": "correct-secret"}), 200
+        )
+
+    def test_test_connection_with_wrong_signature_is_rejected(self):
+        self.assertEqual(
+            self._post({"X-Test-Connection": "true", "X-Webhook-Signature": "wrong"}), 401
+        )
+
+    def test_real_payload_with_correct_signature_succeeds_and_is_recorded(self):
+        payload = json.dumps(_sample_payload()).encode()
+        status = self._post(
+            {"X-Webhook-Signature": "correct-secret", "Content-Type": "application/json"}, body=payload
+        )
+        self.assertEqual(status, 200)
+        with open(self.out_path) as f:
+            rows = [json.loads(line) for line in f]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["model"], "openai/gpt-4")
+
+    def test_real_payload_with_wrong_signature_is_rejected_and_not_recorded(self):
+        payload = json.dumps(_sample_payload()).encode()
+        status = self._post(
+            {"X-Webhook-Signature": "wrong", "Content-Type": "application/json"}, body=payload
+        )
+        self.assertEqual(status, 401)
+        self.assertFalse(os.path.exists(self.out_path))
+
+    def test_real_payload_with_no_signature_is_rejected(self):
+        payload = json.dumps(_sample_payload()).encode()
+        status = self._post({"Content-Type": "application/json"}, body=payload)
+        self.assertEqual(status, 401)
 
 
 if __name__ == "__main__":

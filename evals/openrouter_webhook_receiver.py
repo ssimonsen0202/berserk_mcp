@@ -107,6 +107,13 @@ def verify_signature(headers, expected_secret):
     return False
 
 
+def _provided_signature(headers):
+    for key, value in headers.items():
+        if key.lower() == "x-webhook-signature":
+            return value
+    return None
+
+
 def _make_handler(out_path, raw_out_path, expected_secret, lock):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
@@ -116,6 +123,14 @@ def _make_handler(out_path, raw_out_path, expected_secret, lock):
             headers = {k: v for k, v in self.headers.items()}
             length = int(self.headers.get("Content-Length", "0") or "0")
             body = self.rfile.read(length) if length else b""
+
+            # A *wrong* signature is always rejected, even on the test-connection
+            # handshake -- only a genuinely absent header gets the handshake's
+            # documented no-auth-required treatment.
+            provided_sig = _provided_signature(headers)
+            if provided_sig is not None and provided_sig != expected_secret:
+                self._respond(401, {"ok": False, "error": "signature mismatch"})
+                return
 
             if is_test_connection(headers):
                 self._respond(200, {"ok": True, "test_connection": True})
@@ -182,15 +197,33 @@ def main(argv=None):
         default="OPENROUTER_WEBHOOK_SECRET",
         help="env var holding the shared secret; must match the X-Webhook-Signature header value configured in OpenRouter's webhook UI",
     )
+    parser.add_argument(
+        "--secret-file",
+        default=None,
+        help="path to a file containing the shared secret (trailing newline stripped); "
+        "takes precedence over --secret-env if both resolve to a value. Prefer this over "
+        "an inline env assignment on the command line -- that form leaks the secret into "
+        "argv, visible to anyone on the host via ps/pgrep.",
+    )
     args = parser.parse_args(argv)
 
-    secret = os.environ.get(args.secret_env)
+    secret = None
+    if args.secret_file:
+        try:
+            with open(args.secret_file) as f:
+                secret = f.read().strip()
+        except OSError as exc:
+            sys.stderr.write(f"refusing to start: could not read --secret-file {args.secret_file}: {exc}\n")
+            sys.exit(1)
+    if not secret:
+        secret = os.environ.get(args.secret_env)
+
     if not secret:
         sys.stderr.write(
-            f"refusing to start: {args.secret_env} is not set. This server is meant to sit behind a "
-            "publicly reachable Tailscale Funnel URL, so it must not accept unauthenticated requests. "
-            f"Set {args.secret_env} to the same value configured as the X-Webhook-Signature header in "
-            "OpenRouter's webhook destination settings, then retry.\n"
+            f"refusing to start: neither --secret-file nor ${args.secret_env} provided a secret. This "
+            "server is meant to sit behind a publicly reachable Tailscale Funnel URL, so it must not "
+            "accept unauthenticated requests. Provide the same value configured as the X-Webhook-Signature "
+            "header in OpenRouter's webhook destination settings, then retry.\n"
         )
         sys.exit(1)
 
