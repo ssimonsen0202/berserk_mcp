@@ -945,10 +945,11 @@ Side by side, feature and functionality wise:
 | How they relate | The data source berserk-mcp queries | Depends on Berserk (via `bzrk`); no dependency on CanonLoom | Depends on neither — bridged in only as an optional HTTP client |
 
 See [canonloom's own README](https://github.com/ssimonsen0202/canonloom#why-this-exists)
-for the full why/what/how. One gap worth knowing: CanonLoom also has a
-**domain packs** capability (deterministic `.tar.gz` bundles of validated
-artifacts for distribution) that this bridge exposes no tool for yet —
-everything else (`run_pipeline`, artifact listing/lookup, freshness
+for the full why/what/how, the CLP-1 through CLP-5 pipeline-phase
+reference, and `canonloom-server` setup. One gap worth knowing: CanonLoom
+also has a **domain packs** capability (deterministic `.tar.gz` bundles of
+validated artifacts for distribution) that this bridge exposes no tool for
+yet — everything else (`run_pipeline`, artifact listing/lookup, freshness
 scoring, run history) is covered by the five tools above.
 
 ### Deployment scenario
@@ -1001,17 +1002,10 @@ there is no MCP client or Berserk cluster involved at all.
 
 ### The pipeline: CLP-1 through CLP-5
 
-CanonLoom's own pipeline runs a source through five phases. It stops at the
-first phase that fails and reports why:
-
-| Phase | What it does |
-|---|---|
-| **CLP-1 — Intake** | Acquires the source, then runs safety, relevance, and de-duplication checks. |
-| **CLP-2 — Impact analysis** | Compares the candidate against existing skill artifacts and recommends `create`, `update`, or `skip`. The pipeline stops here unless the recommendation is `create`. |
-| **CLP-3 — Draft generation** | Generates a draft `SKILL.md` plus manifest from the intake and impact results. |
-| **CLP-4 — Validation** | Schema, semantic, prompt-injection, and structural checks on the draft. `auto_promote` only proceeds past this phase if validation passes. |
-| **CLP-5 — Promotion** | Moves the validated draft from staging into the knowledge repo's `skills/` directory with a git commit. Only runs when `auto_promote=true` and CLP-4 passed. |
-
+CanonLoom runs a source through five phases — intake, impact analysis, draft
+generation, validation, promotion — stopping at the first one that fails.
+See [canonloom's own README](https://github.com/ssimonsen0202/canonloom#what-it-does)
+for what each phase does. What matters for this bridge:
 `canonloom_run_pipeline`'s `stop_after` argument (`clp1`–`clp5`) lets you halt
 early — for example `stop_after=clp2` to see the impact-analysis
 recommendation without generating a draft, useful for a dry-run review before
@@ -1034,65 +1028,18 @@ committing LLM calls to CLP-3.
 | `CANONLOOM_SERVER_URL` | unset | Base URL of the running `canonloom-server`, e.g. `http://localhost:8080`. Every `canonloom_*` tool call requires this; unset returns a clear setup error instead of failing silently. |
 | `CANONLOOM_API_KEY` | unset | Sent as `X-API-Key` on every request, if the server requires it. |
 
-### Requirements for `canonloom-server`
+### Running `canonloom-server`
 
-`canonloom-server` is a **separate project with its own, stricter
-requirements** — none of this is required by berserk-mcp itself, only by the
-optional bridge target. This is not yet documented in CanonLoom's own README,
-so it's captured here in full:
-
-- **Python 3.14+.** CanonLoom's `pyproject.toml` pins `requires-python =
-  ">=3.14"` — noticeably stricter than berserk-mcp's own 3.9+ floor. The two
-  projects are not necessarily installable into the same virtualenv.
-- **Install with the `server` extra**, not a bare install — the base package
-  has no HTTP server at all:
-  ```bash
-  pip install "canonloom[server]"
-  ```
-  The `server` extra pulls in `fastapi`, `uvicorn[standard]`, and `httpx`.
-  Everything else (`anthropic`, `pygit2`, `pyyaml`, `jsonschema`,
-  `trafilatura` for content extraction, plus a handful of schema-validation
-  libraries) is a base dependency, installed either way.
-- **The `git` CLI binary on `PATH`.** CLP-5 promotion shells out to `git add`
-  / `git commit` directly (not a Python git binding) — see
-  `canonloom/src/canonloom/promote.py`. It sets its own commit author/committer
-  env vars and passes `--no-gpg-sign`, so no local `git config` or GPG setup
-  is needed — but the `git` executable itself must be present.
-- **`CANONLOOM_KNOWLEDGE_ROOT` must already be a git repository with a
-  specific directory scaffold** — `canonloom-server` does not create or
-  `git init` it for you. At minimum it needs `skills/` and
-  `manifests/artifacts/` to exist (CLP-5 writes into both). The upstream
-  `canonloom-knowledge` template's full scaffold is:
-  ```
-  skills/               agents/            playbooks/
-  patterns/             prompts/           evaluations/
-  lessons/              domain-packs/      manifests/sources/
-  manifests/artifacts/
-  ```
-  Point `CANONLOOM_KNOWLEDGE_ROOT` at a clone of that repo (or an
-  equivalently-shaped one). Passing a directory that isn't a git repo, or is
-  missing `skills/`/`manifests/artifacts/`, fails CLP-5 promotion with a
-  `PromotionError`, not a clean startup error — the server itself starts
-  fine and only fails when a pipeline run reaches that phase.
-- **`ANTHROPIC_API_KEY`** — CLP-1 (intake/relevance), CLP-2 (impact
-  analysis), and CLP-3 (draft generation) all call Claude directly. The
-  `anthropic` Python package is a hard base dependency either way; without
-  the key set, the server starts but every pipeline run stops at CLP-1.
-
-Putting it together:
-
-```bash
-pip install "canonloom[server]"                                  # requires Python 3.14+
-
-export CANONLOOM_KNOWLEDGE_ROOT=/path/to/canonloom-knowledge     # existing git repo, correct scaffold
-export CANONLOOM_API_KEY=some-shared-secret                       # optional — enables X-API-Key auth
-export ANTHROPIC_API_KEY=sk-ant-...                                # required for CLP-1/2/3 to do anything
-canonloom-server --host 0.0.0.0 --port 8080
-```
-
-See the CanonLoom project's own docs for artifact schema and validation-rule
-detail beyond this setup; berserk-mcp's bridge is intentionally a thin
-pass-through and does not duplicate that documentation here.
+`canonloom-server` is a separate project with its own install, Python
+version floor, and environment requirements — none of it required by
+berserk-mcp itself, only by this optional bridge target. See
+[canonloom's own README](https://github.com/ssimonsen0202/canonloom#running-canonloom-server)
+for the full setup (Python version, the `server` install extra, the `git`
+CLI dependency, and the `CANONLOOM_KNOWLEDGE_ROOT` scaffold). berserk-mcp's
+bridge is intentionally a thin pass-through and doesn't duplicate that
+documentation here — the only things berserk-mcp needs are the two env vars
+in the Configure table above, pointed at wherever `canonloom-server` ends up
+running.
 
 ### Example
 
@@ -1204,7 +1151,7 @@ Write a 10-line digest, flag anything anomalous, and stop.
 
 - Python 3.9+. (Python 3.8 reached upstream end-of-life on 2024-10-07 and is no longer a supported floor.)
 - The [`bzrk`](https://docs.bzrk.dev) CLI, installed and authenticated (`bzrk -P <profile> search "..."` must work). The bearer token lives in `bzrk`'s own config. berserk-mcp never reads or stores it.
-- *(Optional)* A running `canonloom-server` instance, only if you use the `canonloom_*` tools. This is a separate project requiring **Python 3.14+** (stricter than berserk-mcp's own 3.9+ floor) plus its own dependencies (FastAPI, Anthropic, `pygit2`, and others) and the `git` CLI binary — berserk-mcp only calls its HTTP API and adds nothing to berserk-mcp's own dependency footprint. Full setup: [Requirements for `canonloom-server`](#requirements-for-canonloom-server).
+- *(Optional)* A running `canonloom-server` instance, only if you use the `canonloom_*` tools — a separate project with its own, stricter requirements; berserk-mcp only calls its HTTP API and adds nothing to berserk-mcp's own dependency footprint. Setup: [canonloom's README](https://github.com/ssimonsen0202/canonloom#running-canonloom-server).
 
 ## Install
 
