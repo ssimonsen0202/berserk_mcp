@@ -474,10 +474,70 @@ if ACTIVE_ROLE != "all" and ACTIVE_ROLE not in _ROLE_PREFIX:
 
 INSTRUCTIONS = build_instructions(ACTIVE_ROLE)
 
+# Tier answers "may this caller author KQL or drive the artifact pipeline?".
+# Lane (ACTIVE_ROLE) answers "which job function?". They compose; neither
+# replaces the other (issue #4).
+TIER_SMALL = "small"
+TIER_DEEP = "deep"
+
+_DEEP_TIER_TOOLS = frozenset({
+    # Free-text KQL authoring.
+    "search", "validate_kql", "save_query",
+    # LLM-driven generation and its audit surface.
+    "generate_parser", "review_generated", "run_discovery_worker",
+    # Onboarding advice, not an operational answer.
+    "suggest_ingestion",
+    # A wiring diagnostic; an operator or a deep-tier agent needs it, a
+    # small-tier router does not.
+    "self_check",
+    # A separate service's artifact lifecycle (ADR-005 in
+    # canonloom-blueprint classes CanonLoom as a distinct platform), a
+    # bridge rather than core observability.
+    "canonloom_run_pipeline", "canonloom_list_artifacts",
+    "canonloom_get_artifact", "canonloom_freshness_report",
+    "canonloom_run_history",
+})
+
+
+def _resolve_tier(tier_env, role):
+    """FR-2. tier_env is the raw BERSERK_MCP_TIER value ("" if unset,
+    already validated to "small"/"deep" otherwise by _choice_env)."""
+    if tier_env in (TIER_SMALL, TIER_DEEP):
+        return tier_env
+    if role == "all":
+        return TIER_DEEP
+    return TIER_SMALL
+
+
+ACTIVE_TIER = _choice_env("BERSERK_MCP_TIER", "", {"", TIER_SMALL, TIER_DEEP})
+ACTIVE_TIER_RESOLVED = _resolve_tier(ACTIVE_TIER, ACTIVE_ROLE)
+
+
+def _tier_hidden_announcement(tier_resolved, role):
+    """FR-4. Pure function so the exact message is testable without
+    capturing real log() output at import time. Returns None when there's
+    nothing to announce (deep tier hides nothing)."""
+    if tier_resolved != TIER_SMALL:
+        return None
+    hidden = sorted(_DEEP_TIER_TOOLS)
+    return (
+        f"tier=small (role={role}): {len(hidden)} tools hidden — "
+        f"{', '.join(hidden)}. Set BERSERK_MCP_TIER=deep to restore them."
+    )
+
+
+_tier_announcement = _tier_hidden_announcement(ACTIVE_TIER_RESOLVED, ACTIVE_ROLE)
+if _tier_announcement:
+    log(_tier_announcement)
+
 
 def tool_visible(tool):
     roles = tool.get("roles")
-    return not roles or ACTIVE_ROLE == "all" or ACTIVE_ROLE in roles
+    if roles and ACTIVE_ROLE != "all" and ACTIVE_ROLE not in roles:
+        return False
+    if ACTIVE_TIER_RESOLVED == TIER_SMALL and tool["name"] in _DEEP_TIER_TOOLS:
+        return False
+    return True
 
 
 def item_visible(item):
@@ -4136,6 +4196,20 @@ def _doctor_check_primers_dir():
     )
 
 
+def _doctor_check_tool_tier():
+    """FR-5: --doctor/self_check exist to answer "is this wired the way I
+    think?" -- a hidden tool is exactly that class of surprise, so the
+    resolved tier is reported here too, not just at startup log time."""
+    if ACTIVE_TIER_RESOLVED == TIER_SMALL:
+        detail = (
+            f"tier=small (role={ACTIVE_ROLE}): {len(_DEEP_TIER_TOOLS)} tools hidden. "
+            "Set BERSERK_MCP_TIER=deep to restore them."
+        )
+    else:
+        detail = f"tier=deep (role={ACTIVE_ROLE}): no tools hidden by tier."
+    return _doctor_result("tool_tier", "pass", detail, required=False)
+
+
 def _doctor_check_learned_store_writable():
     if LEARNED_PATH.is_dir():
         return _doctor_result(
@@ -4285,6 +4359,7 @@ _DOCTOR_CHECK_FUNCS = (
     ("table_reachable", _doctor_check_table_reachable),
     ("recent_rows", _doctor_check_recent_rows),
     ("primers_dir", _doctor_check_primers_dir),
+    ("tool_tier", _doctor_check_tool_tier),
     ("learned_store_writable", _doctor_check_learned_store_writable),
     ("http_config", _doctor_check_http_config),
     ("llm_hermes_reachability", _doctor_check_llm_reachability),
