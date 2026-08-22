@@ -1326,7 +1326,12 @@ def bzrk_search(kql, since, extra=None):
             "if this cluster is legitimately slower.",
             True,
         )
-    return out, is_err
+    # This is bzrk_search itself, the low-level fetch wrapper every dispatch
+    # branch calls -- fencing belongs at the dispatch layer (the caller
+    # decides whether/how to fence based on its own output shape), not
+    # here; some non-dispatch callers (e.g. schema-fetching in
+    # _schema_fetcher) legitimately need the raw value.
+    return out, is_err  # nosemgrep: unfenced-bzrk-output-reaches-return
 
 
 # bzrk builds that don't support --json reject it with an argument-parse
@@ -1356,13 +1361,14 @@ def bzrk_search_json(kql, since):
     out, is_err = bzrk_search(kql, since, extra=["--json"])
     if is_err and _JSON_UNSUPPORTED_RE.search(out or ""):
         return bzrk_search(kql, since)
-    return out, is_err
+    # Same as bzrk_search above: low-level wrapper, fencing belongs at dispatch.
+    return out, is_err  # nosemgrep: unfenced-bzrk-output-reaches-return
 
 
 def do_schema():
     out1, e1 = run_bzrk(["-P", PROFILE, "search", ".show tables"])
     out2, e2 = run_bzrk(["-P", PROFILE, "search", f"{T} | getschema", "--since", "1h ago"])
-    text = f"== tables ==\n{out1}\n== columns ==\n{out2}"
+    text = f"== tables ==\n{_fence_untrusted(out1)}\n== columns ==\n{_fence_untrusted(out2)}"
     return text, (e1 or e2)
 
 
@@ -2434,7 +2440,7 @@ def _handle_call_uncached(name, arguments):
             check_kql = f"{T} | where metric_name == '{target}' | summarize n=count()"
         visible, is_err = bzrk_search(check_kql, since)
         if is_err:
-            return "Could not verify source visibility:\n" + visible, True
+            return "Could not verify source visibility:\n" + _fence_untrusted(visible), True
         if count_result_is_zero(visible):
             return f"{target} is not currently visible in Berserk; verify it is ingesting before queueing.", True
         role_hint = normalize_roles(arguments.get("role_hint"))
@@ -2583,7 +2589,11 @@ def _handle_call_uncached(name, arguments):
                 })
             if err:
                 report["runtime_error"] = _fence_untrusted(out)
-            return json.dumps(report, indent=2), bool(err)
+            # `out` is already fenced above before being assigned into
+            # report; the taint tracker can't follow it through the
+            # dict-field write and json.dumps, but the fencing genuinely
+            # happened.
+            return json.dumps(report, indent=2), bool(err)  # nosemgrep: unfenced-bzrk-output-reaches-return
         return json.dumps(report, indent=2), False
 
     if name == "detect_anomalies":
@@ -2812,10 +2822,16 @@ def _handle_call_uncached(name, arguments):
         # BOTH halves fail, since a trace can legitimately have no logs.
         out1, e1 = bzrk_search(q_trace_analyze(str(trace_id)), "30d ago")
         out2, e2 = bzrk_search_json(q_trace_logs(str(trace_id)), "30d ago")
-        # Only the correlated-logs half carries real body content -- the
-        # span tree is structural (trace/span ids, durations), never fenced.
-        # Fenced regardless of e2 (round 2 finding 4): a failed log query
-        # can still return partial real rows mixed into the diagnostic.
+        # Both halves fenced unconditionally (round 2 finding 4: err doesn't
+        # reliably indicate "no real content"). The span tree's own query
+        # (q_trace_analyze) projects span_name and service -- both
+        # attacker-influenceable free-text fields, not purely structural
+        # trace/span ids -- so it needs the same treatment as the
+        # correlated-logs half. A prior comment here incorrectly claimed
+        # spans were "structural, never fenced"; found wrong via a Semgrep
+        # taint-tracking rule (.semgrep/fence-untrusted-data.yml) flagging
+        # this exact line after 4+ review rounds missed it.
+        out1 = _fence_untrusted(out1)
         out2 = _fence_untrusted(out2)
         return f"== spans ==\n{out1}\n\n== correlated logs ==\n{out2}", (e1 and e2)
     if name == "search":

@@ -235,6 +235,24 @@ class Round3DispatchErrorPathsTest(unittest.TestCase):
         self.assertTrue(err)
         self.assertIn(bm._UNTRUSTED_DATA_OPEN, text)
 
+    def test_trace_analyze_fences_span_content_specifically(self):
+        """Isolates the spans half specifically -- the test above stubs both
+        halves identically, so it would still pass even if only the logs
+        half (out2) were fenced and the spans half (out1) were not, which is
+        exactly the bug this test exists to catch (found via a Semgrep
+        taint-tracking rule after 4+ review rounds missed it: q_trace_analyze
+        projects span_name and service, both attacker-influenceable
+        free-text fields, not purely structural trace/span ids)."""
+        def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
+            if "--json" in args:
+                return "[]", False  # logs half: clean, no attacker content
+            return "ATTACKER_SPAN_NAME_ONLY_IN_SPANS_HALF", False
+        bm.run_bzrk = fake_run_bzrk
+        text, err = bm.handle_call("trace_analyze", {"trace_id": "abc123"})
+        self.assertFalse(err)
+        spans_section = text.split("== correlated logs ==")[0]
+        self.assertIn(bm._UNTRUSTED_DATA_OPEN, spans_section)
+
     def test_sre_service_health_fences_output_on_error(self):
         """sre_service_health should fence its output even on error.
 
