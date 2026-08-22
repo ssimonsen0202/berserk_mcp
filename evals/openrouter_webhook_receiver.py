@@ -25,8 +25,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 _KNOWN_ATTR_KEYS = {
     "gen_ai.request.model": "model",
-    "gen_ai.usage.prompt_tokens": "prompt_tokens",
-    "gen_ai.usage.completion_tokens": "completion_tokens",
+    # OpenRouter's actual wire format uses input_tokens/output_tokens, not the
+    # prompt_tokens/completion_tokens names its own docs page describes --
+    # confirmed against a real captured trace on 2026-08-22.
+    "gen_ai.usage.input_tokens": "prompt_tokens",
+    "gen_ai.usage.output_tokens": "completion_tokens",
+    "gen_ai.usage.total_cost": "cost_usd",
     "user.id": "user_id",
     "session.id": "session_id",
 }

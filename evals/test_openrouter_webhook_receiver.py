@@ -42,8 +42,9 @@ def _sample_payload():
                                 "endTimeUnixNano": "1700000000500000000",
                                 "attributes": [
                                     _attr("gen_ai.request.model", "openai/gpt-4"),
-                                    _attr("gen_ai.usage.prompt_tokens", 100),
-                                    _attr("gen_ai.usage.completion_tokens", 50),
+                                    _attr("gen_ai.usage.input_tokens", 100),
+                                    _attr("gen_ai.usage.output_tokens", 50),
+                                    _attr("gen_ai.usage.total_cost", 0.02),
                                     _attr("user.id", "u-1"),
                                     _attr("session.id", "s-1"),
                                     _attr("trace.metadata.case_id", "router-07"),
@@ -68,6 +69,7 @@ class ExtractSpansTest(unittest.TestCase):
         self.assertEqual(row["model"], "openai/gpt-4")
         self.assertEqual(row["prompt_tokens"], 100)
         self.assertEqual(row["completion_tokens"], 50)
+        self.assertEqual(row["cost_usd"], 0.02)
         self.assertEqual(row["user_id"], "u-1")
         self.assertEqual(row["session_id"], "s-1")
         self.assertEqual(row["service_name"], "openrouter")
