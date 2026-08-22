@@ -10,6 +10,8 @@ import berserk_mcp as bm
 class Phase3ToolsTest(unittest.TestCase):
     def setUp(self):
         self.original_run = bm.run_bzrk
+        self.orig_cache_ttl = bm.CACHE_TTL_SECONDS
+        self.orig_fail_cooldown = bm.FAIL_COOLDOWN_SECONDS
         self.calls = []
         bm.CACHE_TTL_SECONDS = 0
         bm.FAIL_COOLDOWN_SECONDS = 0
@@ -23,6 +25,8 @@ class Phase3ToolsTest(unittest.TestCase):
 
     def tearDown(self):
         bm.run_bzrk = self.original_run
+        bm.CACHE_TTL_SECONDS = self.orig_cache_ttl
+        bm.FAIL_COOLDOWN_SECONDS = self.orig_fail_cooldown
         bm._reset_fleet_state()
 
     def test_native_query_shapes(self):

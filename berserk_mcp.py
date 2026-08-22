@@ -2596,7 +2596,7 @@ def _handle_call_uncached(name, arguments):
             return _fence_untrusted(out), True
         if not out or out.strip() == "(no rows)":
             return f"No anomalies detected (window {since}).", False
-        return f"Anomaly decomposition for window {since}; non-zero anomaly markers indicate spikes:\n{out}", False
+        return f"Anomaly decomposition for window {since}; non-zero anomaly markers indicate spikes:\n{_fence_untrusted(out)}", False
 
     if name == "forecast_capacity":
         metric = str(arguments.get("metric") or "").strip()
@@ -2700,14 +2700,20 @@ def _handle_call_uncached(name, arguments):
             out = _envelope(name, since, out, fence_body=True)
         elif not err:
             # Success output for all SIMPLE tools is fenced -- same reason.
-            # Error output for non-JSON tools is skipped here because it is
-            # typically a controlled budget/diagnostic message (the budget
-            # timeout check at handle_call line ~3102 requires the text to
-            # start with the tool name, which would fail if fenced).
-            # _SIMPLE_JSON_TOOLS error output is still fenced below because
-            # their error path can carry partial body rows.
             out = _fence_untrusted(out)
-        elif name in _SIMPLE_JSON_TOOLS:
+        else:
+            # Error output for every SIMPLE tool -- JSON or not -- can carry
+            # partial real rows (run_bzrk concatenates raw stdout with
+            # stderr on a failed query), so it's fenced unconditionally.
+            # This branch used to only fence _SIMPLE_JSON_TOOLS' errors,
+            # leaving every non-JSON tool's generic (non-overflow) query
+            # failure completely unfenced -- caught by manual review after
+            # 4 Codex rounds missed it, confirmed by direct reproduction
+            # against list_hosts. The one caller that depends on this
+            # text's shape (handle_call's timeout/fail-cooldown check,
+            # ~line 3148) was changed to look for its marker as a substring
+            # rather than requiring an unfenced exact prefix, so fencing
+            # here doesn't break it.
             out = _fence_untrusted(out)
         return out, err
 
@@ -2721,7 +2727,7 @@ def _handle_call_uncached(name, arguments):
         if not known:
             return (
                 "(no baseline — run detect_new_sources first to establish "
-                "known services; showing all active services)\n" + out
+                "known services; showing all active services)\n" + _fence_untrusted(out)
             ), False
         lines = out.strip().splitlines()
         header = lines[0] if lines else ""
@@ -2732,7 +2738,7 @@ def _handle_call_uncached(name, arguments):
                 filtered.append(line)
         if len(filtered) <= 1:
             return "No genuinely new services (all active services are in the baseline).", False
-        return "\n".join(filtered), False
+        return _fence_untrusted("\n".join(filtered)), False
 
     # --- tools needing input validation or extra calls ---
     if name == "self_check":
@@ -2756,7 +2762,6 @@ def _handle_call_uncached(name, arguments):
         # inventory result while still showing which signal families exist.
         out1, e1 = bzrk_search(q_discover_fieldstats(svc_str), since)
         out2, e2 = bzrk_search(q_discover_sample(svc_str), since)
-        # Fence output if either query failed (may contain partial telemetry)
         # Fence both unconditionally, not gated on that half's own error
         # flag -- round-3 review found gating on e1/e2 individually left the
         # OTHER half unfenced whenever only one of the two calls failed
@@ -3145,7 +3150,14 @@ def handle_call(name, arguments):
         _FLEET_CONTEXT = previous_context
 
     text = str(text)
-    timed_out = is_err and text.startswith(f"{name} exceeded its ")
+    # `in`, not startswith: the SIMPLE-dispatch error path now fences every
+    # error (issue #11 manual-review fix), which wraps this message in
+    # <untrusted_log_data> tags for the 4 _SIMPLE_JSON_TOOLS -- a prefix
+    # check would silently stop matching and fail-cooldown would never
+    # trigger for those tools' timeouts. The exact phrase (tool name +
+    # "exceeded its") is specific enough that a substring check doesn't
+    # introduce a false-positive risk.
+    timed_out = is_err and f"{name} exceeded its " in text
     with _FLEET_LOCK:
         if timed_out and FAIL_COOLDOWN_SECONDS > 0:
             _FAIL_COOLDOWN[key] = (text, True, time.monotonic())

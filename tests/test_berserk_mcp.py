@@ -4905,12 +4905,20 @@ class ResultEnvelopeTest(unittest.TestCase):
     def test_01_rows_present_header_and_fenced_body(self):
         # All SIMPLE tools now fence their body (P1-C, round 3): host names,
         # container names, etc. are attacker-influenceable even when not body.
+        # Asserts the full exact shape (header, then the body genuinely
+        # wrapped between the fence markers), not just that each piece
+        # appears somewhere in the string -- a prior version used two
+        # independent assertIn checks, which would still pass if the fence
+        # marker leaked into the header while the body shipped unwrapped
+        # elsewhere (manual review finding, round 4).
         self._next_return = ("col_a\nrow1\nrow2", False)
         text, err = bm.handle_call("list_hosts", {})
         self.assertFalse(err)
-        self.assertTrue(text.startswith("window=1h ago  rows=2\n\n"))
-        self.assertIn("col_a\nrow1\nrow2", text)
-        self.assertIn(bm._UNTRUSTED_DATA_OPEN, text)
+        self.assertEqual(
+            text,
+            "window=1h ago  rows=2\n\n"
+            f"{bm._UNTRUSTED_DATA_OPEN}\ncol_a\nrow1\nrow2\n{bm._UNTRUSTED_DATA_CLOSE}",
+        )
 
     def test_02_explicit_since_appears_in_header(self):
         self._next_return = ("col_a\nrow1", False)
@@ -4958,12 +4966,16 @@ class ResultEnvelopeTest(unittest.TestCase):
         # Fencing is independent of ENVELOPE_ENABLED (same principle as the
         # existing _SIMPLE_JSON_TOOLS fencing). Turning the envelope gate off
         # removes the header/row-count wrapper, but the body is still fenced.
+        # Exact-equality, not two independent assertIn checks (manual review
+        # finding, round 4 -- see test_01's docstring for why that matters).
         bm.ENVELOPE_ENABLED = False
         self._next_return = ("col_a\nrow1\nrow2", False)
         text, err = bm.handle_call("list_hosts", {})
         self.assertFalse(err)
-        self.assertIn("col_a\nrow1\nrow2", text)
-        self.assertIn(bm._UNTRUSTED_DATA_OPEN, text)
+        self.assertEqual(
+            text,
+            f"{bm._UNTRUSTED_DATA_OPEN}\ncol_a\nrow1\nrow2\n{bm._UNTRUSTED_DATA_CLOSE}",
+        )
         # The (no rows) sentinel is still a known-safe value and stays unfenced.
         bm._RESULT_CACHE.clear()
         self._next_return = ("(no rows)", False)
