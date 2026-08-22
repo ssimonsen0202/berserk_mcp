@@ -5532,5 +5532,296 @@ class UntrustedDataFencingRound3FindingsTest(unittest.TestCase):
         self.assertIn(bm._UNTRUSTED_DATA_OPEN, text)
 
 
+class WrongAnswerContainmentTest(unittest.TestCase):
+    """Issue #12: Berserk already has real answer-level defenses against a
+    confident false negative -- they were scattered and unnamed. This class
+    is the "named failing-without-it test" the issue's acceptance criterion
+    requires for each control, consolidated under one name.
+
+    Known gap (flagged in review, deliberately not closed here): these are
+    unit tests proving each control's mechanism fires -- not model-facing
+    evals proving an agent actually stops treating an empty/rejected/stale
+    result as a healthy answer. That needs real eval-harness cases (see
+    evals/router_cases.jsonl's format) exercising an actual model turn, which
+    is a meaningfully different and larger piece of work than this docs+test
+    issue scoped. Tracked as issue #31, not invented here to avoid scope
+    creep into an eval-suite design decision this PR shouldn't make
+    unilaterally.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_learned = bm.LEARNED_PATH
+        bm.LEARNED_PATH = Path(self._tmp.name) / "learned.json"
+
+    def tearDown(self):
+        bm.LEARNED_PATH = self._orig_learned
+        self._tmp.cleanup()
+
+    # ---- control 1: schema-drift warning on saved queries ----
+    # Zero test coverage before this issue -- grepped for "schema_hash" and
+    # "drift" across tests/test_berserk_mcp.py, zero hits.
+
+    def test_schema_drift_warning_fires_when_stored_hash_differs(self):
+        orig_validate = bm._validate_user_kql
+        bm._validate_user_kql = lambda kql, since, **kw: {
+            "schema": {"schema_hash": "current_hash_xyz"}
+        }
+        orig_run_bzrk = bm.run_bzrk
+        bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: ("(no rows)", False)
+        try:
+            bm.persist_learned_query(
+                {"name": "drift_probe", "description": "d", "kql": "default | take 1",
+                 "schema_hash": "stale_hash_abc"},
+                action_source="manual",
+            )
+            text, err = bm.handle_call("run_saved", {"name": "drift_probe"})
+            self.assertFalse(err)
+            self.assertIn("Schema drift warning", text)
+            self.assertIn("stale_hash_abc", text)
+            self.assertIn("current_hash_xyz", text)
+        finally:
+            bm._validate_user_kql = orig_validate
+            bm.run_bzrk = orig_run_bzrk
+
+    def test_schema_drift_warning_silent_when_hashes_match(self):
+        # Confirms the control is precise, not noisy -- a warning that fires
+        # unconditionally would be trained out by the operator, same failure
+        # mode as an alert nobody reads.
+        orig_validate = bm._validate_user_kql
+        bm._validate_user_kql = lambda kql, since, **kw: {
+            "schema": {"schema_hash": "same_hash"}
+        }
+        orig_run_bzrk = bm.run_bzrk
+        bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: ("(no rows)", False)
+        try:
+            bm.persist_learned_query(
+                {"name": "no_drift_probe", "description": "d", "kql": "default | take 1",
+                 "schema_hash": "same_hash"},
+                action_source="manual",
+            )
+            text, err = bm.handle_call("run_saved", {"name": "no_drift_probe"})
+            self.assertFalse(err)
+            self.assertNotIn("Schema drift warning", text)
+        finally:
+            bm._validate_user_kql = orig_validate
+            bm.run_bzrk = orig_run_bzrk
+
+    # ---- control 2: bare-column-name field-access warning ----
+    # Prompt-only control (no code-level enforcement is possible -- KQL
+    # accepting a nonexistent field and silently matching zero rows is
+    # Berserk's own query-engine behavior). A locking test on the exact
+    # wording is what "failing without it" means for this control: it
+    # guards against the warning being quietly reworded away, which is
+    # exactly what happened to make this issue necessary in the first place
+    # (the control existed but nobody had named or tested it).
+
+    def test_base_instructions_warn_about_bare_column_names(self):
+        self.assertIn("silently matches zero rows", bm._BASE_INSTRUCTIONS)
+        # Verify the remediation (discover_schema) is mentioned, not just the warning
+        self.assertIn("discover_schema", bm._BASE_INSTRUCTIONS.lower())
+
+    def test_search_tool_description_repeats_the_same_warning(self):
+        search_tool = next(t for t in bm.TOOLS if t["name"] == "search")
+        self.assertIn("silently match zero rows", search_tool["description"])
+        # Verify the specific remediation tool is named, not just the
+        # generic word "discover" (which "discovery"/"discovering" would
+        # also match without actually naming the tool to call).
+        self.assertIn("discover_schema", search_tool["description"])
+        # A prior review round changed the wording *only* in this top-level
+        # description and missed the nested kql-argument description,
+        # leaving a contradiction ("never a bare column name") undetected
+        # because no test looked at this second surface. Cover both.
+        kql_arg_desc = search_tool["inputSchema"]["properties"]["kql"]["description"]
+        self.assertIn("discover_schema", kql_arg_desc)
+        self.assertNotIn("never a bare column name", kql_arg_desc)
+
+    # ---- control 3: KQL validation rejects blockers before execution ----
+
+    def test_validate_kql_rejects_wrong_table_prefix(self):
+        # A query against the wrong table would silently return zero rows
+        # (or an unrelated table's data) rather than erroring -- exactly
+        # the confident-false-negative shape this issue is about. Static
+        # validation catches it before any query reaches bzrk.
+        report = bm.kql_validation.validate_kql_static(
+            "not_the_real_table | take 1", table=bm.TABLE, since="1h ago", schema_fields=None,
+        )
+        self.assertTrue(bm._blocking_validation(report))
+
+    def test_search_dispatch_blocks_source_introducing_operator_before_execution(self):
+        # The unit-level test above only proves validate_kql_static() flags
+        # the query; it doesn't prove the *dispatch path* actually stops
+        # before reaching bzrk. A prior review found the wrong-table case
+        # used here would also be rejected independently by bzrk_search's
+        # own prefix guard, so it didn't prove static validation specifically
+        # was in the loop. `union` is a source-introducing operator with no
+        # separate prefix-guard rejection, so this isolates KQL validation
+        # as the thing doing the blocking.
+        orig_run_bzrk = bm.run_bzrk
+        called = []
+        bm.run_bzrk = lambda *a, **kw: called.append((a, kw)) or ("should not run", False)
+        try:
+            text, err = bm.handle_call("search", {"kql": f"{bm.TABLE} | union {bm.TABLE} | take 1"})
+            self.assertTrue(err)
+            self.assertEqual(called, [], "run_bzrk must not be called for a blocked query")
+        finally:
+            bm.run_bzrk = orig_run_bzrk
+
+    def test_validate_kql_static_does_not_block_a_normal_query(self):
+        # Negative control: the containment controls must not be so eager
+        # they reject legitimate queries -- that trades one failure mode
+        # (silent wrong answer) for another (the tool becomes unusable).
+        report = bm.kql_validation.validate_kql_static(
+            f"{bm.TABLE} | take 1", table=bm.TABLE, since="1h ago", schema_fields=None,
+        )
+        self.assertFalse(bm._blocking_validation(report))
+
+    # ---- control 4: the result envelope (issue #2) ----
+    # Already covered by ResultEnvelopeTest; referenced here, not
+    # duplicated, so the containment section has one place naming every
+    # control even though most of the test weight lives elsewhere.
+
+    def test_envelope_disambiguates_the_no_rows_sentinel(self):
+        # The bare "(no rows)" sentinel is exactly the confident-false-
+        # negative shape (issue #2's own framing): a small model reading it
+        # cannot tell "healthy", "wrong window", "wrong tool", and "source
+        # stopped reporting" apart. One assertion here as the named pointer
+        # from this consolidated list; full coverage is ResultEnvelopeTest.
+        result = bm._envelope("errors_by_service", "1h ago", "(no rows)")
+        self.assertNotEqual(result.strip(), "(no rows)")
+        self.assertIn("1h ago", result)
+
+    # ---- control 2b: schema-hash lookup failure behavior ----
+    # The happy-path test above (test_schema_drift_warning_fires_when_stored_hash_differs)
+    # stubs a successful lookup. This test characterizes what *actually* happens when the
+    # lookup fails or the hash is missing — it currently fails silent (no warning),
+    # which is a known limitation documented in the README but worth testing.
+
+    def test_schema_drift_missing_stored_hash_fails_silent(self):
+        # If the stored hash is missing (e.g., old saved query), the warning doesn't fire.
+        # This is expected but worth documenting as a gap -- old queries won't trigger
+        # drift warnings until they're re-saved.
+        orig_validate = bm._validate_user_kql
+        bm._validate_user_kql = lambda kql, since, **kw: {
+            "schema": {"schema_hash": "current_hash_xyz"}
+        }
+        orig_run_bzrk = bm.run_bzrk
+        bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: ("(no rows)", False)
+        try:
+            bm.persist_learned_query(
+                {"name": "no_stored_hash", "description": "d", "kql": "default | take 1"},
+                action_source="manual",
+            )
+            text, err = bm.handle_call("run_saved", {"name": "no_stored_hash"})
+            self.assertFalse(err)
+            self.assertNotIn("Schema drift warning", text)
+        finally:
+            bm._validate_user_kql = orig_validate
+            bm.run_bzrk = orig_run_bzrk
+
+    def test_schema_drift_backend_unavailable_produces_false_positive_warning(self):
+        # Exercises the REAL production path (a prior version of this test
+        # stubbed _validate_user_kql directly, which skipped _schema_fetcher
+        # entirely and didn't match what actually happens -- caught in
+        # review). _schema_fetcher (:1271) calls run_bzrk() for its four
+        # schema-discovery queries and ignores the returned error flag, so a
+        # genuine backend failure (auth error, timeout, etc.) doesn't raise
+        # and doesn't produce schema_registry's "unavailable" status either
+        # -- get_schema_snapshot() has no way to know the fetch failed, so it
+        # normalizes whatever error text came back as if it were real schema
+        # output and marks the result "fresh". The resulting hash is some
+        # value derived from that error text, essentially unpredictable, so
+        # it does not equal any real previously-stored hash -- producing a
+        # false-positive drift warning.
+        #
+        # All four of _schema_fetcher's calls fail (not just two), using the
+        # real production auth-failure message. Only the saved query's own
+        # execution call ("default | take 1" in its argv) succeeds, which
+        # isolates the schema-fetch failure from the query result and
+        # doesn't depend on knowing all four calls' exact query text.
+        SAVED_QUERY_KQL = "default | take 1"
+        orig_run_bzrk = bm.run_bzrk
+
+        def failing_schema_fetch(args, timeout=bm.DEFAULT_TIMEOUT):
+            joined = " ".join(str(a) for a in args)
+            if SAVED_QUERY_KQL in joined:
+                return "(no rows)", False
+            return bm.AUTH_FAILURE_MESSAGE, True
+
+        bm.run_bzrk = failing_schema_fetch
+        try:
+            bm.persist_learned_query(
+                {"name": "backend_unavailable_probe", "description": "d", "kql": SAVED_QUERY_KQL,
+                 "schema_hash": "stored_hash_from_when_backend_was_healthy"},
+                action_source="manual",
+            )
+            # Lock the actual mechanism, not just the final warning text:
+            # the snapshot backing this run is genuinely marked "fresh"
+            # (not "unavailable") despite every fetch call failing, and the
+            # warning's current= hash is exactly that snapshot's hash. If
+            # issue #32 is fixed (fetcher raises instead of swallowing the
+            # error), schema_status would become "unavailable"/"stale" and
+            # this assertion would correctly start failing.
+            snapshot = bm._schema_snapshot(force=True, allow_refresh=True)
+            self.assertEqual(snapshot["source_status"], "fresh")
+            text, err = bm.handle_call("run_saved", {"name": "backend_unavailable_probe"})
+            self.assertFalse(err)
+            self.assertIn("Schema drift warning", text)
+            self.assertIn(f"current={snapshot['schema_hash']}", text)
+        finally:
+            bm.run_bzrk = orig_run_bzrk
+
+    # ---- control 4b: envelope scope limitation test ----
+    # The envelope is applied only to tools in SIMPLE, not all tools. This test
+    # demonstrates that a non-SIMPLE tool (logs_for_service) returns bare (no rows)
+    # without the envelope's window/next-step guidance, documenting the scope gap.
+
+    def test_non_simple_tool_empty_result_unenveloped(self):
+        # logs_for_service is not in SIMPLE; it returns raw bzrk_search_json output
+        # without envelope processing, even when empty.
+        orig_bzrk_search_json = bm.bzrk_search_json
+        bm.bzrk_search_json = lambda kql, since: ("(no rows)", False)
+        try:
+            text, err = bm.handle_call("logs_for_service", {"service": "nginx"})
+            self.assertFalse(err)
+            # Bare (no rows) with no window or guidance, unlike SIMPLE tools with envelope
+            self.assertEqual(text, "(no rows)")
+        finally:
+            bm.bzrk_search_json = orig_bzrk_search_json
+
+    # ---- documentation: every listed control is actually named, with accurate scoping ----
+
+    def test_readme_names_wrong_answer_containment_section(self):
+        readme = Path(__file__).resolve().parent.parent / "README.md"
+        text = readme.read_text(encoding="utf-8")
+        self.assertIn("Wrong-answer containment", text)
+        # Check for all controls
+        for control in (
+            "schema", "bare column", "envelope", "validation",
+        ):
+            self.assertIn(control, text.lower())
+        # Check that enveloping is scoped correctly (not "every" tool but
+        # specific path) -- the section text must actually name the SIMPLE
+        # dispatch path, not just say "fixed-query tool" in the abstract.
+        self.assertIn("fixed-query tool", text.lower())
+        self.assertIn("`SIMPLE`", text)
+        self.assertNotIn("Every fixed-query tool", text)
+        # Check that schema-hash behavior documents caching/fail-open with "Known limitation"
+        self.assertIn("Known limitation", text)
+        # The TTL is a hardcoded constant, not an environment variable --
+        # the README must not claim a setting that doesn't exist.
+        self.assertNotIn("BERSERK_MCP_SCHEMA_CACHE_TTL_SECONDS", text)
+        self.assertIn("DEFAULT_TTL_SECONDS", text)
+        # Check that untrusted_log_data fencing is named and points at real
+        # coverage (issue #11 and its test classes), not a bare mention.
+        # PR #26's "not yet merged" hedge was accurate while fencing lived
+        # on a separate branch from this test/doc PR; once the two merge
+        # together (this exact commit), the hedge would be self-referentially
+        # false the instant it landed, so it's removed here rather than left
+        # as a guaranteed post-merge finding.
+        self.assertIn("issue #11", text)
+        self.assertIn("_fence_untrusted", text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
