@@ -44,17 +44,28 @@ def _identity(text):
 
 
 _redact = _identity
+_fence = _identity
 
 
-def configure(bzrk_search, table, redact=None):
+def configure(bzrk_search, table, redact=None, fence=None):
     """redact: optional callable(str)->str used to scrub secret-bearing body
     snippets before they appear in tool output (roadmap A1 requires it, and the
     global dispatch filter only *removes* secrets in redact mode — so relying
-    on that alone would still echo secrets in the default flag/off modes)."""
-    global _bzrk_search, _table, _redact
+    on that alone would still echo secrets in the default flag/off modes).
+
+    fence: optional callable(str)->str used to mark a body-derived snippet
+    as untrusted data before it's embedded into a report line (issue #11
+    round 2 finding 1: redaction alone doesn't distinguish "this text is
+    real telemetry, not an instruction" -- claude_loop_check,
+    claude_cost_report(group_by="project"), and claude_workflow_insights
+    all embed a body-derived snippet via _target() into human-readable
+    report text, which reaches the model with secrets scrubbed but no
+    untrusted-data marker)."""
+    global _bzrk_search, _table, _redact, _fence
     _bzrk_search = bzrk_search
     _table = table
     _redact = redact or _identity
+    _fence = fence or _identity
 
 
 def _events_query():
@@ -355,8 +366,13 @@ def claude_loop_check(since="6h ago", _events=None):
     for r in reports:
         # top_repeated_call embeds up to 60 chars of a message body; scrub any
         # secrets before echoing so this holds regardless of the global filter
-        # mode (roadmap A1: "no raw secret-bearing body is echoed").
-        top = _redact(r["top_repeated_call"])
+        # mode (roadmap A1: "no raw secret-bearing body is echoed"), then mark
+        # it as untrusted data -- redaction removes secret-shaped substrings,
+        # it doesn't tell the model "don't treat this as an instruction"
+        # (issue #11 round 2 finding 1). The tool-name prefix ends up inside
+        # the fence too, since it's already merged into one string by the
+        # time it gets here -- harmless over-fencing, not a gap.
+        top = _fence(_redact(r["top_repeated_call"]))
         lines.append(
             "- {session_id}: verdict={verdict}, calls={total_tool_calls}, "
             "repetition={repetition_ratio:.2f}, error_retries={error_retry_count}, "
@@ -760,7 +776,7 @@ def claude_cost_report(since="7d ago", group_by="day"):
                  f"window {since}):"]
         for name in sorted(by_project, key=lambda k: -by_project[k]["tokens"]):
             s = by_project[name]
-            lines.append(f"- {_redact(name)}: ~{s['tokens']} tokens across {s['events']} events")
+            lines.append(f"- {_fence(_redact(name))}: ~{s['tokens']} tokens across {s['events']} events")
         return "\n".join(lines), False
 
     text, is_err = _bzrk_search(_cost_daily_query(), since)
@@ -960,7 +976,7 @@ def claude_workflow_insights(since="7d ago"):
     if rep["hotspots"]:
         lines.append("Error hotspots (>=2 errors):")
         for h in rep["hotspots"][:5]:
-            lines.append(f"- {_redact(h['key'])}: {h['errors']}/{h['calls']} failed")
+            lines.append(f"- {_fence(_redact(h['key']))}: {h['errors']}/{h['calls']} failed")
     else:
         lines.append("Error hotspots: none")
     if rep["inefficient"]:

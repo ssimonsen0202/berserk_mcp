@@ -1,0 +1,36 @@
+rules:
+  - id: unfenced-bzrk-output-reaches-return
+    languages: [python]
+    severity: ERROR
+    mode: taint
+    message: >
+      Real bzrk telemetry (from bzrk_search/bzrk_search_json/run_bzrk)
+      reaches a `return` statement without passing through _fence_untrusted()
+      first. Real telemetry rows are attacker-influenceable (log content,
+      service/host names) and must be wrapped as untrusted data before
+      reaching the model -- see issue #11 and the "Wrong-answer containment"
+      section of README.md. If this output is genuinely safe (a fixed
+      server-generated message, not real query output), route it through
+      one of the sanitizer calls below anyway, or add a `# nosemgrep:
+      unfenced-bzrk-output-reaches-return` comment explaining why on that
+      exact line.
+    metadata:
+      references:
+        - https://github.com/ssimonsen0202/berserk_mcp/issues/11
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: $OUT, $ERR = bzrk_search(...)
+              - pattern: $OUT, $ERR = bzrk_search_json(...)
+              - pattern: $OUT, $ERR = run_bzrk(...)
+          - focus-metavariable: $OUT
+    pattern-sanitizers:
+      - pattern: _fence_untrusted(...)
+      - pattern: _envelope(..., fence_body=True)
+      - pattern: _wrap_analytics(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: return $X, ...
+              - pattern: return f"...{$X}...", ...
+              - pattern: return f"...{$X}..."
