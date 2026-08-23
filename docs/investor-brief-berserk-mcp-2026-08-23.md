@@ -20,13 +20,15 @@ flowchart LR
 
 *Fig. 1 — Infrastructure and AI-agent telemetry share one ingestion path; agents query the same platform back out.*
 
-This reflexive design is the point. berserk-mcp doesn't just let an agent ask "what's the error rate on checkout-service" and get a real answer instead of a hallucination. As of this week it also ingests the agents' own session activity — Claude Code today, Codex CLI newly added, more planned[^1] — back into Berserk. The same platform that tells an SRE what their infrastructure is doing now tells an engineering leader what their AI coding agents are doing, and what it's costing.
+This reflexive design is the point. berserk-mcp doesn't just let an agent ask "what's the error rate on checkout-service" and get a real answer instead of a hallucination. As of this week it also ingests the agents' own session activity — Claude Code today, Codex CLI now merged and shipped, more planned[^1] — back into Berserk. The same platform that tells an SRE what their infrastructure is doing now tells an engineering leader what their AI coding agents are doing, and what it's costing.
 
 ### Shipped today
 - SRE & SOC analysis, mature — the pre-existing core
 - Untrusted-data fencing: log/trace content is treated as attacker-influenceable, not trusted, by design
-- Tool-tiering validated empirically this week across 8 real models — small/cheap models included, not assumed
-- Multi-agent telemetry ingestion (Claude Code + Codex, live-verified against real session data)
+- Model-routing reliability validated empirically via OpenRouter — a neutral, vendor-agnostic test bed, not just against Anthropic's own models — across 8 real models spanning 2 local and 6 cloud providers[^5]
+- Multi-agent telemetry ingestion (Claude Code + Codex), merged and shipped — a code review before merge caught and fixed 5 real reliability bugs in the ingestion path (silent data loss under concurrent writes, a state-corruption risk on a hard kill) that a happy-path test alone wouldn't have surfaced
+
+> **What the OpenRouter testing actually found:** the reliability floor for this tool-calling design is the 24B-parameter model class, not "small" in general — a 12B model tested below a dumb keyword-matching baseline, while every 24B+ model cleared it comfortably, and the best performer (93% tool-selection, 98% argument accuracy) cost under $100/month for a 4-engineer team even at heavy usage.[^5] That's a measured claim about a specific, known limit — not a marketing "works with any model."
 
 ### The reflexive layer
 - Per-feature and per-project AI cost economics, today
@@ -97,12 +99,14 @@ That progression — from watching, to quantifying, to actively governing and de
 
 ### Sources
 
-[^1]: Codex CLI ingestion adapter shipped and live-verified against real session data this week (issue #42); OpenCode planned next.
+[^1]: Codex CLI ingestion adapter merged 2026-08-23 (issue #42, PR #48) — code-reviewed pre-merge (5 reliability bugs found and fixed) and live-verified against real session data. OpenCode planned next.
 [^2]: [MarkTechPost, "Top LLM Observability and Evaluation Platforms in 2026" (Aug 2026)](https://www.marktechpost.com/2026/08/09/top-llm-observability-and-evaluation-platforms-in-2026-langfuse-langsmith-braintrust-arize-and-more-compared/); market-dynamics framing per the same survey of current platforms.
 [^3]: [Datadog MCP Server documentation](https://docs.datadoghq.com/mcp_server/); [Grafana Labs, MCP server for Prometheus/Loki/Tempo](https://grafana.com/blog/ai-observability-MCP-servers/).
 [^4]: [SiliconANGLE, "AWS launches FinOps agent to bring AI cost governance to cloud spend" (Jun 2026)](https://siliconangle.com/2026/06/11/aws-launches-finops-agent-bring-ai-cost-governance-cloud-spend-finopsx/); adoption figure per FinOps Foundation "State of FinOps 2026" survey commentary.
+[^5]: Full methodology, per-model table, and cost/caching analysis: [`model-routing-cost-validation-2026-08-23.md`](model-routing-cost-validation-2026-08-23.md). Models tested: 2 local (Ollama, Qwen2.5:7b / Llama3.1:8b) and 6 via OpenRouter (mistral-nemo, mistral-saba, mistral-small-3.2-24b-instruct, deepseek-v4-flash, deepseek-chat, stealth/ox-alpha). Caveat carried over honestly from that document: this is a first real data pass on this repo's own 69-tool schema, not yet a fully guardrailed model-ladder sweep (provider pinning and forced tool-parameter passthrough were not both applied) — directionally solid, not the final word.
 
 ### Related
 
 - Full designed version (diagrams, print-page layout): published as a Claude Artifact, link held by whoever prepared this draft — not embedded here since artifact URLs are private/session-scoped.
-- [`model-routing-cost-validation-2026-08-23.md`](model-routing-cost-validation-2026-08-23.md) — the underlying eval data behind the "tool-tiering validated empirically... across 8 real models" claim in section 1.
+- [`model-routing-cost-validation-2026-08-23.md`](model-routing-cost-validation-2026-08-23.md) — the underlying eval data behind the OpenRouter testing claims in section 1.
+- [`berserk-dev-brief-2026-08-20.md`](berserk-dev-brief-2026-08-20.md) — the engineering-facing counterpart to this brief, independently confirms the same Datadog/Grafana MCP-GA competitive facts and covers the reliability-measurement methodology (and its current gaps) in full rigor.
