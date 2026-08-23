@@ -704,7 +704,7 @@ T = TABLE
 # Issue #42: the claude_* lane's OTLP records are tagged by ingesting agent
 # via resource['service.name']. "claude-code" stays the default for zero
 # behavior change on existing callers; other agents register here as their
-# ingestion adapter ships (see ingestion/codex_ingest.py for the first one).
+# ingestion adapter ships (see ingestion/codex_adapter.py for the first one).
 _AGENT_SERVICE_NAMES = {
     "claude-code": "claude-code",
     "codex": "codex-cli",

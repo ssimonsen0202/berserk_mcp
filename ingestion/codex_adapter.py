@@ -39,6 +39,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
 import _http  # noqa: E402
+import _store  # noqa: E402
 
 SERVICE_NAME = "codex-cli"
 
@@ -228,25 +229,44 @@ def load_state(state_dir):
 
 def save_state(state_dir, state):
     Path(state_dir).mkdir(parents=True, exist_ok=True)
-    _state_path(state_dir).write_text(json.dumps(state))
+    path = _state_path(state_dir)
+    tmp = _store.unique_tmp_path(path)
+    tmp.write_text(json.dumps(state))
+    _store.atomic_replace(tmp, path)
 
 
 def process_file(path, offset, session_id_cache):
-    """Read new lines since `offset`, return (records, new_offset, session_id).
+    """Read complete lines since `offset`, return (records, new_offset, session_id).
     session_id is resolved once per file (session_meta line, else filename)
-    and cached across calls since a file's session_id never changes."""
+    and cached across calls since a file's session_id never changes.
+
+    Codex may still be appending to this file (an active session's rollout
+    is written live). Only bytes up to and including the last newline are
+    ever considered "read" -- a trailing partial line stays unconsumed so
+    the offset can never land mid-record. Reading past a partial line here
+    would permanently split that record across two runs: its first half
+    parsed (and dropped, since it's incomplete JSON) now, its second half
+    misread as a corrupt fragment next run."""
     session_id = session_id_cache.get(str(path))
-    records = []
     with open(path, "rb") as f:
         f.seek(offset)
-        for raw in f:
-            line = raw.decode("utf-8", "replace")
-            if session_id is None:
-                session_id = extract_session_id_from_line(line)
-            rec = parse_codex_line(line)
-            if rec is not None:
-                records.append(rec)
-        new_offset = f.tell()
+        data = f.read()
+
+    complete_end = data.rfind(b"\n")
+    if complete_end == -1:
+        return [], offset, session_id or extract_session_id_from_filename(path)
+
+    new_offset = offset + complete_end + 1
+    records = []
+    for raw in data[:complete_end].split(b"\n"):
+        if not raw:
+            continue
+        line = raw.decode("utf-8", "replace")
+        if session_id is None:
+            session_id = extract_session_id_from_line(line)
+        rec = parse_codex_line(line)
+        if rec is not None:
+            records.append(rec)
     if session_id is None:
         session_id = extract_session_id_from_filename(path)
     return records, new_offset, session_id
@@ -270,26 +290,44 @@ def run(codex_home, state_dir, otlp_endpoint, otlp_bearer, hostname, dry_run=Fal
         if current_size == offset:
             continue
 
-        records, new_offset, session_id = process_file(path, offset, session_ids)
+        try:
+            records, new_offset, session_id = process_file(path, offset, session_ids)
+        except OSError as exc:
+            # File vanished/rotated between the stat() above and here (a real
+            # race with Codex archiving a session). Skip it this run rather
+            # than crashing the whole batch -- state saved below still
+            # reflects every other file processed so far in this run.
+            sys.stderr.write(f"codex_adapter: skipping {path}: {exc}\n")
+            continue
         if session_id:
             session_ids[key] = session_id
 
+        file_had_failure = False
         for rec in records:
             payload = build_otlp_record(rec, session_id, hostname)
             if dry_run:
                 print(json.dumps(payload))
-            else:
-                headers = {"Content-Type": "application/json"}
-                if otlp_bearer:
-                    headers["Authorization"] = f"Bearer {otlp_bearer}"
-                _, err = _http.http_post_json(otlp_endpoint, headers, payload, timeout=30)
-                if err:
-                    sys.stderr.write(f"codex_adapter: OTLP post failed: {err}\n")
+                total_emitted += 1
+                continue
+            headers = {"Content-Type": "application/json"}
+            if otlp_bearer:
+                headers["Authorization"] = f"Bearer {otlp_bearer}"
+            _, err = _http.http_post_json(otlp_endpoint, headers, payload, timeout=30)
+            if err:
+                sys.stderr.write(f"codex_adapter: OTLP post failed: {err}\n")
+                file_had_failure = True
+                continue
             total_emitted += 1
 
-        offsets[key] = new_offset
+        # Only advance past what actually made it to Berserk. A partial
+        # failure mid-file leaves the offset where it was, so the whole
+        # file (including the records that did succeed) is retried next
+        # run -- a possible duplicate POST, never a silent drop.
+        if not file_had_failure:
+            offsets[key] = new_offset
 
-    save_state(state_dir, state)
+    if not dry_run:
+        save_state(state_dir, state)
     return total_emitted
 
 

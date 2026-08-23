@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Tests for ingestion/codex_adapter.py (issue #42). Pure parsing/normalization
-logic gets full unit coverage; the file-reading/state/POST wrapper is thin
-enough to verify by live smoke test against real ~/.codex data instead,
-matching this repo's existing convention (see test_ci_gate.py, test_run_eval_usage.py)."""
+logic gets full unit coverage. process_file() and run() -- the stateful
+file-reading/offset/POST wrapper -- also get direct tests here (a manual live
+smoke test against real ~/.codex data caught the happy path but missed the
+partial-line, failed-POST, and dry-run state-mutation bugs a real reviewer
+found; those paths are exercised explicitly below now)."""
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import codex_adapter as ca  # noqa: E402
@@ -116,6 +120,96 @@ class RedactTest(unittest.TestCase):
         text = "gAAAAABqiKrA0HJEI_e9dUDMeXRWAUz5IwDm9R6F9F-Q_7U1puS97atrpQ-isFgbVKU"
         redacted, count = ca.redact_text(text)
         self.assertGreaterEqual(count, 1)
+
+
+def _token_count_line():
+    return _line("event_msg", {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}})
+
+
+class ProcessFileTest(unittest.TestCase):
+    """A trailing partial line (Codex still writing) must never be consumed --
+    doing so would land the next run's offset mid-record (issue found in review)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "rollout-test.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_only_complete_lines_are_consumed(self):
+        line = _token_count_line()
+        self.path.write_bytes((line + "\n" + line + "\n").encode() + b'{"type": "event_msg", "pay')  # partial 3rd line
+        records, new_offset, _ = ca.process_file(self.path, 0, {})
+        self.assertEqual(len(records), 2)
+        # new_offset must land exactly after the 2nd line's newline, not past the partial 3rd
+        self.assertEqual(new_offset, len((line + "\n") * 2))
+
+    def test_next_call_with_returned_offset_does_not_reread_or_skip(self):
+        line = _token_count_line()
+        self.path.write_bytes((line + "\n").encode())
+        records1, offset1, _ = ca.process_file(self.path, 0, {})
+        self.assertEqual(len(records1), 1)
+        # nothing new since offset1 yet
+        records2, offset2, _ = ca.process_file(self.path, offset1, {})
+        self.assertEqual(records2, [])
+        self.assertEqual(offset2, offset1)
+        # now the partial line completes
+        with open(self.path, "ab") as f:
+            f.write((line + "\n").encode())
+        records3, offset3, _ = ca.process_file(self.path, offset1, {})
+        self.assertEqual(len(records3), 1)
+        self.assertGreater(offset3, offset1)
+
+    def test_all_complete_lines_consume_whole_file(self):
+        line = _token_count_line()
+        content = (line + "\n") * 3
+        self.path.write_bytes(content.encode())
+        records, new_offset, _ = ca.process_file(self.path, 0, {})
+        self.assertEqual(len(records), 3)
+        self.assertEqual(new_offset, len(content))
+
+
+class RunTest(unittest.TestCase):
+    """run()'s offset/state bookkeeping around POST failures and --dry-run."""
+
+    def setUp(self):
+        self.codex_home = tempfile.TemporaryDirectory()
+        self.state_dir = tempfile.TemporaryDirectory()
+        sessions = Path(self.codex_home.name) / "sessions" / "2026" / "01" / "01"
+        sessions.mkdir(parents=True)
+        self.rollout = sessions / "rollout-2026-01-01T00-00-00-01a025f2-a5e3-7b52-b2d4-c9ba463ddebb.jsonl"
+        self.rollout.write_bytes((_token_count_line() + "\n").encode())
+
+    def tearDown(self):
+        self.codex_home.cleanup()
+        self.state_dir.cleanup()
+
+    def test_failed_post_does_not_advance_offset_or_count_as_emitted(self):
+        with mock.patch.object(ca._http, "http_post_json", return_value=(None, "connection failed")):
+            n = ca.run(self.codex_home.name, self.state_dir.name, "https://example.invalid/v1/logs", None, "host")
+        self.assertEqual(n, 0)
+        state = ca.load_state(self.state_dir.name)
+        self.assertEqual(state["offsets"].get(str(self.rollout), 0), 0)
+
+    def test_successful_post_advances_offset_and_counts(self):
+        with mock.patch.object(ca._http, "http_post_json", return_value=({}, None)):
+            n = ca.run(self.codex_home.name, self.state_dir.name, "https://example.invalid/v1/logs", None, "host")
+        self.assertEqual(n, 1)
+        state = ca.load_state(self.state_dir.name)
+        self.assertGreater(state["offsets"][str(self.rollout)], 0)
+
+    def test_dry_run_does_not_persist_state(self):
+        ca.run(self.codex_home.name, self.state_dir.name, "", None, "host", dry_run=True)
+        self.assertFalse((Path(self.state_dir.name) / "codex_adapter_state.json").exists())
+
+    def test_dry_run_then_real_run_still_emits(self):
+        # Regression check: a dry run must not "consume" offsets that a
+        # subsequent real run needs to see.
+        ca.run(self.codex_home.name, self.state_dir.name, "", None, "host", dry_run=True)
+        with mock.patch.object(ca._http, "http_post_json", return_value=({}, None)):
+            n = ca.run(self.codex_home.name, self.state_dir.name, "https://example.invalid/v1/logs", None, "host")
+        self.assertEqual(n, 1)
 
 
 if __name__ == "__main__":
