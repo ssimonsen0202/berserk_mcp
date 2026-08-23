@@ -2811,6 +2811,57 @@ class RunBzrkAuthTest(unittest.TestCase):
         self.assertIn("BERSERK_MCP_MAX_RESULT_BYTES", text)
 
 
+class RunBzrkNoStreamTest(unittest.TestCase):
+    """bzrk search auto-detects "agent mode" from env vars a Claude Code /
+    Codex parent process sets, which a spawned bzrk subprocess inherits
+    unmodified -- confirmed by direct repro against a live bzrk binary:
+    identical invocation, identical piped stdout, produces a clean single
+    table without those env vars and a streamed multi-snapshot dump with
+    them present (which is berserk-mcp's actual default deployment
+    context, since it's normally launched BY Claude Code). Without
+    --no-stream, a byte-cap or timeout could silently return an early
+    partial increment as if it were the complete result. run_bzrk must
+    force --no-stream on every search call regardless of the calling
+    environment."""
+
+    def setUp(self):
+        self._orig = bm._run_argv_bounded
+        self._orig_resolved = bm._RESOLVED_BZRK_BIN
+        self.calls = []
+        bm._RESOLVED_BZRK_BIN = sys.executable
+
+    def tearDown(self):
+        bm._run_argv_bounded = self._orig
+        bm._RESOLVED_BZRK_BIN = self._orig_resolved
+
+    def _mock_run(self):
+        def fake(args, timeout, stdout_cap=bm.MAX_BZRK_RESULT_BYTES,
+                 stderr_cap=bm.MAX_BZRK_DIAGNOSTIC_CHARS):
+            self.calls.append(list(args))
+            return {
+                "returncode": 0, "stdout": b"ok", "stderr": b"",
+                "stdout_overflow": False, "stderr_overflow": False,
+            }
+        bm._run_argv_bounded = fake
+
+    def test_no_stream_appended_to_search_calls(self):
+        self._mock_run()
+        bm.run_bzrk(["-P", "prof", "search", "default | take 1", "--since", "1h ago"])
+        self.assertIn("--no-stream", self.calls[0])
+
+    def test_no_stream_not_duplicated_if_caller_already_passed_it(self):
+        self._mock_run()
+        bm.run_bzrk(["-P", "prof", "search", "default | take 1", "--no-stream"])
+        self.assertEqual(self.calls[0].count("--no-stream"), 1)
+
+    def test_no_stream_not_appended_to_non_search_calls(self):
+        # --no-stream is a `search`-subcommand flag; --version is a
+        # different, immediate-exit flag that may not accept it.
+        self._mock_run()
+        bm.run_bzrk(["--version"])
+        self.assertNotIn("--no-stream", self.calls[0])
+
+
 class BoundedProcessTest(unittest.TestCase):
     def test_bounded_runner_preserves_output_below_limit(self):
         result = bm._run_argv_bounded(
@@ -5620,6 +5671,19 @@ class WrongAnswerContainmentTest(unittest.TestCase):
         self.assertIn("silently matches zero rows", bm._BASE_INSTRUCTIONS)
         # Verify the remediation (discover_schema) is mentioned, not just the warning
         self.assertIn("discover_schema", bm._BASE_INSTRUCTIONS.lower())
+
+    def test_base_instructions_warn_about_search_term_boundaries(self):
+        # From the berserkdb/berserk-skills reference agent: an unexpectedly
+        # empty full-text search is usually a plural/delimiter mismatch, not
+        # missing data -- this is a distinct failure mode from the bare
+        # column-name case above (that one silently matches zero rows for a
+        # different reason) and needs its own locking test.
+        self.assertIn("plural or delimiter mismatch", bm._BASE_INSTRUCTIONS)
+        self.assertIn("wildcard", bm._BASE_INSTRUCTIONS.lower())
+
+    def test_base_instructions_recommend_case_insensitive_operator(self):
+        self.assertIn("=~", bm._BASE_INSTRUCTIONS)
+        self.assertIn("tolower", bm._BASE_INSTRUCTIONS)
 
     def test_search_tool_description_repeats_the_same_warning(self):
         search_tool = next(t for t in bm.TOOLS if t["name"] == "search")

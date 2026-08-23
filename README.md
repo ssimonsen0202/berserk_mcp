@@ -1587,6 +1587,19 @@ and cited as one thing.
   so the control is the warning existing and staying worded precisely,
   which is why it has a locking test: `WrongAnswerContainmentTest.
   test_base_instructions_warn_about_bare_column_names`.
+- **Full-text search term-boundary guidance.** `search "term"` matches whole
+  delimited tokens (`_-./:` and whitespace all delimit), not substrings — a
+  plural or singular mismatch (`search "journal"` vs a body containing
+  `journals`) silently returns zero rows exactly like the bare-column-name
+  case above, but for an unrelated reason a model would not otherwise think
+  to check. `_BASE_INSTRUCTIONS` names the wildcard escape (`search
+  "journal*"`) and recommends `=~`/`!~` over `tolower(field) == ...` for
+  case-insensitive matching, since the latter also silently degrades query
+  performance by defeating index pruning. Sourced from the
+  [berserkdb/berserk-skills](https://github.com/berserkdb/berserk-skills)
+  reference agent's own accumulated field notes. Locking tests:
+  `test_base_instructions_warn_about_search_term_boundaries`,
+  `test_base_instructions_recommend_case_insensitive_operator`.
 - **KQL validation rejects blockers before execution.** A query against the
   wrong table, or one carrying a source-introducing operator, is rejected
   by static validation before it reaches `bzrk` — rather than running and
