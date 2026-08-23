@@ -163,6 +163,42 @@ class AgentAnalyticsPureTest(unittest.TestCase):
         report = aa.analyze_token_burn_events([negative])[0]
         self.assertEqual(report["tokens"], 20)
 
+    def test_total_tokens_estimate_sums_across_sessions(self):
+        events = [
+            usage_row("s1", "2026-07-12T10:00:00Z", "Read", 100, 50),
+            usage_row("s2", "2026-07-12T10:05:00Z", "Edit", 200, 75),
+        ]
+        total, all_exact, is_err = aa.total_tokens_estimate(_events=events)
+        self.assertEqual(total, 425)
+        self.assertTrue(all_exact)
+        self.assertFalse(is_err)
+
+    def test_total_tokens_estimate_all_exact_false_when_any_session_estimated(self):
+        events = [
+            usage_row("exact", "2026-07-12T10:00:00Z", "Read", 100, 50),
+            row("estimated", "2026-07-12T10:05:00Z", "Edit", "x" * 40),
+        ]
+        total, all_exact, is_err = aa.total_tokens_estimate(_events=events)
+        self.assertEqual(total, 160)  # 150 exact + 10 estimated (40 chars / 4)
+        self.assertFalse(all_exact)
+        self.assertFalse(is_err)
+
+    def test_total_tokens_estimate_no_sessions_is_zero_not_error(self):
+        total, all_exact, is_err = aa.total_tokens_estimate(_events=[])
+        self.assertEqual(total, 0)
+        self.assertTrue(all_exact)
+        self.assertFalse(is_err)
+
+    def test_total_tokens_estimate_propagates_query_error(self):
+        orig_search = aa._bzrk_search
+        try:
+            aa._bzrk_search = lambda query, since: ("bzrk: connection refused", True)
+            total, all_exact, is_err = aa.total_tokens_estimate(since="5h ago")
+            self.assertIsNone(total)
+            self.assertTrue(is_err)
+        finally:
+            aa._bzrk_search = orig_search
+
     def test_parse_rows_accepts_json_array_and_wrapper(self):
         recs = [row("s1", "2026-07-12T10:00:00Z", "Edit", "a.py")]
         self.assertEqual(len(aa._parse_rows(json.dumps(recs))), 1)          # bare array
@@ -501,6 +537,36 @@ class AgentAnalyticsMcpTest(unittest.TestCase):
         self.assertIn("claude.tokens_input", self.calls[-1][3])
         self.assertIn("claude.tokens_output", self.calls[-1][3])
         self.assertNotIn("substring(tostring(body), 0, 80)", self.calls[-1][3])
+
+    def test_quota_status_tool_dispatches_via_quota_status_module(self):
+        # Rewired at the berserk_mcp import site (not quota_status's own
+        # internals) so this stays deterministic in CI and never touches a
+        # real macOS Keychain during test runs -- matches _RewiredAnalytics'
+        # rationale for agent_analytics.
+        orig = bm.quota_status.get_quota_status
+        try:
+            bm.quota_status.get_quota_status = lambda since: {
+                "source": "estimated", "ok": True, "since": since,
+                "total_tokens": 1234, "all_exact": True,
+            }
+            text, err = bm.handle_call("claude_quota_status", {})
+            self.assertFalse(err)
+            self.assertIn("1234", text)
+            self.assertIn("5h ago", text)
+        finally:
+            bm.quota_status.get_quota_status = orig
+
+    def test_quota_status_invalid_since_rejected_before_calling_out(self):
+        calls = []
+        orig = bm.quota_status.get_quota_status
+        try:
+            bm.quota_status.get_quota_status = lambda since: calls.append(since) or {}
+            text, err = bm.handle_call("claude_quota_status", {"since": "bad; nope"})
+            self.assertTrue(err)
+            self.assertIn("invalid 'since'", text)
+            self.assertEqual(calls, [])
+        finally:
+            bm.quota_status.get_quota_status = orig
 
     def test_burn_query_is_bounded_and_unordered(self):
         query = self.calls[-1][3] if self.calls else aa._burn_events_query()

@@ -136,6 +136,7 @@ PHRASINGS = {
     "claude_loop_check": ["is claude stuck in a loop", "detect claude retry loops", "loop detector for claude"],
     "claude_model_fit": ["is claude using the wrong model size for the task", "model fit heuristic", "frontier model on trivial work"],
     "claude_token_burn": ["how many tokens is claude burning", "token burn analysis", "which session used the most tokens"],
+    "claude_quota_status": ["how much of my 5 hour quota is left", "live claude usage window check", "am I about to hit my rate limit"],
     "claude_cost_report": ["claude code cost report", "daily token cost breakdown", "cost per day for claude"],
     "claude_session_deep_dive": ["deep dive into one claude session", "timeline drilldown for a session", "inspect a single session in detail"],
     "claude_workflow_insights": ["claude workflow patterns", "common tool sequences", "cross session workflow analysis"],

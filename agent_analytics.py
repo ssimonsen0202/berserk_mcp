@@ -693,6 +693,30 @@ def analyze_cost_daily(rows):
             "r2": None}
 
 
+def total_tokens_estimate(since="5h ago", _events=None):
+    """Sum tokens across every session in the window, reusing the same
+    exact/estimated accounting as claude_token_burn -- the log-derived
+    fallback source for quota_status.py (issue #43) when the live
+    Keychain+endpoint path is unavailable.
+
+    Returns (total_tokens, all_exact, is_err). total_tokens is None only
+    on a query error (is_err True); 0 with all_exact True means "no
+    sessions in this window", which is not an error."""
+    if _events is None:
+        text, is_err = _bzrk_search(_burn_events_query(), since)
+        if is_err:
+            return None, False, True
+        events = _parse_rows(text)
+    else:
+        events = _events
+    reports = analyze_token_burn_events(events)
+    if not reports:
+        return 0, True, False
+    total = sum(r["tokens"] for r in reports)
+    all_exact = all(r["token_source"] == "exact" for r in reports)
+    return total, all_exact, False
+
+
 def claude_token_burn(since="6h ago", _events=None):
     if _events is None:
         text, is_err = _bzrk_search(_burn_events_query(), since)

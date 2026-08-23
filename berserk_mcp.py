@@ -76,6 +76,7 @@ import ai_finops
 import ingestion_advisor
 import kql_validation
 import parser_factory
+import quota_status
 import schema_registry
 import secret_scan
 import tool_discovery
@@ -2241,6 +2242,7 @@ TOOLS = [
     {"name": "claude_loop_check", "roles": ["claude"], "description": "Claude Code loop detector. Heuristically flags sessions that repeat the same tool/target, retry errors, or oscillate between the same calls. Bodies are truncated; output is diagnostic, not raw transcript replay. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "claude_model_fit", "roles": ["claude"], "description": "Claude Code model-fit heuristic. Uses observed tool count, errors, duration, and loop signals to flag frontier models on trivial work or cheap models on complex/repetitive work. Not a billing statement. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "claude_token_burn", "roles": ["claude"], "description": "Claude Code token-burn analysis. Uses exact claude.tokens_input/output usage when present, falls back to a labeled body-length estimate per session, computes burn per distinct tool/file target, and joins high burn with loop signals. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "claude_quota_status", "roles": ["claude"], "description": "Live Claude Code quota-window check. Tries a real-time reading from Anthropic's own account usage endpoint first (macOS only, reads Claude Code's local Keychain credential — an undocumented endpoint, so treat exact fields as best-effort); falls back to a log-derived token estimate over the trailing window when the live path is unavailable for any reason. Does not require the ingestion daemon/forwarder to be running. 'since' only affects the fallback window, default 5h.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "claude_cost_report", "roles": ["claude"], "description": "Claude Code multi-day cost report: per-day token burn with exact/estimated labeling, per-model split, optional per-project attribution from file paths, and a burn-growing/flat/declining trend verdict. Default 7d.", "inputSchema": {"type": "object", "properties": dict({"group_by": {"type": "string", "enum": ["day", "model", "project"], "description": "Aggregation: by day (default), model, or inferred project."}}, **_since())}},
     {"name": "claude_session_deep_dive", "roles": ["claude"], "description": "Timeline drilldown for one Claude Code session: contiguous tool phases with error counts, activity gaps over 5 minutes, cumulative token burn (exact/estimated), and a loop verdict. Requires session_id (find them via claude_sessions).", "inputSchema": {"type": "object", "properties": dict({"session_id": {"type": "string", "maxLength": agent_analytics.MAX_SESSION_ID_CHARS, "description": "claude.session_id value"}}, **_since()), "required": ["session_id"]}},
     {"name": "claude_workflow_insights", "roles": ["claude"], "description": "Cross-session Claude Code workflow patterns: most common tool sequences, error hotspots by tool+target, and top-decile burn-per-target sessions. Use for 'how is my agent working overall?'. Default 7d.", "inputSchema": {"type": "object", "properties": _since()}},
@@ -2368,6 +2370,7 @@ TITLES = {
     "claude_loop_check": "Claude Code: Loop Check",
     "claude_model_fit": "Claude Code: Model Fit",
     "claude_token_burn": "Claude Code: Token Burn",
+    "claude_quota_status": "Claude Code: Quota Status",
     "claude_cost_report": "Claude Code: Cost Report",
     "claude_session_deep_dive": "Claude Code: Session Deep Dive",
     "claude_workflow_insights": "Claude Code: Workflow Insights",
@@ -3079,6 +3082,15 @@ def _handle_call_uncached(name, arguments):
                 f"'2d ago', or 'now'."
             ), True
         return _wrap_analytics(agent_analytics.claude_token_burn(since))
+    if name == "claude_quota_status":
+        since = arguments.get("since") or "5h ago"
+        if not valid_since(since):
+            return (
+                f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', "
+                f"'2d ago', or 'now'."
+            ), True
+        result = quota_status.get_quota_status(since=since)
+        return quota_status.format_quota_status(result), False
     if name == "claude_cost_report":
         since = arguments.get("since") or "7d ago"
         if not valid_since(since):
