@@ -1633,10 +1633,9 @@ and cited as one thing.
   silently returning the wrong thing — but it belongs in the same "can we
   trust what came back" conversation. Real telemetry rows are wrapped in an
   explicit `<untrusted_log_data>` marker before reaching the model, with a
-  matching instruction to treat the content strictly as data. **This fencing
-  is issue #11 and ships on the separate `feat/untrusted-data-fencing`
-  branch (PR #26), which is not yet merged as of this writing** — the
-  description above is not yet true of `main`.
+  matching instruction to treat the content strictly as data. This fencing
+  is issue #11; see `_fence_untrusted` and the `UntrustedDataFencing*` test
+  classes for the full call-site coverage and threat-model detail.
 
 ## Testing
 
