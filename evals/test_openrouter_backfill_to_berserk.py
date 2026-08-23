@@ -138,6 +138,21 @@ class RunBackfillTest(unittest.TestCase):
         ok = run_backfill(self.raw_path, self.state_path, "http://x/v1/logs",
                            batch_size=25, dry_run=True, post_fn=should_not_be_called)
         self.assertTrue(ok)
+
+    def test_dry_run_does_not_persist_state_a_real_run_afterward_still_sees_everything(self):
+        # Regression: an earlier version advanced and wrote the state file
+        # even in dry-run, so a real run right after a preview would think
+        # this range was already done and silently skip it -- caught by
+        # actually dry-running the deployed script before the real
+        # backfill, not by reasoning about it in advance.
+        self._write_raw(3)
+        run_backfill(self.raw_path, self.state_path, "http://x/v1/logs",
+                      batch_size=25, dry_run=True, post_fn=lambda *a, **k: (_ for _ in ()).throw(AssertionError))
+        self.assertEqual(_read_state(self.state_path), 0)
+        ok = run_backfill(self.raw_path, self.state_path, "http://x/v1/logs",
+                           batch_size=25, post_fn=self._fake_post)
+        self.assertTrue(ok)
+        self.assertEqual(len(self.posted[0]["resourceLogs"]), 3)
         self.assertEqual(_read_state(self.state_path), 3)
 
     def test_malformed_line_is_skipped_not_fatal(self):
