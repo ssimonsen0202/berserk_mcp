@@ -1,3 +1,12 @@
+> **Scope, read this first.** This document is about **berserk-mcp** — the
+> MCP server that exposes Berserk's data to AI agents as callable tools —
+> not about Berserk's own, separate AI-driven feature. Those are two
+> different things built on the same Berserk core: Berserk's own AI feature
+> is Berserk-side, product-facing; berserk-mcp is the agent-facing interface
+> layer this whole brief is scoped to. Everywhere below that says "Berserk"
+> without qualification, read it as "the Berserk platform berserk-mcp sits
+> on top of and queries," not as a reference to that other feature.
+
 > **Correction, 2026-08-20.** Two items in §5's backlog table are already
 > shipped, ahead of this brief:
 >
@@ -17,6 +26,49 @@
 > The rest of the analysis (market landscape, scope rationale, local-model
 > reliability framing, eval methodology) is unaffected. Original text below
 > is unedited.
+
+> **Update, 2026-08-23.** §4's core question has a first real answer, not
+> just a proposed methodology anymore — a real-model eval sweep ran
+> 2026-08-22/23 (local Ollama + OpenRouter, 8 models, this repo's own
+> 69-tool schema). Full data and sourcing:
+> [`model-routing-cost-validation-2026-08-23.md`](model-routing-cost-validation-2026-08-23.md).
+> Headline: the reliability floor in the data is the **24B parameter
+> class**, not sub-14B as the literature review below implied might be
+> viable with enough harness support — a 12B model (mistral-nemo) scored
+> *below* the dumb keyword-matching baseline, while 24B-class models
+> cleared it comfortably. See the new subsection at the end of §4 for the
+> full table and, importantly, which of this section's own three
+> measurement guardrails that data does and doesn't satisfy — it's real
+> signal, not yet the rigorous sweep this brief specifies.
+>
+> Also shipped since this brief: **issue #37**, per-case token cost and
+> cache-hit-rate now persist in eval results (directly feeds the
+> "cost-per-correct-answer per rung" metric §4 asks for), and **issue
+> #42**, multi-agent telemetry ingestion — Codex CLI is now a second
+> ingested agent alongside Claude Code. This doesn't touch the Berserk-only
+> *backend* scope constraint in §2 (still one backend, bzrk); it's
+> orthogonal — more agent *sources* feeding the same single backend, not a
+> second backend. Tool count is 69 as of this update (was 59 when this
+> brief was written) — worth naming explicitly since §4(a) argues surface
+> size is the dominant lever on small-model reliability; the growth is in
+> the FinOps/economics lane, not the router-critical path, but it's still
+> more schema on every call.
+>
+> **Connecting this to the investor-facing read** —
+> [`investor-brief-berserk-mcp-2026-08-23.md`](investor-brief-berserk-mcp-2026-08-23.md)
+> covers the same competitive ground as §1 below independently, and lands on the
+> same facts (Datadog MCP GA March 2026, Grafana MCP early 2026) — worth treating
+> as cross-validation, not coincidence. But it surfaces a differentiator this
+> brief's §2/§3 don't name as one: fixed-queries-for-reproducibility and
+> local-for-sovereignty are the two pillars argued below, and they're both still
+> right, but the `claude_*` lane's cost/spend economics — largely built already,
+> ahead of any explicit roadmap item here — is a *third* one, positioned against
+> the exact same incumbents named in §1. Their MCP servers expose infra data
+> outward to agents; ours does that *and* turns around and reports what the
+> agents themselves are costing. Worth deciding whether that belongs as an
+> explicit pillar in this brief's own framing, not just the investor one — this
+> doc should keep evolving as both sides of the market/engineering read sharpen
+> each other, not stay fixed as of any one date.
 
 # Berserk MCP — where the market went, and where we sit
 
@@ -233,6 +285,48 @@ locally and publish the delta. **Nothing goes out externally without it.** OpenR
 measurement instrument, never a runtime dependency — nothing in the shipped server imports
 it.
 
+### First real data (2026-08-22/23) — a data point, not yet the sweep above
+
+Ran the existing eval harness (`evals/run_eval.py`, already OpenRouter-capable) across 8
+models — 2 local (Ollama), 6 cloud — against the current 41-case router set and this repo's
+real 69-tool schema. Full table, methodology, and cost/caching analysis:
+[`model-routing-cost-validation-2026-08-23.md`](model-routing-cost-validation-2026-08-23.md).
+Headline numbers:
+
+| Model | Class | Tool-selection | vs. baseline (65.9%) |
+|---|---|---|---|
+| Qwen2.5:7b / Llama3.1:8b (local) | ~7-8B | 5-7% | Fails badly |
+| mistral-nemo | ~12B | 63% | **Fails** — below the dumb keyword matcher |
+| mistral-saba | ~24B | 83% | Clears it |
+| mistral-small-3.2-24b-instruct (open-weight) | ~24B | 78% | Clears it |
+| deepseek-v4-flash | 284B MoE, ~13B active | 88% | Clears it well |
+| deepseek-chat | undisclosed | 93% | Clears it well |
+
+This is real signal, directionally consistent with the 14B/32B literature thresholds cited
+above (the floor we measured, 24B, sits between them) — but it does **not** yet satisfy this
+section's own bar, and that gap should stay visible rather than get rounded off:
+
+- **Metric mismatch.** This measured aggregate tool-selection accuracy, the exact single
+  number §4(c) argues is "nearly useless as a safety signal because it merges two failure
+  classes." No silent-failure-rate / per-question-success split was computed. The 24B-floor
+  finding is real, but we don't yet know what fraction of that floor's remaining ~15-20%
+  error is loud-and-obvious versus silent-and-plausible — which is the number that actually
+  matters for the 04:00 on-call scenario this section opens with.
+- **Guardrails: 1 of 3.** Synthetic fixtures only — satisfied, no real hostnames/customer
+  data in the case file. `provider.require_parameters` — **not set**; tool calls came back
+  correctly-shaped across every model tested, which is weak evidence the parameter passthrough
+  worked, but it was never explicitly forced, so a silently-ignored-tools failure mode can't be
+  fully ruled out. Provider pinning — **not done**; OpenRouter's default routing was used, so
+  quantization could have varied call-to-call for a given model slug.
+- **No local-quantization parity step yet.** The winning models above were measured at
+  OpenRouter's hosted quantization only. Mistral Small 3.2 24B is the one open-weight,
+  genuinely self-hostable candidate in the table — it hasn't actually been run locally yet to
+  check the delta this section calls mandatory before anything ships externally.
+
+Net: real progress on the question, not a closed one. Issues #22 (routing reliability
+analyzer) and #23 (OpenRouter model-ladder sweep with guardrails) — both still open — are
+where the rest of this section's bar gets met.
+
 ---
 
 ## 5. What this means for what we build
@@ -240,16 +334,16 @@ it.
 Measurement first. We have 31 synthetic router cases covering 21 of 59 tools and no eval
 running in CI, so everything else would ship blind.
 
-| Order | Work | Why |
-|---|---|---|
-| 1 | Eval expansion + OpenRouter backend + telemetry capture | No baseline today. Nothing below is verifiable without it |
-| 2 | **Wrong-answer containment** — silent-failure taxonomy, one control per class, CI gate ≤0.5% | The only hard reliability gate. Copy Datadog's verdict/uninterpretability shapes |
-| 3 | Fence telemetry rows as untrusted data | Security. Small. Currently a hole in our own argument |
-| 4 | Result envelope — echo resolved window, disambiguate `(no rows)`, degrade overflow to a marked summary | 24 tools return raw output with no window echo. Attacks silent failure directly |
-| 5 | Principal refactor (role per-request, no behaviour change) | Blocks discovery, tiers and the ledger. Do it once |
-| 6 | JIT discovery + `next_call` hints | The dominant lever on small-model reliability |
-| 7 | Audit ledger + scoped principals | Clearest differentiator; also becomes the real eval corpus |
-| 8 | Investigation decision tree | Answers the composition ceiling without code execution |
+| Order | Work | Why | Status (2026-08-23) |
+|---|---|---|---|
+| 1 | Eval expansion + OpenRouter backend + telemetry capture | No baseline today. Nothing below is verifiable without it | **Partial.** CI-wiring done (#13, closed). Cost/cache telemetry persists (#37, closed). Full model-ladder sweep with all 3 guardrails still open — #22, #23 |
+| 2 | **Wrong-answer containment** — silent-failure taxonomy, one control per class, CI gate ≤0.5% | The only hard reliability gate. Copy Datadog's verdict/uninterpretability shapes | **Done** — #12, closed |
+| 3 | Fence telemetry rows as untrusted data | Security. Small. Currently a hole in our own argument | **Done** — #11, closed |
+| 4 | Result envelope — echo resolved window, disambiguate `(no rows)`, degrade overflow to a marked summary | 24 tools return raw output with no window echo. Attacks silent failure directly | **Done** — see correction block at top of this doc |
+| 5 | Principal refactor (role per-request, no behaviour change) | Blocks discovery, tiers and the ledger. Do it once | Open — #16 |
+| 6 | JIT discovery + `next_call` hints | The dominant lever on small-model reliability | Open — #14 |
+| 7 | Audit ledger + scoped principals | Clearest differentiator; also becomes the real eval corpus | Open — #17 |
+| 8 | Investigation decision tree | Answers the composition ceiling without code execution | Open — #24, explicitly needs a design decision before starting |
 
 Deferred, not cancelled: saved-query projection into `tools/list` (do it after discovery,
 so packs land in a discovery surface rather than a flat list) and the coverage-gap tool.
