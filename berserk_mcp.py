@@ -700,7 +700,26 @@ def save_json_list(path, items):
 # ---------- verified queries (do not edit field names; they are confirmed
 # against the live `default` schema — see docs/claude-code.md) ----------
 T = TABLE
-CC = f"{T} | where resource['service.name'] == 'claude-code'"
+
+# Issue #42: the claude_* lane's OTLP records are tagged by ingesting agent
+# via resource['service.name']. "claude-code" stays the default for zero
+# behavior change on existing callers; other agents register here as their
+# ingestion adapter ships (see ingestion/codex_ingest.py for the first one).
+_AGENT_SERVICE_NAMES = {
+    "claude-code": "claude-code",
+    "codex": "codex-cli",
+}
+
+
+def _service_filter(agent):
+    """KQL filter clause for one ingesting agent's OTLP records. Unknown
+    agent names fall back to 'claude-code' rather than erroring, matching
+    every other tool's default-since-style leniency on optional args."""
+    service = _AGENT_SERVICE_NAMES.get(agent, _AGENT_SERVICE_NAMES["claude-code"])
+    return f"{T} | where resource['service.name'] == '{service}'"
+
+
+CC = _service_filter("claude-code")
 
 Q_CONTAINERS = (
     f"{T} | where isnotnull(metric_name) | where isnotempty(resource['container.name']) "
@@ -928,31 +947,45 @@ def q_discover_fieldstats(service=None):
     filt = f"| where resource['service.name'] == '{service}' " if service else ""
     depth = 2 if service else 1
     return f"{T} {filt}| fieldstats resource with limit=50 depth={depth}"
-Q_CC_RECENT = (
-    f"{CC} | tail 60 | project ts=timestamp, typ=tostring(attributes['claude.type']), "
-    f"role=tostring(attributes['claude.message_role']), "
-    f"model=tostring(attributes['claude.message_model']), "
-    f"tools=tostring(attributes['claude.tool_names']), "
-    f"err=tostring(attributes['claude.error'])"
-)
-Q_CC_SESSIONS = (
-    f"{CC} | summarize events=count(), first=min(timestamp), last=max(timestamp), "
-    f"assistant_turns=countif(tostring(attributes['claude.type'])=='assistant'), "
-    f"tool_turns=countif(isnotempty(tostring(attributes['claude.tool_names']))), "
-    f"errors=countif(tostring(attributes['claude.error'])=='true') "
-    f"by session=tostring(attributes['claude.session_id']) | sort by last desc | take 40"
-)
-Q_CC_TOOLS = (
-    f"{CC} | where isnotempty(tostring(attributes['claude.tool_names'])) "
-    f"| mv-expand t=split(tostring(attributes['claude.tool_names']), ',') "
-    f"| summarize uses=count() by tool=tostring(t) | sort by uses desc | take 40"
-)
-Q_CC_ERRORS = (
-    f"{CC} | where tostring(attributes['claude.error'])=='true' "
-    f"| tail 40 | project ts=timestamp, typ=tostring(attributes['claude.type']), "
-    f"tools=tostring(attributes['claude.tool_names']), "
-    f"body=substring(tostring(body),0,220)"
-)
+def q_cc_recent(agent="claude-code"):
+    cc = _service_filter(agent)
+    return (
+        f"{cc} | tail 60 | project ts=timestamp, typ=tostring(attributes['claude.type']), "
+        f"role=tostring(attributes['claude.message_role']), "
+        f"model=tostring(attributes['claude.message_model']), "
+        f"tools=tostring(attributes['claude.tool_names']), "
+        f"err=tostring(attributes['claude.error'])"
+    )
+
+
+def q_cc_sessions(agent="claude-code"):
+    cc = _service_filter(agent)
+    return (
+        f"{cc} | summarize events=count(), first=min(timestamp), last=max(timestamp), "
+        f"assistant_turns=countif(tostring(attributes['claude.type'])=='assistant'), "
+        f"tool_turns=countif(isnotempty(tostring(attributes['claude.tool_names']))), "
+        f"errors=countif(tostring(attributes['claude.error'])=='true') "
+        f"by session=tostring(attributes['claude.session_id']) | sort by last desc | take 40"
+    )
+
+
+def q_cc_tools(agent="claude-code"):
+    cc = _service_filter(agent)
+    return (
+        f"{cc} | where isnotempty(tostring(attributes['claude.tool_names'])) "
+        f"| mv-expand t=split(tostring(attributes['claude.tool_names']), ',') "
+        f"| summarize uses=count() by tool=tostring(t) | sort by uses desc | take 40"
+    )
+
+
+def q_cc_errors(agent="claude-code"):
+    cc = _service_filter(agent)
+    return (
+        f"{cc} | where tostring(attributes['claude.error'])=='true' "
+        f"| tail 40 | project ts=timestamp, typ=tostring(attributes['claude.type']), "
+        f"tools=tostring(attributes['claude.tool_names']), "
+        f"body=substring(tostring(body),0,220)"
+    )
 
 
 def q_logs(svc: str) -> str:
@@ -963,9 +996,10 @@ def q_logs(svc: str) -> str:
     )
 
 
-def q_cc_search(term: str) -> str:
+def q_cc_search(term: str, agent="claude-code") -> str:
+    cc = _service_filter(agent)
     return (
-        f"{CC} | where tostring(body) contains '{term}' "
+        f"{cc} | where tostring(body) contains '{term}' "
         f"| tail 40 | project ts=timestamp, typ=tostring(attributes['claude.type']), "
         f"model=tostring(attributes['claude.message_model']), "
         f"tools=tostring(attributes['claude.tool_names']), "
@@ -1908,6 +1942,17 @@ def _since():
     }
 
 
+def _agent_prop():
+    return {
+        "agent": {
+            "type": "string",
+            "description": "Which ingesting agent's activity to query. Defaults to Claude Code.",
+            "enum": sorted(_AGENT_SERVICE_NAMES.keys()),
+            "default": "claude-code",
+        }
+    }
+
+
 _REPORT_OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -2004,10 +2049,6 @@ SIMPLE = {
     "soc_high_severity_logs": (Q_SOC_HIGH_SEV, "1h ago"),
     "soc_log_spike": (Q_SOC_LOG_SPIKE, "1h ago"),
     "soc_repeated_errors": (Q_SOC_REPEATED_ERRORS, "6h ago"),
-    "claude_recent": (Q_CC_RECENT, "1h ago"),
-    "claude_sessions": (Q_CC_SESSIONS, "6h ago"),
-    "claude_tools": (Q_CC_TOOLS, "6h ago"),
-    "claude_errors": (Q_CC_ERRORS, "6h ago"),
     "trace_find_slow": (Q_TRACE_FIND_SLOW, "1h ago"),
     "trace_find_errors": (Q_TRACE_FIND_ERRORS, "1h ago"),
 }
@@ -2025,6 +2066,16 @@ SIMPLE = {
 _SIMPLE_JSON_TOOLS = {
     "claude_errors", "soc_high_severity_logs",
     "sre_top_error_messages", "soc_repeated_errors",
+}
+
+# Issue #42: these four take an optional `agent` argument (default
+# "claude-code"), so their query is resolved lazily via a callable rather
+# than the fixed string every other SIMPLE tool uses.
+_AGENT_AWARE_SIMPLE = {
+    "claude_recent": (q_cc_recent, "1h ago"),
+    "claude_sessions": (q_cc_sessions, "6h ago"),
+    "claude_tools": (q_cc_tools, "6h ago"),
+    "claude_errors": (q_cc_errors, "6h ago"),
 }
 
 _EMPTY_NEXT_STEP = {
@@ -2181,11 +2232,11 @@ TOOLS = [
     {"name": "soc_repeated_errors", "roles": ["soc"], "description": "SOC view of error messages that appear more than 5 times — potential probes, loops, or persistent incidents. Use for 'what keeps repeating' or 'show recurring failures'.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "soc_timeline", "roles": ["soc"], "description": "SOC incident timeline for one service: timestamps, severity, metric names, and message snippets. Use for 'timeline for service X' or 'reconstruct incident for X'.", "inputSchema": {"type": "object", "properties": dict({"service": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "service.name value"}}, **_since()), "required": ["service"]}},
     # --- Claude Code activity (service.name == 'claude-code'); low-volume, keep windows bounded ---
-    {"name": "claude_recent", "roles": ["claude"], "description": "Recent Claude Code activity (timestamp, type, role, model, tool names, error flag), newest first. Default window 1h.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "claude_sessions", "roles": ["claude"], "description": "Claude Code sessions rollup: events, first/last seen, assistant turns, tool turns, and error count per session. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "claude_tools", "roles": ["claude"], "description": "Claude Code tool-use histogram — how many times each tool (Bash, Edit, Read, ...) was used. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "claude_errors", "roles": ["claude"], "description": "Claude Code tool errors — failed tool results (is_error=true) with a body snippet. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
-    {"name": "claude_search", "roles": ["claude"], "description": "Full-text search across Claude Code message and tool bodies for a substring. Default 6h.", "inputSchema": {"type": "object", "properties": dict({"term": {"type": "string", "maxLength": MAX_SEARCH_TERM_CHARS, "description": "substring to find; may not contain quotes, pipe, backslash, backtick, or controls"}}, **_since()), "required": ["term"]}},
+    {"name": "claude_recent", "roles": ["claude"], "description": "Recent Claude Code (or other ingested agent) activity (timestamp, type, role, model, tool names, error flag), newest first. Default window 1h.", "inputSchema": {"type": "object", "properties": dict(_since(), **_agent_prop())}},
+    {"name": "claude_sessions", "roles": ["claude"], "description": "Claude Code (or other ingested agent) sessions rollup: events, first/last seen, assistant turns, tool turns, and error count per session. Default 6h.", "inputSchema": {"type": "object", "properties": dict(_since(), **_agent_prop())}},
+    {"name": "claude_tools", "roles": ["claude"], "description": "Claude Code (or other ingested agent) tool-use histogram — how many times each tool (Bash, Edit, Read, ...) was used. Default 6h.", "inputSchema": {"type": "object", "properties": dict(_since(), **_agent_prop())}},
+    {"name": "claude_errors", "roles": ["claude"], "description": "Claude Code (or other ingested agent) tool errors — failed tool results (is_error=true) with a body snippet. Default 6h.", "inputSchema": {"type": "object", "properties": dict(_since(), **_agent_prop())}},
+    {"name": "claude_search", "roles": ["claude"], "description": "Full-text search across Claude Code (or other ingested agent) message and tool bodies for a substring. Default 6h.", "inputSchema": {"type": "object", "properties": dict({"term": {"type": "string", "maxLength": MAX_SEARCH_TERM_CHARS, "description": "substring to find; may not contain quotes, pipe, backslash, backtick, or controls"}}, **_since(), **_agent_prop()), "required": ["term"]}},
     {"name": "claude_loop_check", "roles": ["claude"], "description": "Claude Code loop detector. Heuristically flags sessions that repeat the same tool/target, retry errors, or oscillate between the same calls. Bodies are truncated; output is diagnostic, not raw transcript replay. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "claude_model_fit", "roles": ["claude"], "description": "Claude Code model-fit heuristic. Uses observed tool count, errors, duration, and loop signals to flag frontier models on trivial work or cheap models on complex/repetitive work. Not a billing statement. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "claude_token_burn", "roles": ["claude"], "description": "Claude Code token-burn analysis. Uses exact claude.tokens_input/output usage when present, falls back to a labeled body-length estimate per session, computes burn per distinct tool/file target, and joins high burn with loop signals. Default 6h.", "inputSchema": {"type": "object", "properties": _since()}},
@@ -2764,8 +2815,12 @@ def _handle_call_uncached(name, arguments):
         return _fence_untrusted(out), False
 
     # --- simple fixed-query tools ---
-    if name in SIMPLE:
-        kql, default_since = SIMPLE[name]
+    if name in SIMPLE or name in _AGENT_AWARE_SIMPLE:
+        if name in _AGENT_AWARE_SIMPLE:
+            kql_fn, default_since = _AGENT_AWARE_SIMPLE[name]
+            kql = kql_fn(arguments.get("agent") or "claude-code")
+        else:
+            kql, default_since = SIMPLE[name]
         since = arguments.get("since") or default_since
         if name in _SIMPLE_JSON_TOOLS:
             out, err = bzrk_search_json(kql, since)
@@ -2950,7 +3005,8 @@ def _handle_call_uncached(name, arguments):
         if _TEXT_GUARD_RE.search(str(term)):
             return "term may not contain quotes, pipe, backslash, or backtick", True
         since = arguments.get("since") or "6h ago"
-        out, err = bzrk_search_json(q_cc_search(str(term)), since)
+        agent = arguments.get("agent") or "claude-code"
+        out, err = bzrk_search_json(q_cc_search(str(term), agent), since)
         return _fence_untrusted(out), err
     if name == "claude_loop_check":
         since = arguments.get("since") or "6h ago"
