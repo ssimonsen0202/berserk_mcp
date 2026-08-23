@@ -117,6 +117,12 @@ def run_stdio_smoke(command):
     env = os.environ.copy()
     env["BERSERK_MCP_ENABLE_2026_07_28"] = "1"
     env.setdefault("BERSERK_MCP_ROLE", "claude")
+    # This smoke test exercises protocol plumbing (does `search`, tools/call,
+    # etc. work end-to-end), not tiering/routing policy -- role=claude alone
+    # would now resolve to tier=small (issue #4) and hide `search`, breaking
+    # a plumbing test that has nothing to do with tiering. Force deep so the
+    # full protocol surface stays exercised regardless of tier defaults.
+    env.setdefault("BERSERK_MCP_TIER", "deep")
     env.setdefault(
         "BERSERK_MCP_REPORT_DIR",
         str(Path(tempfile.gettempdir()) / "berserk-mcp-protocol-smoke-reports"),
@@ -341,6 +347,12 @@ def run_http_smoke(command):
     env["BERSERK_MCP_HTTP_BIND"] = f"127.0.0.1:{port}"
     env["BERSERK_MCP_HTTP_AUTH_TOKEN"] = token
     env.setdefault("BERSERK_MCP_ROLE", "claude")
+    # This smoke test exercises protocol plumbing (does `search`, tools/call,
+    # etc. work end-to-end), not tiering/routing policy -- role=claude alone
+    # would now resolve to tier=small (issue #4) and hide `search`, breaking
+    # a plumbing test that has nothing to do with tiering. Force deep so the
+    # full protocol surface stays exercised regardless of tier defaults.
+    env.setdefault("BERSERK_MCP_TIER", "deep")
     http_command = list(command)
     http_command.append("--http")
     proc = subprocess.Popen(
