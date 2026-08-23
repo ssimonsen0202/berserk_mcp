@@ -208,6 +208,41 @@ def call_mock(user, tools):
     return pick(), {}, 0.0, {}
 
 
+# ---------- usage/cost extraction ----------
+def usage_fields(usage):
+    """Extract the per-call fields worth persisting from a raw `usage` dict.
+    Token counts default to 0 -- an empty/missing usage means no tokens were
+    used (e.g. the mock backend). cost_usd/cached_tokens default to None --
+    their absence means "this backend doesn't report it", not "it was free"
+    or "nothing was cached"; a fabricated 0 there would be misleading."""
+    usage = usage or {}
+    prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0
+    completion_tokens = usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0
+    cost_usd = usage.get("cost")
+    cached_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "cost_usd": cost_usd,
+        "cached_tokens": cached_tokens,
+    }
+
+
+def aggregate_usage(rows):
+    """Sum per-row token/cost fields into the top-level report fields.
+    total_cost_usd is None (not 0) when no row reported a cost -- absence of
+    cost data must not be misread as a free run."""
+    total_input_tokens = sum(r.get("prompt_tokens", 0) or 0 for r in rows)
+    total_output_tokens = sum(r.get("completion_tokens", 0) or 0 for r in rows)
+    costs = [r.get("cost_usd") for r in rows if r.get("cost_usd") is not None]
+    total_cost_usd = sum(costs) if costs else None
+    return {
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "total_cost_usd": total_cost_usd,
+    }
+
+
 # ---------- scoring ----------
 def score_case(case, tool_name, args):
     tool_ok = (tool_name == case["expect_tool"])
@@ -276,7 +311,7 @@ def main():
     print(f"{'case':<22}{'expected':<20}{'got':<20}{'tool':<6}{'arg':<5}{'ms':>7}")
     print("-" * 80)
 
-    rows, tool_hits, arg_hits, lat, in_tok, out_tok = [], 0, 0, [], 0, 0
+    rows, tool_hits, arg_hits, lat = [], 0, 0, []
     total = 0
     for case in cases:
         for _ in range(args_ns.repeats):
@@ -291,21 +326,23 @@ def main():
             tool_hits += tool_ok
             arg_hits += arg_ok
             lat.append(dt)
-            in_tok += usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0
-            out_tok += usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0
             print(f"{case['id']:<22}{case['expect_tool']:<20}{str(name):<20}"
                   f"{'OK' if tool_ok else 'X':<6}{'OK' if arg_ok else '-':<5}{dt*1000:>7.0f}")
             rows.append({"id": case["id"], "expect": case["expect_tool"], "got": name,
-                         "tool_ok": tool_ok, "arg_ok": arg_ok, "args": cargs, "ms": round(dt*1000)})
+                         "tool_ok": tool_ok, "arg_ok": arg_ok, "args": cargs, "ms": round(dt*1000),
+                         **usage_fields(usage)})
 
+    agg = aggregate_usage(rows)
     print("-" * 80)
     print(f"tool-selection accuracy : {tool_hits}/{total} = {100*tool_hits/total:.0f}%")
     print(f"argument accuracy       : {arg_hits}/{total} = {100*arg_hits/total:.0f}%")
     if any(lat):
         print(f"latency median/p95      : {statistics.median(lat)*1000:.0f} ms / "
               f"{sorted(lat)[max(0,int(0.95*len(lat))-1)]*1000:.0f} ms")
-    if in_tok or out_tok:
-        print(f"tokens in/out           : {in_tok} / {out_tok}")
+    if agg["total_input_tokens"] or agg["total_output_tokens"]:
+        print(f"tokens in/out           : {agg['total_input_tokens']} / {agg['total_output_tokens']}")
+    if agg["total_cost_usd"] is not None:
+        print(f"total cost              : ${agg['total_cost_usd']:.4f}")
 
     outdir = HERE / "results"
     outdir.mkdir(exist_ok=True)
@@ -313,7 +350,7 @@ def main():
     safe = label.replace(":", "_").replace("/", "_")
     report = {"backend": backend, "model": args_ns.model, "repeats": args_ns.repeats,
               "tool_accuracy": tool_hits/total, "arg_accuracy": arg_hits/total,
-              "rows": rows}
+              **agg, "rows": rows}
     (outdir / f"{safe}-{stamp}.json").write_text(json.dumps(report, indent=2))
     print(f"\nsaved: evals/results/{safe}-{stamp}.json")
 
