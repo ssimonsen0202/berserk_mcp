@@ -94,20 +94,25 @@ def run_backfill(raw_path, state_path, endpoint, batch_size=25, dry_run=False,
     total_spans = 0
 
     def flush():
+        # dry_run never calls _write_state, anywhere in this function --
+        # a preview run must be fully non-destructive to resume state, or
+        # a real run afterward would think this range is already done and
+        # silently skip it (caught by actually dry-running this script
+        # before a real backfill, not by reasoning about it in advance).
         nonlocal batch_payloads, batch_line_count, total_forwarded_lines, total_spans
         if not batch_payloads:
             return True
         merged = merge_payloads(batch_payloads)
         if merged is None:
             total_forwarded_lines += batch_line_count
-            _write_state(state_path, total_forwarded_lines)
+            if not dry_run:
+                _write_state(state_path, total_forwarded_lines)
             batch_payloads, batch_line_count = [], 0
             return True
         n_records = sum(len(rl["scopeLogs"][0]["logRecords"]) for rl in merged["resourceLogs"])
         if dry_run:
             print(f"[dry-run] would forward {n_records} span(s) across {batch_line_count} line(s)")
             total_forwarded_lines += batch_line_count
-            _write_state(state_path, total_forwarded_lines)
             batch_payloads, batch_line_count = [], 0
             return True
         ok, detail = post_fn(endpoint, merged)
