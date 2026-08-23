@@ -78,6 +78,7 @@ import kql_validation
 import parser_factory
 import schema_registry
 import secret_scan
+import tool_discovery
 
 __version__ = "1.25.1"
 
@@ -2272,6 +2273,7 @@ MGMT_TOOLS = [
     {"name": "generate_parser", "description": "Generate and verify a query pack for one source right now (synchronous; may take minutes). An LLM authors 2-4 KQL queries from a live schema profile, validates each against Berserk, and saves the survivors. Requires at least one configured LLM provider (HERMES_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY).", "inputSchema": {"type": "object", "properties": {"service": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "service.name to generate a parser for"}, "metric": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "metric_name to generate a parser for"}, "role_hint": {"type": "string", "description": "optional target role: sre, soc, claude, ops"}}}},
     {"name": "run_discovery_worker", "description": "Drain queued discovery jobs: for each one, an LLM authors a verified query pack for the new source. Requires at least one configured LLM provider; may take minutes per job.", "inputSchema": {"type": "object", "properties": {"max_jobs": {"type": "integer", "description": "max jobs to process this call, default 1, capped at 5"}}}},
     {"name": "review_generated", "description": "List or inspect LLM-generated saved queries for audit before trusting them. No arg: list all generated queries with their provider/model/timestamp. With name: full entry including the KQL.", "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "description": "optional: a specific generated query name to inspect in full"}}}},
+    {"name": "find_tool", "description": "Find a tool by what you're trying to do, when the full tool list isn't resident (BERSERK_MCP_DISCOVERY=1). Returns up to 5 candidates with their full inputSchema inline, so no second round trip is needed before calling one. If nothing matches confidently, returns the always-resident anchor set instead and says so explicitly.", "inputSchema": {"type": "object", "properties": {"intent": {"type": "string", "maxLength": MAX_SEARCH_TERM_CHARS, "description": "what you're trying to find out or do, in your own words"}}, "required": ["intent"]}},
 ]
 
 
@@ -2290,6 +2292,7 @@ _WRITE_LOCAL = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint
 _WRITE_EXTERNAL = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 
 _ANNOTATIONS = {
+    "find_tool": _READ_LOCAL,
     "save_query": _WRITE_LOCAL,
     "list_saved": _READ_LOCAL,
     "request_discovery": _WRITE_LOCAL,
@@ -2302,7 +2305,29 @@ _ANNOTATIONS = {
     "claude_generate_dashboard": _WRITE_LOCAL,
 }
 
+# Issue #14: just-in-time tool discovery. Off by default for one release
+# (kill switch) -- when on, tools/list returns only the anchor set below
+# plus find_tool, and callers reach everything else via find_tool's search
+# instead of the full ~3,500-token-per-lane schema being resident always.
+BERSERK_MCP_DISCOVERY = os.environ.get(
+    "BERSERK_MCP_DISCOVERY", ""
+).strip().lower() in {"1", "true", "yes", "on"}
+
+# Stated rule, not a hand-picked list (see issue #14): every tool with no
+# role restriction, no required parameters, and orientation/discovery
+# intent -- these answer "what exists" rather than "what is the value of
+# X", which is what a caller needs before find_tool is even useful.
+# Provisional: there's no real call-frequency data to base this on yet
+# (that needs the audit ledger, issue #17) -- revisit once it exists.
+_ANCHOR_TOOL_NAMES = frozenset({
+    "find_tool", "schema", "discover_schema", "list_saved",
+    "list_services", "list_hosts", "discovery_status", "self_check",
+})
+
+_DISCOVERY_INDEX = tool_discovery.build_index(TOOLS + MGMT_TOOLS)
+
 TITLES = {
+    "find_tool": "Find Tool",
     "list_containers": "List Containers",
     "top_cpu": "Top Containers by CPU",
     "top_memory": "Top Containers by Memory",
@@ -2996,6 +3021,28 @@ def _handle_call_uncached(name, arguments):
         if warning:
             return warning + "\n\n" + out, False
         return out, False
+    if name == "find_tool":
+        intent = arguments.get("intent")
+        if not intent:
+            return "missing required 'intent'", True
+        if len(str(intent)) > MAX_SEARCH_TERM_CHARS:
+            return f"intent is too long (maximum {MAX_SEARCH_TERM_CHARS} characters)", True
+        visible = {t["name"]: t for t in TOOLS + MGMT_TOOLS if tool_visible(t)}
+        ranked = tool_discovery.search(_DISCOVERY_INDEX, str(intent), top_k=5)
+        candidates = [visible[n] for n, _ in ranked if n in visible]
+        low_confidence = not candidates
+        if low_confidence:
+            candidates = [visible[n] for n in sorted(_ANCHOR_TOOL_NAMES) if n in visible]
+        payload = {
+            "resultType": "low_confidence" if low_confidence else "complete",
+            "candidates": [_tool_candidate_view(t) for t in candidates],
+        }
+        if low_confidence:
+            payload["message"] = (
+                "No confident match for that intent -- these are the "
+                "always-available anchor tools instead."
+            )
+        return json.dumps(payload, indent=2), False
     if name == "claude_search":
         term = arguments.get("term")
         if not term:
@@ -3615,8 +3662,21 @@ def _task_id_from_params(params):
     return task_id
 
 
+def _tool_candidate_view(t):
+    """A find_tool search result: name + description + full inputSchema
+    inline, so a caller can go straight to calling it without a second
+    round trip to look the schema up."""
+    return {
+        "name": t["name"],
+        "description": t["description"],
+        "inputSchema": t["inputSchema"],
+    }
+
+
 def _tool_list_result(mode):
     allt = [t for t in TOOLS + MGMT_TOOLS + _saved_query_tools() if tool_visible(t)]
+    if BERSERK_MCP_DISCOVERY:
+        allt = [t for t in allt if t["name"] in _ANCHOR_TOOL_NAMES]
     tl = []
     for t in allt:
         visible_tool = _with_output_schema(t) if mode == PROTOCOL_MODE_MODERN else t
