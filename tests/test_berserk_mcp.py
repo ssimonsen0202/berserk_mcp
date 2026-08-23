@@ -5823,5 +5823,49 @@ class WrongAnswerContainmentTest(unittest.TestCase):
         self.assertIn("_fence_untrusted", text)
 
 
+class ToolSchemaValidityTest(unittest.TestCase):
+    """A JSON Schema property whose "type" includes "array" (bare or as one
+    branch of a union type) must declare "items", or it's malformed per the
+    spec. OpenAI's and Anthropic's function-calling validators are lenient
+    about this and silently accept it; Google's Gemini (used by any
+    Gemini-based MCP client, and by OpenRouter's Google AI Studio provider)
+    correctly rejects the whole tool list with a 400 -- confirmed by a live
+    request to Google AI Studio via OpenRouter, which returned exactly
+    this: "GenerateContentRequest.tools[0].function_declarations[62].
+    parameters.properties[roles].items: missing field." That made every
+    tool unusable for that client, not just save_query, since a single
+    malformed tool definition fails the whole tools/list payload validation
+    on a strict client. Found while eval-testing berserk-mcp's core "any
+    model routes reliably" claim against real models -- not a hypothetical."""
+
+    def _find_missing_items(self, schema, path):
+        findings = []
+        if isinstance(schema, dict):
+            t = schema.get("type")
+            types = t if isinstance(t, list) else [t]
+            if "array" in types and "items" not in schema:
+                findings.append(path)
+            for key, value in schema.get("properties", {}).items():
+                findings.extend(self._find_missing_items(value, f"{path}.{key}"))
+        return findings
+
+    def test_every_tool_array_property_declares_items(self):
+        offenders = []
+        for tool in bm.TOOLS + bm.MGMT_TOOLS:
+            offenders.extend(self._find_missing_items(
+                tool.get("inputSchema", {}), tool["name"],
+            ))
+        self.assertEqual(offenders, [], f"array-typed properties missing 'items': {offenders}")
+
+    def test_save_query_roles_property_has_items(self):
+        # The specific instance found live -- a named regression guard, not
+        # just relying on the generic sweep above.
+        save_query = next(t for t in bm.TOOLS + bm.MGMT_TOOLS if t["name"] == "save_query")
+        roles_schema = save_query["inputSchema"]["properties"]["roles"]
+        self.assertIn("array", roles_schema["type"])
+        self.assertIn("items", roles_schema)
+        self.assertEqual(roles_schema["items"], {"type": "string"})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
