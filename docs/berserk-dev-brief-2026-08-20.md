@@ -1,3 +1,12 @@
+> **Scope, read this first.** This document is about **berserk-mcp** — the
+> MCP server that exposes Berserk's data to AI agents as callable tools —
+> not about Berserk's own, separate AI-driven feature. Those are two
+> different things built on the same Berserk core: Berserk's own AI feature
+> is Berserk-side, product-facing; berserk-mcp is the agent-facing interface
+> layer this whole brief is scoped to. Everywhere below that says "Berserk"
+> without qualification, read it as "the Berserk platform berserk-mcp sits
+> on top of and queries," not as a reference to that other feature.
+
 > **Correction, 2026-08-20.** Two items in §5's backlog table are already
 > shipped, ahead of this brief:
 >
