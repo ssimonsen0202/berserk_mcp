@@ -53,6 +53,49 @@ SHIPPED_QUERY_GUARDRAIL_ALLOWLIST = {
 }
 
 
+class ServiceFilterTest(unittest.TestCase):
+    """Issue #42: multi-agent ingestion. These are pure string-building
+    functions -- no run_bzrk/subprocess involved, so no mocking needed."""
+
+    def test_claude_code_is_the_default_service(self):
+        self.assertIn("resource['service.name'] == 'claude-code'", bm._service_filter("claude-code"))
+
+    def test_codex_maps_to_its_own_service_name(self):
+        self.assertIn("resource['service.name'] == 'codex-cli'", bm._service_filter("codex"))
+
+    def test_unknown_agent_falls_back_to_claude_code_rather_than_erroring(self):
+        self.assertIn("resource['service.name'] == 'claude-code'", bm._service_filter("some-agent-nobody-registered"))
+
+    def test_cc_constant_matches_default_service_filter(self):
+        # CC is the pre-#42 fixed constant every existing caller still sees;
+        # it must stay byte-identical to _service_filter("claude-code") or
+        # every claude_* tool's default (agent omitted) behavior changes.
+        self.assertEqual(bm.CC, bm._service_filter("claude-code"))
+
+    def test_agent_omitted_on_each_query_function_matches_pre_42_claude_code_query(self):
+        # Regression check: omitting `agent` must reproduce exactly what
+        # each function returned before this parameter existed.
+        self.assertIn("resource['service.name'] == 'claude-code'", bm.q_cc_recent())
+        self.assertIn("resource['service.name'] == 'claude-code'", bm.q_cc_sessions())
+        self.assertIn("resource['service.name'] == 'claude-code'", bm.q_cc_tools())
+        self.assertIn("resource['service.name'] == 'claude-code'", bm.q_cc_errors())
+        self.assertIn("resource['service.name'] == 'claude-code'", bm.q_cc_search("term"))
+
+    def test_codex_agent_produces_codex_scoped_query_for_every_function(self):
+        self.assertIn("resource['service.name'] == 'codex-cli'", bm.q_cc_recent("codex"))
+        self.assertIn("resource['service.name'] == 'codex-cli'", bm.q_cc_sessions("codex"))
+        self.assertIn("resource['service.name'] == 'codex-cli'", bm.q_cc_tools("codex"))
+        self.assertIn("resource['service.name'] == 'codex-cli'", bm.q_cc_errors("codex"))
+        self.assertIn("resource['service.name'] == 'codex-cli'", bm.q_cc_search("term", "codex"))
+
+    def test_agent_aware_simple_tools_are_a_subset_of_next_step_hints(self):
+        # Same invariant test_04_every_simple_tool_has_next_step checks from
+        # the other direction -- every agent-aware tool must still have an
+        # empty-result next-step hint even though it's no longer in SIMPLE.
+        for name in bm._AGENT_AWARE_SIMPLE:
+            self.assertIn(name, bm._EMPTY_NEXT_STEP)
+
+
 class BerserkMcpTest(unittest.TestCase):
     def setUp(self):
         self.calls = []
@@ -238,6 +281,9 @@ class BerserkMcpTest(unittest.TestCase):
 
     def test_shipped_queries_pass_static_cost_guardrails(self):
         shipped = list(bm.SIMPLE.items()) + [
+            (name, (kql_fn(), since))
+            for name, (kql_fn, since) in bm._AGENT_AWARE_SIMPLE.items()
+        ] + [
             ("discover_schema_fieldstats_nofilter", (bm.q_discover_fieldstats(None), "1h ago")),
             ("discover_schema_fieldstats_filtered", (bm.q_discover_fieldstats("someservice"), "1h ago")),
         ]
@@ -4985,7 +5031,9 @@ class ResultEnvelopeTest(unittest.TestCase):
         self.assertIn(bm._EMPTY_NEXT_STEP["list_hosts"][:20], text)
 
     def test_04_every_simple_tool_has_next_step(self):
-        self.assertEqual(set(bm._EMPTY_NEXT_STEP), set(bm.SIMPLE))
+        self.assertEqual(
+            set(bm._EMPTY_NEXT_STEP), set(bm.SIMPLE) | set(bm._AGENT_AWARE_SIMPLE)
+        )
 
     def test_05_overflow_simple_returns_since_only_message(self):
         overflow_msg = (
