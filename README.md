@@ -233,13 +233,44 @@ air-gapped environments:
 - **The LLM layer can run locally too.** The parser factory's provider ladder
   speaks the OpenAI-compatible API. Any locally hosted open-weight model —
   via Ollama, llama.cpp, vLLM, or LM Studio — plugs in as the `hermes`
-  endpoint. No frontier API is required. The fixed-query design exists
-  precisely so **small local models route reliably**: the model picks a tool
-  and a time window; it never authors KQL.
+  endpoint. No frontier API is required. The fixed-query design collapses
+  the capability bar the model needs: it picks a tool and a time window; it
+  never authors KQL.
 - **Defense-in-depth on the egress path.** Even when an LLM endpoint is
   configured, it receives only structural telemetry — key names, shapes,
   redacted excerpts — never raw values. The endpoint URL is
   scheme-allowlisted and operator-controlled.
+
+**What we've actually verified about self-hosted model viability**, not just
+asserted (full methodology and data:
+[docs/model-routing-cost-validation-2026-08-23.md](docs/model-routing-cost-validation-2026-08-23.md)).
+This corrects earlier guidance in this section — "small local models route
+reliably" turned out not to hold once measured against this server's real
+70-tool schema, and a sovereignty-focused reader deserves the accurate
+number, not the hopeful one:
+
+- **7-8B local models are not viable.** Qwen2.5:7b and Llama3.1:8b, tested
+  locally via Ollama against the real schema, scored 5-7% tool-selection
+  accuracy — far below a dumb keyword-matching baseline (66%). Public
+  tool-calling benchmarks (BFCL) rank these families well, but those
+  benchmarks measure a much smaller tool count; they are not a reliable
+  predictor at this schema size (see the now-superseded shortlist in
+  [`evals/model-eval-plan.md`](evals/model-eval-plan.md)).
+- **The measured reliability floor is the ~24B parameter class**, and one
+  real candidate at that tier is confirmed genuinely self-hostable under an
+  open license: `mistral-small-3.2-24b-instruct` (Apache 2.0, confirmed on
+  Hugging Face, ~55GB GPU RAM at bf16) reached 78% tool-selection accuracy
+  in the same eval. Its numbers come from the same OpenRouter-hosted eval as
+  every other candidate, not from an actual local deployment — self-hosted
+  latency and behavior on that specific hardware profile is not yet
+  independently verified.
+- One size class down (`mistral-nemo`, ~12B) scored *below* the
+  keyword-matching baseline — smaller is not a safe default assumption
+  anywhere in this range.
+- **Bottom line for a sovereign deployment today:** budget for a ≥24B-class
+  open-weight model and a GPU, not a small one. A fully local setup with a
+  genuinely small (7-8B) first tier is not yet a validated configuration
+  against this server's tool count.
 
 #### Bridging Berserk's two use cases: AI Ops without leaving the sovereign boundary
 
@@ -273,12 +304,21 @@ family (`claude_cost_report`, `claude_token_burn`, `claude_workflow_insights`,
 and others) delivers the same token-usage/BI story from that page. These
 tools are already implemented and already answering real queries.
 
-The target operating model is **two-tier local**. A small open-weight model
-handles the everyday calls; the goal is ≥ 80% of interactions. The model
-escalates to a larger, locally hosted open-weight model only for `@deep`
-work: parser generation, deep-dive synthesis, incident narratives. The
-measurement plan for picking both tiers is in
-[`evals/model-eval-plan.md`](evals/model-eval-plan.md) (Part 3).
+The target operating model is **two-tier local**. A locally hosted
+open-weight model at the measured reliability floor (~24B class — see
+above) handles the everyday calls; the goal is ≥ 80% of interactions. The
+model escalates to a larger, locally hosted open-weight model only for
+`@deep` work: parser generation, deep-dive synthesis, incident narratives.
+"Small" here means the smaller of the two local tiers, not a 7-8B model —
+those were tested and are not reliable enough to anchor either tier. The
+escalation mechanism itself (a policy deciding when to route up)
+is implemented and tested against a cloud-hosted small/deep pair in
+`evals/escalation_policy.py`; picking and verifying the actual local model
+for each tier against real hardware is still open. The original
+measurement plan is in
+[`evals/model-eval-plan.md`](evals/model-eval-plan.md) (Part 3) — read its
+Part 1 benchmark shortlist skeptically; it predates the real eval above and
+its picks did not hold up at this server's actual tool count.
 
 ---
 

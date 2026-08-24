@@ -1,5 +1,15 @@
 # Model evaluation plan — which LLM to pair with berserk-mcp
 
+**Part 2's harness has now been run for real** — see
+[docs/model-routing-cost-validation-2026-08-23.md](../docs/model-routing-cost-validation-2026-08-23.md)
+for the actual data. Read Part 1's benchmark-based shortlist below with that
+in mind: it was written when this server had 19 tools; the real schema has
+since grown to 69-70, and the real eval found the exact families Part 1
+favored (Qwen2.5, Llama 3.1, both 7-8B) score 5-7% tool-selection accuracy
+against the current schema — public tool-calling benchmarks measured at a
+much smaller tool count were not a reliable predictor here. Kept below for
+the historical reasoning, not as current guidance.
+
 Goal: find the **cheapest model (ideally local) that reliably drives this MCP** for the
 real question distribution, and quantify how much the server design (tool descriptions,
 `instructions`, annotations) contributes versus the model.
