@@ -5831,20 +5831,29 @@ class WrongAnswerContainmentTest(unittest.TestCase):
             bm._validate_user_kql = orig_validate
             bm.run_bzrk = orig_run_bzrk
 
-    def test_schema_drift_backend_unavailable_produces_false_positive_warning(self):
-        # Exercises the REAL production path (a prior version of this test
-        # stubbed _validate_user_kql directly, which skipped _schema_fetcher
+    def test_schema_fetch_backend_unavailable_is_reported_as_unavailable_not_fresh(self):
+        # Regression test for issue #32, fixed: exercises the REAL
+        # production path (a prior version of this test stubbed
+        # _validate_user_kql directly, which skipped _schema_fetcher
         # entirely and didn't match what actually happens -- caught in
-        # review). _schema_fetcher (:1271) calls run_bzrk() for its four
-        # schema-discovery queries and ignores the returned error flag, so a
-        # genuine backend failure (auth error, timeout, etc.) doesn't raise
-        # and doesn't produce schema_registry's "unavailable" status either
-        # -- get_schema_snapshot() has no way to know the fetch failed, so it
-        # normalizes whatever error text came back as if it were real schema
-        # output and marks the result "fresh". The resulting hash is some
-        # value derived from that error text, essentially unpredictable, so
-        # it does not equal any real previously-stored hash -- producing a
-        # false-positive drift warning.
+        # review). _schema_fetcher (:1492) calls run_bzrk() for its four
+        # schema-discovery queries; before the fix it ignored the returned
+        # error flag entirely, so a genuine backend failure (auth error,
+        # timeout, etc.) never raised and get_schema_snapshot() had no way
+        # to know the fetch failed -- it normalized whatever error text
+        # came back as if it were real schema output and marked the result
+        # "fresh". Now _schema_fetcher raises when any of the four calls
+        # fail, so get_schema_snapshot's except-Exception branch correctly
+        # falls back to "unavailable" (no prior cache in this test's fresh
+        # config_dir).
+        #
+        # The drift warning itself still fires here -- that's correct, not
+        # a regression: the stored hash is a fake value from "when the
+        # backend was healthy", and an "unavailable" snapshot still
+        # computes a real (if empty-schema-derived) current hash, which
+        # legitimately differs from the stored one. What changed is that
+        # the snapshot backing that comparison is now honestly labeled
+        # "unavailable" instead of falsely "fresh".
         #
         # All four of _schema_fetcher's calls fail (not just two), using the
         # real production auth-failure message. Only the saved query's own
@@ -5867,19 +5876,46 @@ class WrongAnswerContainmentTest(unittest.TestCase):
                  "schema_hash": "stored_hash_from_when_backend_was_healthy"},
                 action_source="manual",
             )
-            # Lock the actual mechanism, not just the final warning text:
-            # the snapshot backing this run is genuinely marked "fresh"
-            # (not "unavailable") despite every fetch call failing, and the
-            # warning's current= hash is exactly that snapshot's hash. If
-            # issue #32 is fixed (fetcher raises instead of swallowing the
-            # error), schema_status would become "unavailable"/"stale" and
-            # this assertion would correctly start failing.
             snapshot = bm._schema_snapshot(force=True, allow_refresh=True)
-            self.assertEqual(snapshot["source_status"], "fresh")
+            self.assertEqual(snapshot["source_status"], "unavailable")
             text, err = bm.handle_call("run_saved", {"name": "backend_unavailable_probe"})
             self.assertFalse(err)
             self.assertIn("Schema drift warning", text)
             self.assertIn(f"current={snapshot['schema_hash']}", text)
+        finally:
+            bm.run_bzrk = orig_run_bzrk
+
+    def test_schema_fetcher_raises_when_any_of_four_calls_fail(self):
+        # Direct unit test of the fetcher contract itself, independent of
+        # the drift-warning integration above: _schema_fetcher must raise
+        # (not return error text as data) as soon as any one of its four
+        # run_bzrk calls reports an error, even if the other three succeed.
+        # Mirrors do_schema()'s existing any-fails semantics just above it
+        # in berserk_mcp.py.
+        orig_run_bzrk = bm.run_bzrk
+        for failing_call_substring in (".show tables", "getschema", "fieldstats", "resource_keys=bag_keys"):
+            def make_run_bzrk(fail_on):
+                def _run(args, timeout=bm.DEFAULT_TIMEOUT):
+                    joined = " ".join(str(a) for a in args)
+                    if fail_on in joined:
+                        return "bzrk: connection refused", True
+                    return "ok", False
+                return _run
+            bm.run_bzrk = make_run_bzrk(failing_call_substring)
+            try:
+                with self.assertRaises(Exception):
+                    bm._schema_fetcher()
+            finally:
+                bm.run_bzrk = orig_run_bzrk
+
+    def test_schema_fetcher_succeeds_and_returns_data_when_all_four_calls_succeed(self):
+        orig_run_bzrk = bm.run_bzrk
+        bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: ("some real output", False)
+        try:
+            result = bm._schema_fetcher()
+            self.assertEqual(result["tables"], "some real output")
+            self.assertEqual(result["getschema"], "some real output")
+            self.assertIn("supported_idioms", result)
         finally:
             bm.run_bzrk = orig_run_bzrk
 
