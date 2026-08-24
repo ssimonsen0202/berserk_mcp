@@ -5940,9 +5940,20 @@ class WrongAnswerContainmentTest(unittest.TestCase):
     # ---- documentation: every listed control is actually named, with accurate scoping ----
 
     def test_readme_names_wrong_answer_containment_section(self):
+        # As of the docs/*.md extraction restructuring, the full
+        # wrong-answer-containment detail lives in its own linked doc, not
+        # inline in README.md -- README keeps a summary + link so the
+        # section stays discoverable without pushing README's length back
+        # up. This test now checks the doc file, which is where each
+        # control's actual regression-test name and known-limitation text
+        # need to keep matching reality.
         readme = Path(__file__).resolve().parent.parent / "README.md"
-        text = readme.read_text(encoding="utf-8")
-        self.assertIn("Wrong-answer containment", text)
+        readme_text = readme.read_text(encoding="utf-8")
+        self.assertIn("Wrong-answer containment", readme_text)
+        self.assertIn("docs/wrong-answer-containment.md", readme_text)
+
+        doc = Path(__file__).resolve().parent.parent / "docs" / "wrong-answer-containment.md"
+        text = doc.read_text(encoding="utf-8")
         # Check for all controls
         for control in (
             "schema", "bare column", "envelope", "validation",
@@ -5957,7 +5968,7 @@ class WrongAnswerContainmentTest(unittest.TestCase):
         # Check that schema-hash behavior documents caching/fail-open with "Known limitation"
         self.assertIn("Known limitation", text)
         # The TTL is a hardcoded constant, not an environment variable --
-        # the README must not claim a setting that doesn't exist.
+        # the doc must not claim a setting that doesn't exist.
         self.assertNotIn("BERSERK_MCP_SCHEMA_CACHE_TTL_SECONDS", text)
         self.assertIn("DEFAULT_TTL_SECONDS", text)
         # Check that untrusted_log_data fencing is named and points at real
