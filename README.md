@@ -42,10 +42,16 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.25.1**. This is a bullet-point overview, most recent
+Current version: **1.26.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.26.0** (2026-08-24) — Untrusted-data fencing, tool tiers, multi-agent
+  ingestion (Codex CLI alongside Claude Code), just-in-time tool discovery
+  (`find_tool`, 92% measured token reduction), a live quota-window check
+  (`claude_quota_status`), OpenRouter telemetry now flowing into Berserk as
+  its own source, and a schema-fetcher bug fix (a failed backend call was
+  silently cached as a "fresh" schema). See [details](docs/releases/v1.26.0.md).
 - **v1.25.1** (2026-08-11) — Performance bugfixes for shipped KQL: selective
   service filtering, shallower unfiltered schema discovery, CI cost guardrails,
   and validator-derived query-budget headroom. See
@@ -451,7 +457,9 @@ Every query tool takes an optional `since` argument (`"15m ago"`, `"1h ago"`,
 ### Claude Code tools (`claude` lane only)
 
 If you ship Claude Code session logs into Berserk (service name `claude-code`), these
-tools mine that data. See [docs/claude-code.md](docs/claude-code.md) for the pipeline.
+tools mine that data. As of v1.26.0 (issue #42), Codex CLI sessions can ingest
+alongside Claude Code, tagged with their own `service.name` (`codex-cli`). See
+[docs/claude-code.md](docs/claude-code.md) for the pipeline.
 
 | Tool | What it answers |
 |---|---|
@@ -460,6 +468,7 @@ tools mine that data. See [docs/claude-code.md](docs/claude-code.md) for the pip
 | `claude_tools` | Tool-use histogram — how many times each tool (Bash, Edit, Read, …) was called. |
 | `claude_errors` | Failed tool results with message snippets. |
 | `claude_search` | Full-text search across Claude Code message and tool bodies. |
+| `claude_quota_status` | Live quota-window check: reads Anthropic's account-usage endpoint when available (macOS only), falling back to a log-derived token estimate over the trailing window otherwise. Doesn't require the ingestion daemon running. |
 | `claude_loop_check` | Flags sessions that repeat the same tool/target, retry the same error, or oscillate between calls. |
 | `claude_model_fit` | Heuristic model-tier fit: frontier model on trivial work, or cheap model on complex/repetitive work. Not a billing statement. |
 | `claude_token_burn` | Token burn per session and progress unit, using exact usage attributes when present and a labeled estimate otherwise. |
@@ -475,6 +484,12 @@ tools mine that data. See [docs/claude-code.md](docs/claude-code.md) for the pip
 | `claude_optimization_impact` | Matched before/after harness comparison with keep, rollback, no-change, or insufficient-evidence verdict. |
 | `claude_management_report` | Portfolio, project, or feature summary as readable Markdown plus versioned structured JSON. |
 | `claude_generate_dashboard` | Privacy-safe Markdown or self-contained HTML snapshot beneath the configured report directory. |
+
+`claude_recent`, `claude_sessions`, `claude_tools`, `claude_errors`, and
+`claude_search` accept an optional `agent` parameter (default
+`claude-code`) to query a different ingested agent's data instead — for
+example `agent="codex-cli"`. Every other tool in this table is still
+Claude-Code-specific.
 
 ### Agent-log intelligence
 
@@ -635,6 +650,27 @@ bridge. The advisor does not claim a native SCOM OTel receiver exists.
 |---|---|
 | `request_discovery` | Queue a newly-added service or metric for automated onboarding. Validates the source exists in Berserk before accepting. |
 | `discovery_status` | List pending and completed discovery jobs. |
+
+### Just-in-time tool discovery (`find_tool`, opt-in)
+
+Not to be confused with the telemetry-*source* discovery tools above —
+this is discovery over berserk-mcp's own *tool catalog*.
+
+| Tool | What it does |
+|---|---|
+| `find_tool` | Search-by-intent over the full tool catalog. Returns the best-matching candidates with their complete `inputSchema` inline, so a model can call a tool it was never shown up front. |
+
+Set `BERSERK_MCP_DISCOVERY=1` to switch from listing the full tool catalog
+up front to exposing 8 fixed anchor tools plus `find_tool` as the entry
+point for everything else (v1.26.0, issue #14). Measured against a real
+MCP handshake: the full schema costs ~17,560 tokens; discovery mode costs
+~1,386 — a 92% reduction. A recall-gate test
+(`tests/test_tool_discovery.py`) requires every shipped tool to be
+reachable by at least one realistic phrasing before it ships; current
+measured recall is 100% across 210 phrasings covering all 70 tools. Off by
+default — every tool stays directly listed unless you opt in. See
+[Choosing a model](#choosing-a-model) for why this matters most for
+smaller models.
 
 ### Trace tools (all lanes)
 
@@ -1430,11 +1466,40 @@ The whole point of the fixed-query design is that **the model never writes
 KQL**. It only picks a tool and a time window. This collapses the
 capability bar: instead of "can author correct Kusto," a model only needs
 "can do basic tool-calling." That is what makes cheap and local models
-viable. Lead with the cheapest option that works:
+viable in principle — but the real floor is higher than earlier guidance
+here claimed. A real-model eval sweep (2026-08-22/23; 8 models, 2 local via
+Ollama and 6 cloud via OpenRouter; full methodology and per-model table in
+[docs/model-routing-cost-validation-2026-08-23.md](docs/model-routing-cost-validation-2026-08-23.md))
+found:
 
-- **Local (preferred).** Any Ollama or LM-Studio model with solid tool-calling works: the **Qwen2.5-Instruct** family (7B is the sweet spot), **Llama 3.1/3.3**, or **Mistral-Small**. Tiny models (≤2B) and CPU-only prefill struggle with agentic tool-call loops. Prefer a GPU and ≥7B for unattended use.
-- **Cheap API.** `gpt-4.1-mini`, Claude **Haiku**, or Gemini **Flash** give strong tool use at a fraction of frontier cost. Good for latency-sensitive ChatOps replies.
-- **Frontier models** are rarely necessary. Save them for open-ended investigations that lean on `search` and `save_query`.
+- **7-8B local models are not viable against the full tool schema.**
+  Qwen2.5:7b and Llama3.1:8b scored 5-7% tool-selection accuracy — well
+  below a dumb keyword-matching baseline (66%). The previous recommendation
+  here ("7B is the sweet spot") was wrong; corrected in v1.26.0.
+- **The measured reliability floor is the ~24B parameter class.**
+  `mistral-saba` (24B) reached 83% tool-selection accuracy. One size class
+  down (`mistral-nemo`, ~12B) fell *below* the keyword baseline.
+- **Best measured performer:** `deepseek-chat` (93% tool-selection, 98%
+  argument accuracy). **Best cost/performance:** `deepseek-v4-flash` (88%
+  tool-selection, ~38x cheaper per call than `deepseek-chat` thanks to real
+  prompt caching — verified against actual billed `usage.cost`, not sticker
+  price). Caveat: `tool_choice: "required"` silently disables that caching;
+  use `"auto"` to keep it.
+
+If a small local model is a hard requirement, use [just-in-time tool
+discovery](#just-in-time-tool-discovery-find_tool-opt-in) — cutting the
+schema from 69 tools to 8 is a real, measured accuracy lever (92% token
+reduction), though it did not close the gap to zero for the 7-8B models in
+this sweep. For unattended local deployments, prefer a ≥24B model with a
+GPU over a smaller one.
+
+- **Cheap API.** `deepseek-v4-flash`, `gpt-4.1-mini`, Claude **Haiku**, or
+  Gemini **Flash** give strong tool use at a fraction of frontier cost.
+  Good for latency-sensitive ChatOps replies.
+- **Frontier models** are rarely necessary. Save them for open-ended
+  investigations that lean on `search` and `save_query`, or as an
+  escalation tier for cases a cheaper model's own routing confidence flags
+  as uncertain (see `evals/escalation_policy.py`).
 
 The biggest reliability lever, regardless of model, is the tool
 **descriptions**. They are written to be narrow and unambiguous, so a small
