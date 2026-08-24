@@ -122,7 +122,7 @@ does not have:
 | Berserk web UI / `bzrk` CLI | Good for a human who knows KQL. Not usable by an agent. |
 | Point an LLM at the raw CLI and schema docs | Unreliable. Models guess table and field names, and pay for retries. |
 | A generic "text-to-KQL" MCP | Still *authors* queries. Same guessing problem, one layer up. |
-| **berserk-mcp** | Fixed, verified queries. Deterministic answers, even from a 7B local model. |
+| **berserk-mcp** | Fixed, verified queries. The model only picks a tool and a time window — no KQL authoring. See [Choosing a model](#choosing-a-model) for the measured reliability floor by model size. |
 
 ### What this adds vs. default Berserk
 
@@ -287,7 +287,7 @@ flowchart TB
 
   subgraph H["MCP Host  (Claude Code · Claude Desktop · LangChain · ChatOps bot)"]
     direction TB
-    Cheap["⚡ DEFAULT lane\ncheap / local model\ngpt-4.1-mini · Qwen2.5-7B · Haiku\nonly picks tools + time windows"]:::cheap
+    Cheap["⚡ DEFAULT lane\ncheap / local model\ngpt-4.1-mini · Haiku · self-hosted ≥24B\nonly picks tools + time windows"]:::cheap
     Deep["🧠 @deep / scheduled lane\ncapable model\nsonnet · GPT-class\nauthors + verifies KQL"]:::deep
   end
 
@@ -862,8 +862,9 @@ Write a 10-line digest, flag anything anomalous, and stop.
 ```
 
 > This is deterministic enough to run unattended overnight on `gpt-4.1-mini`
-> or a local Qwen2.5-7B. Wire it to a cron job — the answer is short and
-> parseable.
+> or a self-hosted ≥24B model — a 7-8B local model is not reliable enough
+> for this (see [Choosing a model](#choosing-a-model)). Wire it to a cron
+> job — the answer is short and parseable.
 
 ---
 
