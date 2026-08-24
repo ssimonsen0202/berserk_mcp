@@ -149,6 +149,27 @@ docker logs berserk-janitor-1 --since <restart-time> 2>&1 \
 The startup config dump is the reliable source of truth for whether a future config
 change actually loaded.
 
+## Follow-up (2026-07-31)
+
+Two things confirmed on a later date, superseding the "open issue" and "working
+hypothesis" framing above. Raw log evidence for both is in
+`docs/beserk-incident-raw-evidence-2026-07-31.md`.
+
+1. **`max_concurrent_downloads` YAML bug confirmed, with a working fix.** Passing the
+   identical value as a CLI flag (`command: ["-c", "/config/config.yaml",
+   "--max-concurrent-downloads", "2"]`) loads correctly, while the nested YAML field
+   still does not. This is not a config-authoring mistake on our side — the file was
+   verified structurally correct — so this is a real janitor bug, isolated to the YAML
+   path for this one field.
+2. **`max_segments_per_batch` does not cap total merge job size.** Observed
+   `segment_count: 1000` on two separate merge jobs on 2026-07-31, both with
+   `max_segments_per_batch: 100` confirmed loaded via the startup config dump. This
+   field evidently governs something else (most likely the download sub-batch
+   pipeline within a merge), not the total scope of one merge operation. No field in
+   `janitor_bin --help` obviously caps total job size; `min_segments`,
+   `max_segment_age_days`, and `min_total_size` only express minimum trigger
+   thresholds.
+
 ## Source-level follow-up
 
 If the janitor source is available, inspect `apps/janitor/src/...` and the

@@ -29,3 +29,13 @@
 {"id": "find_similar_timeout", "prompt": "Find logs by meaning for database connection timeouts.", "expect_tool": "find_similar", "expect_args": {"description": "database connection timeouts"}}
 {"id": "find_similar_service", "prompt": "Find authentication failure messages by meaning in the api service.", "expect_tool": "find_similar", "expect_args": {"description": "authentication failure", "service": "api"}}
 {"id": "find_similar_nearmiss", "prompt": "Search the logs for the exact phrase database timeout.", "expect_tool": "search"}
+{"id": "jcost_basic", "prompt": "Give me a multi-day cost report for Claude Code usage.", "expect_tool": "claude_cost_report", "tier": "small"}
+{"id": "jcost_by_project", "prompt": "Break down Claude Code token cost by project over the last week.", "expect_tool": "claude_cost_report", "expect_args": {"group_by": "project"}, "tier": "small"}
+{"id": "jcost_by_model", "prompt": "Show me the daily token cost breakdown by model for the past 5 days.", "expect_tool": "claude_cost_report", "expect_args": {"group_by": "model"}, "tier": "small"}
+{"id": "jcost_trend", "prompt": "Is our Claude Code spend trending up or down this week?", "expect_tool": "claude_cost_report", "tier": "small"}
+{"id": "jdive_by_id", "prompt": "Give me a detailed timeline for Claude Code session abc123.", "expect_tool": "claude_session_deep_dive", "expect_args": {"session_id": "abc123"}, "tier": "small"}
+{"id": "jdive_gaps", "prompt": "Walk through session abc123 and flag any long gaps in activity.", "expect_tool": "claude_session_deep_dive", "expect_args": {"session_id": "abc123"}, "tier": "small"}
+{"id": "jdive_loop", "prompt": "Did Claude Code session xyz789 get stuck in a loop?", "expect_tool": "claude_session_deep_dive", "expect_args": {"session_id": "xyz789"}, "tier": "small"}
+{"id": "jworkflow_sequences", "prompt": "What tool sequences does Claude Code use most often?", "expect_tool": "claude_workflow_insights", "tier": "small"}
+{"id": "jworkflow_hotspots", "prompt": "Where are the error hotspots across Claude Code sessions?", "expect_tool": "claude_workflow_insights", "tier": "small"}
+{"id": "jworkflow_burn", "prompt": "Which sessions are burning the most tokens relative to their targets?", "expect_tool": "claude_workflow_insights", "tier": "small"}
