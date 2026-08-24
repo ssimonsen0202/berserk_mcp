@@ -1490,10 +1490,30 @@ def do_schema():
 
 
 def _schema_fetcher():
-    out_tables, _ = run_bzrk(["-P", PROFILE, "search", ".show tables"])
-    out_schema, _ = run_bzrk(["-P", PROFILE, "search", f"{T} | getschema", "--since", "1h ago"])
-    out_fields, _ = run_bzrk(["-P", PROFILE, "search", q_discover_fieldstats(None), "--since", "1h ago"])
-    out_sample, _ = run_bzrk(["-P", PROFILE, "search", q_discover_sample(None), "--since", "1h ago"])
+    """Fetch raw schema material for schema_registry.get_schema_snapshot().
+
+    Contract (schema_registry.py): the fetcher must raise on failure so the
+    caller's except-Exception falls back to a stale cache or reports
+    "unavailable" -- it must never return error text as if it were real
+    schema data, which would get normalized and cached as source_status
+    "fresh". Any of the four run_bzrk calls failing (auth error, timeout,
+    connection refused, etc.) fails the whole fetch, matching do_schema()'s
+    existing any-fails semantics just above -- a partial result would still
+    mean feeding one call's error text into normalize_snapshot as if it
+    were real tables/columns/fields/sample data.
+    """
+    out_tables, e_tables = run_bzrk(["-P", PROFILE, "search", ".show tables"])
+    out_schema, e_schema = run_bzrk(["-P", PROFILE, "search", f"{T} | getschema", "--since", "1h ago"])
+    out_fields, e_fields = run_bzrk(["-P", PROFILE, "search", q_discover_fieldstats(None), "--since", "1h ago"])
+    out_sample, e_sample = run_bzrk(["-P", PROFILE, "search", q_discover_sample(None), "--since", "1h ago"])
+    failed = [
+        name for name, is_err in (
+            ("tables", e_tables), ("getschema", e_schema),
+            ("fieldstats", e_fields), ("sample", e_sample),
+        ) if is_err
+    ]
+    if failed:
+        raise RuntimeError(f"schema fetch failed for: {', '.join(failed)}")
     return {
         "tables": out_tables,
         "getschema": out_schema,
