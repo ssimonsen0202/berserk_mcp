@@ -257,22 +257,169 @@ def score_case(case, tool_name, args):
     return tool_ok, arg_ok
 
 
+def _make_tier_caller(backend, model, base_url, api_key, system, oa_tools, an_tools):
+    """Return a callable (prompt) -> (tool_name, args, latency, usage) for a tier."""
+    _OA_DEFAULTS = {
+        "openai": "https://api.openai.com/v1",
+        "ollama": "http://127.0.0.1:11434/v1",
+        "lmstudio": "http://127.0.0.1:1234/v1",
+    }
+    if backend == "anthropic":
+        tc = {"type": "any"}
+        def _call(prompt):
+            return call_anthropic(api_key, model, system, prompt, an_tools, tc)
+    else:
+        url = base_url or _OA_DEFAULTS.get(backend, "http://127.0.0.1:11434/v1")
+        tc = "required" if backend == "openai" else "auto"
+        def _call(prompt):
+            return call_openai_compatible(url, api_key, model, system, prompt, oa_tools, tc)
+    return _call
+
+
+def _run_tier_policy(args_ns, cases):
+    """Run the two-tier routing eval (Phase 3.3).
+
+    Each case is first sent to the small model. If the escalation policy says
+    to escalate, the same prompt is re-sent to the deep model. The result row
+    records `handled_by` (small/deep) and whether scoring passed.
+    """
+    import escalation_policy as ep  # local import to keep top-level clean
+
+    if not args_ns.small_model:
+        sys.exit("--tier-policy requires --small-model")
+    if not args_ns.deep_model:
+        sys.exit("--tier-policy requires --deep-model")
+
+    tools, instructions = get_mcp_tools_and_instructions()
+    system = (instructions or "Use the provided tools to answer.") + \
+        "\nChoose exactly one tool call that best answers the user's question."
+    oa_tools = to_openai_tools(tools)
+    an_tools = to_anthropic_tools(tools)
+
+    key_env = args_ns.key_env or ""
+    if not key_env:
+        # pick a sensible default based on whichever backend needs a key
+        if "anthropic" in (args_ns.small_backend, args_ns.deep_backend):
+            key_env = "ANTHROPIC_API_KEY"
+        elif args_ns.small_backend == "openai" or args_ns.deep_backend == "openai":
+            key_env = "OPENAI_API_KEY"
+    api_key = os.environ.get(key_env, "") if key_env else ""
+
+    if "anthropic" in (args_ns.small_backend, args_ns.deep_backend) and not api_key:
+        sys.exit("ANTHROPIC_API_KEY not set in environment.")
+
+    small_call = _make_tier_caller(
+        args_ns.small_backend, args_ns.small_model, args_ns.small_url,
+        api_key, system, oa_tools, an_tools,
+    )
+    deep_call = _make_tier_caller(
+        args_ns.deep_backend, args_ns.deep_model, args_ns.deep_url,
+        api_key, system, oa_tools, an_tools,
+    )
+
+    label = f"tier-policy:{args_ns.small_model}→{args_ns.deep_model}"
+    print(f"\n=== berserk-mcp two-tier eval — {label} ({len(cases)} cases) ===\n")
+    print(f"{'case':<22}{'expected':<20}{'got':<20}{'by':<7}{'tool':<6}{'ms':>7}")
+    print("-" * 82)
+
+    rows, tool_hits, total = [], 0, 0
+    small_handled = 0
+
+    for case in cases:
+        # ── small tier ────────────────────────────────────────────────────────
+        try:
+            s_name, s_args, s_dt, _ = small_call(case["prompt"])
+        except urllib.error.HTTPError as e:
+            sys.exit("\n" + _http_error_message(e))
+        except Exception as e:
+            sys.exit(f"\nsmall-tier call failed: {e}")
+
+        decision = ep.should_escalate(s_name, s_args)
+
+        if decision.escalated:
+            # ── deep tier ─────────────────────────────────────────────────────
+            try:
+                d_name, d_args, d_dt, _ = deep_call(case["prompt"])
+            except urllib.error.HTTPError as e:
+                sys.exit("\n" + _http_error_message(e))
+            except Exception as e:
+                sys.exit(f"\ndeep-tier call failed: {e}")
+            tool_ok, _ = score_case(case, d_name, d_args)
+            used_name, used_dt, handled_by = d_name, d_dt, "deep"
+        else:
+            tool_ok, _ = score_case(case, s_name, s_args)
+            used_name, used_dt, handled_by = s_name, s_dt, "small"
+            small_handled += 1
+
+        total += 1
+        tool_hits += tool_ok
+        print(f"{case['id']:<22}{case['expect_tool']:<20}{str(used_name):<20}"
+              f"{handled_by:<7}{'OK' if tool_ok else 'X':<6}{used_dt*1000:>7.0f}")
+        rows.append({
+            "id": case["id"], "expect": case["expect_tool"], "got": used_name,
+            "handled_by": handled_by, "tool_ok": tool_ok,
+            "escalation_reason": decision.reason, "ms": round(used_dt * 1000),
+        })
+
+    print("-" * 82)
+    print(f"tool-selection accuracy : {tool_hits}/{total} = {100*tool_hits/total:.0f}%")
+    print(f"small-tier handled      : {small_handled}/{total} = {100*small_handled/total:.0f}%")
+    print(f"deep-tier escalations   : {total-small_handled}/{total}")
+
+    outdir = HERE / "results"
+    outdir.mkdir(exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    safe = label.replace(":", "_").replace("/", "_").replace("→", "-")
+    report = {
+        "mode": "tier-policy",
+        "small_model": args_ns.small_model, "small_backend": args_ns.small_backend,
+        "deep_model": args_ns.deep_model, "deep_backend": args_ns.deep_backend,
+        "tool_accuracy": tool_hits / total,
+        "small_handled_pct": small_handled / total,
+        "rows": rows,
+    }
+    out_path = outdir / f"{safe}-{stamp}.json"
+    out_path.write_text(json.dumps(report, indent=2))
+    print(f"\nsaved: evals/results/{out_path.name}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cases", help="router_cases.jsonl")
-    ap.add_argument("--backend", required=True,
-                    choices=["openai", "anthropic", "ollama", "lmstudio", "mock"])
+    ap.add_argument("--backend", default="",
+                    choices=["openai", "anthropic", "ollama", "lmstudio", "mock", ""])
     ap.add_argument("--model", default="")
     ap.add_argument("--base-url", default="")
     ap.add_argument("--key-env", default="", help="env var holding the API key")
     ap.add_argument("--repeats", type=int, default=1)
     ap.add_argument("--limit", type=int, default=0, help="run only first N cases")
     ap.add_argument("--tool-choice", default="", help="override tool_choice")
+    # Two-tier routing flags (Phase 3.3)
+    ap.add_argument("--tier-policy", action="store_true",
+                    help="enable two-tier routing: small model routes, deep model handles "
+                         "escalations; requires --small-model and --deep-model")
+    ap.add_argument("--small-model", default="", help="model ID for the small routing tier")
+    ap.add_argument("--small-url", default="", help="base URL for the small model (OpenAI-compat)")
+    ap.add_argument("--small-backend", default="openai",
+                    choices=["openai", "anthropic", "ollama", "lmstudio"],
+                    help="backend type for the small tier (default: openai)")
+    ap.add_argument("--deep-model", default="", help="model ID for the deep generation tier")
+    ap.add_argument("--deep-url", default="", help="base URL for the deep model (OpenAI-compat)")
+    ap.add_argument("--deep-backend", default="openai",
+                    choices=["openai", "anthropic", "ollama", "lmstudio"],
+                    help="backend type for the deep tier (default: openai)")
     args_ns = ap.parse_args()
 
     cases = [json.loads(l) for l in Path(args_ns.cases).read_text(encoding="utf-8").splitlines() if l.strip()]
     if args_ns.limit:
         cases = cases[:args_ns.limit]
+
+    if args_ns.tier_policy:
+        _run_tier_policy(args_ns, cases)
+        return
+
+    if not args_ns.backend:
+        ap.error("--backend is required (or use --tier-policy for two-tier mode)")
 
     tools, instructions = get_mcp_tools_and_instructions()
     system = (instructions or "Use the provided tools to answer.") + \
