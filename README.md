@@ -79,64 +79,12 @@ first — full detail for each notable release lives in
   FinOps redaction, shared cross-platform private stores, hardened HTTP for
   every outbound caller, strict primer configuration, and offline regression
   coverage. See [details](docs/releases/v1.22.0.md).
-- **v1.21.1** (2026-07-27) — Bugfix: `claude_token_burn`, `claude_cost_report`,
-  and the AI FinOps usage pipeline were over-counting tokens/cost. Claude
-  Code logs one JSONL row per content block of a response, each carrying an
-  identical copy of that response's usage; nothing downstream collapsed
-  them back to one billable call. Now grouped by `claude.message_id`
-  wherever tokens are summed, client-side and in KQL. See
-  [details](docs/releases/v1.21.1.md).
-- **v1.21.0** (2026-07-25) — Adds enterprise Claude AI FinOps: native and
-  legacy telemetry normalization, effective-dated API-equivalent pricing,
-  governed feature/hour imports, deterministic attribution, management MCP
-  reports, harness feedback, generated dashboards, seven BI datasets, and
-  Grafana/Berserk dashboard assets. See
-  [details](docs/releases/v1.21.0.md).
-- **v1.20.0** (2026-07-24) — Adds schema-grounded, cost-aware KQL validation:
-  `validate_kql`, normalized schema snapshots, strict/warn modes, arbitrary
-  search and saved-query validation, generated-query schema context, live
-  runtime receipts, and a bounded in-process query concurrency guard. See
-  [details](docs/releases/v1.20.0.md).
-- **v1.19.0** (2026-07-23) — Bugfix: the v1.18.0 interactive tool budget was
-  a flat 10s regardless of window size; a real 72h query needing ~13s got
-  rejected outright. Budget now scales with the requested window. See
-  [details](docs/releases/v1.19.0.md).
-- **v1.18.1** (2026-07-23) — Fixes a `windows-latest`/Python 3.11+ CI failure:
-  `_FileLock` didn't catch a transient `PermissionError` Windows can raise
-  instead of `FileExistsError` under lock contention. See
-  [details](docs/releases/v1.18.1.md).
-- **v1.18.0** (2026-07-23) — Adds fleet-friendly worker jitter, interactive
-  query budgets, timeout cooldowns, short-TTL read-only caching, and three
-  guarded SRE/SOC tools: `detect_anomalies`, `forecast_capacity`, and
-  `find_similar`. See [details](docs/releases/v1.18.0.md).
-- **v1.17.0** (2026-07-23) — Adopts native Berserk functions (`make-series`,
-  `series_fit_line`, `fieldstats`, `tail`, `extract_log_template`, …) across
-  the query builders. See [details](docs/releases/v1.17.0.md).
-- **v1.16.0** (2026-07-23) — Berserk-native query optimization pass; adds
-  the `claude.file_targets`-based cost-attribution fix and the KQL
-  performance guide. See [details](docs/releases/v1.16.0.md).
-- **v1.15.0** (2026-07-20) — Phase J deep analytics (`claude_cost_report`,
-  `claude_session_deep_dive`, `claude_workflow_insights`), a 9-finding
-  security hardening pass, and the Discord alert integration. See
-  [details](docs/releases/v1.15.0.md).
-- **v1.14.1** (2026-07-18) — Fixed a silent-failure bug in the agent-analytics
-  tools' `bzrk --json` parsing. See [details](docs/releases/v1.14.1.md).
-- **v1.14.0** (2026-07-17) — Distributed-trace analysis tools
-  (`trace_find_slow`, `trace_find_errors`, `trace_analyze`), shipped
-  unverified then live-verified against a real cluster outage. See
-  [details](docs/releases/v1.14.0.md).
-- **v1.12.0** (2026-07-15) — Agent-log analytics (`claude_loop_check`,
-  `claude_model_fit`, `claude_token_burn`), secret detection/redaction, and
-  the ingestion advisor (`suggest_ingestion`). See
-  [details](docs/releases/v1.12.0.md).
-- **v1.7.1** — Runaway fail-safes for source auto-detection.
-- **v1.7.0** — LLM-driven parser factory for new Berserk sources.
-- **v1.6.2** — Security review findings from the 2026-07-05 pass.
-- **v1.6.0–1.6.1** — Role profiles (SRE/SOC/Claude/Ops), role primers,
-  amendments logging, and early hardening fixes.
-- **v1.2.0–1.5.0** — Initial release through discovery tools, dual-perspective
-  `discover_schema`, and `bzrk_query_perf`. See `git log` for individual
-  commits.
+
+Older releases (v1.2.0 through v1.21.1 — enterprise Claude AI FinOps,
+schema-grounded KQL validation, distributed-trace tools, agent-log
+analytics, fleet-friendly worker tuning, the parser factory's early
+fail-safes, role profiles, and the initial release) are in
+[`docs/releases/`](docs/releases/), one file per version.
 
 ## Why this exists
 
@@ -560,66 +508,6 @@ real attribute names used for exact token counts. See
 [the v1.14.1 release notes](docs/releases/v1.14.1.md) for the silent-failure
 bug this fixed and the live-verification story behind it.
 
-### Enterprise AI development economics
-
-Version 1.21 adds a canonical cost and attribution layer behind the newer
-Claude tools. Native Claude Code OpenTelemetry is the preferred input; the
-existing JSONL-forwarder attributes remain compatible. Reports normalize
-input, output, cache-read, cache-creation, long-context, and chargeable
-server-tool usage, then calculate a versioned public API-equivalent cost.
-Claude's reported approximate cost remains a separate field. This is not an
-invoice, and an unknown model is left unpriced rather than assigned a guessed
-rate.
-
-Launch Claude with governed work context so telemetry can be attributed to a
-feature without inspecting prompts or source code:
-
-```bash
-berserk-claude --team platform --project OBS --feature OBS-142 \
-  --work-item ADO-912 --repository berserk-mcp --harness-version finops-v1 \
-  -- claude
-```
-
-Import planning and actual-hours data through the neutral CSV/NDJSON contract.
-The local store is updated atomically; configure an OTLP logs endpoint to also
-emit privacy-safe `engineering-work` records:
-
-```bash
-berserk-mcp --import-business-data feature --input /absolute/path/features.csv
-berserk-mcp --import-business-data effort --input /absolute/path/worklogs.ndjson \
-  --input-format ndjson
-```
-
-Feature records use stable IDs plus optional portfolio, project, work-item,
-repository, branch, pull-request, planned-hours, AI-budget, and completion
-fields. Effort records contain a stable worklog ID, feature/work-item/team,
-work date, actual hours, source system, and update timestamp. Developer hours
-are never inferred from session duration, commits, or Claude active time.
-
-Create management-ready outputs from the same model:
-
-```bash
-berserk-mcp --export-bi --since "90d ago" \
-  --output /absolute/path/ai-finops-export --export-format csv
-berserk-mcp --generate-dashboard project --identifier OBS --since "90d ago" \
-  --dashboard-format html
-```
-
-The export contains seven versioned datasets and a checksum manifest. Grafana
-provisioning JSON and bounded Berserk Explore queries are in
-[`dashboards/`](dashboards/README.md). Generated snapshots contain aggregates,
-coverage, pricing version, freshness metadata, and deployment-scoped owner
-pseudonyms where management attribution is needed. They do not contain prompts,
-code, raw commands, session bodies, cleartext owner IDs, or email addresses.
-Harness amendments are recommendations only: an owner must record a decision,
-deploy an immutable harness version, and use the matched-cohort impact tool
-before keeping or rolling back a change.
-
-Private local stores use current-user-only permissions. BI exports and generated
-management reports are publication outputs: berserk-mcp leaves an existing
-output directory's mode or ACL unchanged so a BI service account is not locked
-out. The operator owns access control for those publication directories.
-
 ### Secret detection and output redaction
 
 A stdlib-only secret scanner at the MCP output boundary (v1.12.0; see
@@ -752,6 +640,27 @@ limitation and directs the caller to `search` with an exact `has` term.
 
 ---
 
+## Cost & BI reporting
+
+A canonical cost and attribution layer, separate from the MCP tool calls
+above — driven by CLI flags and a wrapper binary (`berserk-claude`), not
+`tools/call`. Native Claude Code OpenTelemetry is the preferred input.
+Reports normalize input, output, cache-read, cache-creation, long-context,
+and chargeable server-tool usage into a versioned public API-equivalent
+cost — not an invoice, and an unknown model is left unpriced rather than
+assigned a guessed rate. Launch Claude with governed work context so
+telemetry attributes to a feature without inspecting prompts or source
+code; import planning/actuals through a neutral CSV/NDJSON contract; export
+management-ready BI datasets and dashboards from the same model. Generated
+outputs contain aggregates and coverage metadata, never prompts, code, or
+cleartext owner IDs.
+
+Full CLI reference (flags, business-data record shapes, export/dashboard
+format, privacy/permission details):
+[docs/cost-and-bi-reporting.md](docs/cost-and-bi-reporting.md).
+
+---
+
 ## Self-extending: discovery and learning
 
 The fixed tools cover known telemetry. For data with no tool yet — a log
@@ -832,305 +741,42 @@ reliable.
 
 ## Parser factory: LLM-generated query packs
 
-**The problem it solves:** A new service or log type starts shipping to
-Berserk, and there is no tool for it yet. Normally a human notices, explores
-the shape with `discover_schema`, hand-writes KQL, and calls `save_query`.
-The parser factory automates that loop.
+When a new source starts shipping to Berserk with no tool for it yet, the
+parser factory automates what a human would otherwise do by hand:
+`discover_schema`, hand-write KQL, `save_query`. Following the design of
+Microsoft's [ASIM parser AI agent](https://learn.microsoft.com/en-gb/azure/sentinel/normalization-create-parsers-ai-agent)
+for Sentinel, it samples the source, generates KQL, validates by executing
+it, refines on failure (capped at 5 cycles per provider), and persists only
+the verified survivors as a reusable **query pack** — 2-4 saved queries per
+source. Tries cheap/local providers first, has hard runaway fail-safes
+(per-run caps on both queuing and generation), and never lets a generated
+query silently overwrite a human-saved one.
 
-The design follows Microsoft's [ASIM parser AI agent for Sentinel](https://learn.microsoft.com/en-gb/azure/sentinel/normalization-create-parsers-ai-agent):
-sample the source, generate KQL, validate by executing it, refine on failure
-(capped at 5 cycles), then persist the survivors. Sentinel's agent produces
-stored ASIM parser functions. Berserk has no stored functions, so the output
-here is a **query pack**: 2–4 verified `save_query` entries per source (an
-overview, an errors/timeline view, and metric aggregates where appropriate).
-Each entry is reusable forever afterward via `run_saved` on the cheap lane.
-
-How the pipeline maps to Sentinel's ASIM agent stages:
-
-| ASIM parser AI agent (Sentinel) | berserk-mcp parser factory |
-|---|---|
-| Requirements gathering | Discovery job — source name, kind, role hint |
-| Sample source data (`getschema` + up to 2,000 rows) | `build_source_profile`: resource keys + row sample + `getschema` |
-| Generate the KQL parser | LLM generates a JSON **query pack** from the profile |
-| Schema validation (`ASimSchemaTester`) | Declared output columns checked against real query output |
-| Data validation (`ASimDataTester`) | Query is **executed**; must return rows (window widened once before failing) |
-| Refinement loop (≤ 5 cycles) | Validator error fed back to the model, ≤ 5 attempts per provider |
-| Deploy / package | Persisted through the existing `save_query` store (which re-verifies) |
-| Summary report | Report stored on the discovery job; visible via `discovery_status` / `review_generated` |
-
-**Escalation ladder.** Generation tries providers in order: free and local
-first, expensive only on failure.
-
-```
-hermes (local/free) → openai → anthropic
-```
-
-Each provider gets up to 5 refinement attempts. The previous failure's
-validator error feeds back into the next prompt. A provider with no
-configuration (no API key) is skipped after one attempt, instead of burning
-the full 5.
-
-**Tools:**
-
-| Tool | What it does |
-|---|---|
-| `detect_new_sources` | Scans Berserk for services and metrics never seen before, and optionally for schema drift on known ones (new attribute keys on an existing service). `auto_queue=true` feeds newcomers into the discovery queue. |
-| `generate_parser` | Synchronously generates and verifies a query pack for one named source, right now. |
-| `run_discovery_worker` | Drains up to N pending discovery jobs through the pipeline. |
-| `review_generated` | Lists or inspects LLM-generated saved queries. Audit these before you trust them. |
-
-**What it produces.** For a newly-detected `haproxy` service, one run turns
-this discovery job:
-
-```
-generate_parser(service="haproxy", role_hint="sre")
-```
-
-into a set of verified, source-prefixed saved queries. Only the queries that
-actually returned rows are kept:
-
-```
-haproxy_overview            – event volume, log/metric split, last seen
-haproxy_error_rate          – ERROR lines per minute
-haproxy_top_backends        – requests grouped by backend
-```
-
-Each entry is stored with `generated_by: {provider, model, ts, job_source}`.
-Each is immediately runnable on the cheap lane via
-`run_saved name=haproxy_overview`.
-
-**Safety.** Generated KQL passes through the same `_KQL_PREFIX_RE` guard as
-human input. berserk-mcp saves a generated query only if it executes
-successfully against Berserk. A generated query never silently overwrites a
-human-saved one; on a name collision, it saves as `<name>_gen` instead. Every
-generated entry carries `generated_by: {provider, model, ts, job_source}`,
-so `review_generated` can audit it before anyone trusts it in production. See
-[SECURITY.md](SECURITY.md) for the full threat model, including the
-indirect-prompt-injection risk from log data fed into generation prompts.
-
-**Runaway fail-safes.** Auto-discovery is deliberately bounded. It can never
-flood the queue or burn a pile of LLM tokens in one pass — a real cluster can
-have hundreds of metrics:
-
-- **Internal metrics are never auto-queued.** `detect_new_sources` records
-  them in the baseline, so they do not re-flag as "new." It only ever queues
-  *services* — the assistant never needs a per-metric query pack.
-- **Per-run service cap.** A single detect pass queues at most
-  `MAX_AUTOQUEUE_PER_RUN` new services (default **5**; override with
-  `BERSERK_MAX_AUTOQUEUE`). Any remainder is picked up on later runs.
-- **Per-run drain cap.** `run_discovery_worker` and `--worker` generate for
-  at most a bounded number of jobs per invocation (`--max-jobs`, capped at
-  5). A large pending queue drains gradually, not all at once.
-- **Ephemeral-name filter.** berserk-mcp skips service names with no letters
-  — for example a bare PID, or a changing numeric ID emitted as
-  `service.name` by a misconfigured source. Otherwise these names look "new"
-  on every run and would queue a junk pack forever.
-
-The first `detect_new_sources` run against a fresh Berserk *seeds the
-baseline and queues nothing*. Everything looks new on day one, so this first
-run records the current state as the "known" set, instead of generating
-hundreds of packs.
-
-**Headless / cron mode.** An MCP stdio server runs only while a client is
-attached. A separate CLI path handles unattended scheduling:
-
-```bash
-python3 berserk_mcp.py --worker --auto-queue --max-jobs 2 --check-drift
-```
-
-This command detects new sources, queues them, drains up to `--max-jobs`
-pending jobs, and exits 0 (or 1 if any job needed human review). Example cron
-line:
-
-```
-* * * * * cd /path/to/berserk-mcp && python3 berserk_mcp.py --worker --auto-queue --max-jobs 2 >> ~/.local/state/berserk-worker.log 2>&1
-```
-
-The worker applies up to `BERSERK_WORKER_JITTER_SECONDS` of random startup
-jitter, so the cron entry can run every minute without synchronizing many
-tenants on a fixed minute.
-
-**Configuration** (all optional; a provider with no key configured is
-skipped):
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `BERSERK_LLM_LADDER` | `hermes,openai,anthropic` | Provider order for generation. |
-| `HERMES_API_KEY` | — | Bearer token for the Hermes/Open WebUI endpoint. |
-| `BERSERK_LLM_HERMES_URL` | `http://localhost:3000/api/chat/completions` | Hermes chat-completions endpoint. Resolution order: this env var, then a local `llm_config.json`, then the default. Persist a private URL without an env var, and without hardcoding it in the repo, using `berserk-mcp --set-hermes-url <URL>` — this writes `llm_config.json` in the per-user berserk-mcp config directory with current-user-only protection (`0600` on POSIX, a protected DACL on Windows). By default, plaintext `http://` is accepted only for a loopback host (`localhost`/`127.0.0.1`/`::1`). See `BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE` below if Hermes runs on a private or VPN network. |
-| `BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE` | unset | Set to `1` to allow `BERSERK_LLM_HERMES_URL`/`--set-hermes-url` to point at a **non-loopback** host over plain `http://` — for example a Tailscale or private-LAN Hermes gateway. Without this setting, a non-loopback `http://` URL is rejected at both save-time and call-time, because the bearer token would otherwise cross the network unencrypted. Prefer `https://` when the endpoint supports it. Use this flag only for trusted private networks that do not support `https://`. |
-| `BERSERK_LLM_HERMES_MODEL` | auto-discovered via `/api/models` | Hermes model id. |
-| `OPENAI_API_KEY` | — | OpenAI API key. |
-| `BERSERK_LLM_OPENAI_MODEL` | `gpt-4o` | OpenAI model. |
-| `ANTHROPIC_API_KEY` | — | Anthropic API key. |
-| `BERSERK_LLM_ANTHROPIC_MODEL` | `claude-opus-4-8` | Anthropic model. |
-| `BERSERK_LLM_TIMEOUT` | `120` | Per-LLM-call timeout, seconds. |
-| `BERSERK_MAX_AUTOQUEUE` | `5` | Max new services a single `detect_new_sources` pass will queue (runaway fail-safe). |
-
-No new pip dependencies. LLM calls use `urllib.request` from the standard
-library, matching the rest of berserk-mcp's zero-dependency design.
-
-> **Note for Berserk maintainers.** This feature exists because Berserk has
-> no stored-function or saved-view primitive that an agent can create
-> programmatically. So "a parser for a source" is emulated as a bundle of
-> verified saved queries in berserk-mcp's own store. If Berserk ever exposes
-> a gateway RPC for stored KQL functions or server-side saved views (the ASIM
-> parser equivalent), this pipeline could target that directly instead. The
-> generated packs would then become first-class Berserk objects. Feedback on
-> whether such a primitive exists or is planned is very welcome — see
-> [CONTRIBUTING.md](CONTRIBUTING.md).
+Tools: `detect_new_sources`, `generate_parser`, `run_discovery_worker`,
+`review_generated`. Full pipeline mapping, configuration reference,
+headless/cron mode, and safety details:
+[docs/parser-factory.md](docs/parser-factory.md).
 
 ---
 
 ## CanonLoom: knowledge-artifact lifecycle bridge
 
-**The problem it solves:** growing a library of good "skills" — runbooks,
-incident patterns, lessons learned — normally means a human notices a source,
-reads it, decides if it's new or a duplicate, distills it into a clean
-document, checks it isn't garbage or a prompt-injection attempt, and files it
-somewhere durable. That doesn't scale: sources show up faster than anyone can
-manually curate them. The parser factory (above) solves the analogous
-problem for *telemetry sources* → verified, reusable KQL. CanonLoom solves
-it for *knowledge sources* → it turns a source URL into a validated,
-versioned skill artifact your agents can load later, through a five-phase
-pipeline with a hard validation gate before anything is trusted, instead of
-a human doing that work by hand.
+The parser factory (above) turns new *telemetry sources* into verified KQL.
+CanonLoom solves the analogous problem for *knowledge sources*: turning a
+source URL into a validated, versioned skill artifact through a five-phase
+pipeline (CLP-1 through CLP-5) with a hard validation gate before anything
+is trusted. **CanonLoom is a separate project**, not part of berserk-mcp —
+it ships its own HTTP API server (`canonloom-server`) and knowledge
+repository; berserk-mcp only bridges to that API via five tools, with zero
+shared dependencies. Run berserk-mcp with no `canonloom-server` anywhere and
+everything else works exactly as documented above; only the `canonloom_*`
+tools return a clear setup error instead of a result.
 
-**CanonLoom is a separate project**, not part of berserk-mcp. It ships its
-own HTTP API server (`canonloom-server`) and its own knowledge repository.
-berserk-mcp adds five tools that bridge to that API — it does not implement
-any pipeline logic itself. If `canonloom-server` is not running, every
-`canonloom_*` tool call returns one clear error instead of failing silently:
-
-```text
-CANONLOOM_SERVER_URL is not set. Start canonloom-server and set the URL.
-Example: export CANONLOOM_SERVER_URL=http://localhost:8080
-```
-
-Side by side, feature and functionality wise:
-
-| | Berserk | berserk-mcp | CanonLoom |
-|---|---|---|---|
-| Domain | Observability data — logs, metrics, traces | Agent-facing query layer over Berserk | Agent-facing knowledge-artifact lifecycle |
-| Problem solved | Store and query telemetry at scale | Let an LLM ask Berserk questions without hand-authoring KQL | Let an LLM or operator turn a URL into a trustworthy, versioned skill without manual curation |
-| Core unit | A log / metric / trace record | A verified tool call (e.g. `top_cpu`) | A skill artifact (`SKILL.md` + manifest) |
-| Durable storage | Berserk's own KQL engine | None — stateless bridge | `canonloom-knowledge` git repo |
-| Trust/validation model | n/a | Fixed, pre-verified queries — the model never authors KQL | A schema/semantic/injection/structural gate before anything is promoted |
-| How they relate | The data source berserk-mcp queries | Depends on Berserk (via `bzrk`); no dependency on CanonLoom | Depends on neither — bridged in only as an optional HTTP client |
-
-See [canonloom's own README](https://github.com/ssimonsen0202/canonloom#why-this-exists)
-for the full why/what/how, the CLP-1 through CLP-5 pipeline-phase
-reference, and `canonloom-server` setup. One gap worth knowing: CanonLoom
-also has a **domain packs** capability (deterministic `.tar.gz` bundles of
-validated artifacts for distribution) that this bridge exposes no tool for
-yet — everything else (`run_pipeline`, artifact listing/lookup, freshness
-scoring, run history) is covered by the five tools above.
-
-### Deployment scenario
-
-Both stacks run independently. The MCP client is the only thing that talks
-to both — berserk-mcp itself never imports or embeds any CanonLoom code, it
-only makes an HTTP call when a `canonloom_*` tool is invoked:
-
-```mermaid
-flowchart LR
-    subgraph client["Operator machine"]
-        MCPClient["MCP client<br/>(Claude Desktop / Claude Code)"]
-    end
-
-    subgraph bmcp["berserk-mcp process (stdio)"]
-        BMCP["berserk-mcp<br/>tools/list · tools/call"]
-    end
-
-    subgraph berserk["Berserk cluster"]
-        BzrkGW["Gateway (gRPC)"]
-        BzrkStore["KQL storage + query engine"]
-    end
-
-    subgraph canon["canonloom-server (HTTP :8080)"]
-        CLP["CLP-1..5 pipeline"]
-    end
-
-    subgraph know["canonloom-knowledge (git repo)"]
-        Skills["skills/ · manifests/"]
-    end
-
-    Anthropic["Anthropic API"]
-
-    MCPClient -- "MCP over stdio" --> BMCP
-    BMCP -- "bzrk CLI, bearer token" --> BzrkGW
-    BzrkGW --> BzrkStore
-    BMCP -. "HTTP + X-API-Key<br/>(canonloom_* tools only,<br/>opt-in via CANONLOOM_SERVER_URL)" .-> CLP
-    CLP -- "CLP-1/2/3 LLM calls" --> Anthropic
-    CLP -- "git add / git commit<br/>(CLP-5 promotion)" --> Skills
-```
-
-The dotted edge is the only connection between the two stacks, and it only
-exists when `CANONLOOM_SERVER_URL` is set. Run berserk-mcp with no
-`canonloom-server` anywhere and every other tool works exactly as documented
-above — only the five `canonloom_*` calls return the setup error shown above
-instead of a result. See
-[canonloom's own README](https://github.com/ssimonsen0202/canonloom#relationship-to-berserk-and-berserk-mcp)
-for the same diagram from the other side, and for what CanonLoom does when
-there is no MCP client or Berserk cluster involved at all.
-
-### The pipeline: CLP-1 through CLP-5
-
-CanonLoom runs a source through five phases — intake, impact analysis, draft
-generation, validation, promotion — stopping at the first one that fails.
-See [canonloom's own README](https://github.com/ssimonsen0202/canonloom#what-it-does)
-for what each phase does. What matters for this bridge:
-`canonloom_run_pipeline`'s `stop_after` argument (`clp1`–`clp5`) lets you halt
-early — for example `stop_after=clp2` to see the impact-analysis
-recommendation without generating a draft, useful for a dry-run review before
-committing LLM calls to CLP-3.
-
-### Tools
-
-| Tool | What it does |
-|---|---|
-| `canonloom_run_pipeline` | Submit a URL to the pipeline. Runs CLP-1 through CLP-5 (or stops early via `stop_after`). `auto_promote=true` commits the artifact automatically on a CLP-4 pass; default `false` leaves it in staging for review. |
-| `canonloom_list_artifacts` | List promoted (validated/approved/published) skill artifacts. Pass `include_staging=true` to also list unpromoted drafts. |
-| `canonloom_get_artifact` | Retrieve one artifact's manifest by `artifact_id`. |
-| `canonloom_freshness_report` | Score every validated artifact's freshness on a configurable half-life (`half_life_days`, default 365) and surface deprecation candidates older than `min_age_days` (default 90). |
-| `canonloom_run_history` | List recent pipeline runs, optionally filtered by outcome (`ok`/`rejected`), with the phase each run reached. |
-
-### Configure
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `CANONLOOM_SERVER_URL` | unset | Base URL of the running `canonloom-server`, e.g. `http://localhost:8080`. Every `canonloom_*` tool call requires this; unset returns a clear setup error instead of failing silently. |
-| `CANONLOOM_API_KEY` | unset | Sent as `X-API-Key` on every request, if the server requires it. |
-
-### Running `canonloom-server`
-
-`canonloom-server` is a separate project with its own install, Python
-version floor, and environment requirements — none of it required by
-berserk-mcp itself, only by this optional bridge target. See
-[canonloom's own README](https://github.com/ssimonsen0202/canonloom#running-canonloom-server)
-for the full setup (Python version, the `server` install extra, the `git`
-CLI dependency, and the `CANONLOOM_KNOWLEDGE_ROOT` scaffold). berserk-mcp's
-bridge is intentionally a thin pass-through and doesn't duplicate that
-documentation here — the only things berserk-mcp needs are the two env vars
-in the Configure table above, pointed at wherever `canonloom-server` ends up
-running.
-
-### Example
-
-```
-canonloom_run_pipeline url="https://docs.example.com/incident-runbook" stop_after="clp2"
-```
-
-returns the impact-analysis recommendation — `create`, `update`, or `skip` —
-without spending an LLM call on draft generation. Once you're ready to
-generate and commit:
-
-```
-canonloom_run_pipeline url="https://docs.example.com/incident-runbook" auto_promote=true
-```
-
-runs all five phases and commits the artifact to `canonloom-knowledge` if
-CLP-4 validation passes.
+Tools: `canonloom_run_pipeline`, `canonloom_list_artifacts`,
+`canonloom_get_artifact`, `canonloom_freshness_report`,
+`canonloom_run_history`. Deployment diagram, pipeline-phase reference,
+configuration, and worked examples:
+[docs/canonloom-bridge.md](docs/canonloom-bridge.md).
 
 ---
 
@@ -1617,88 +1263,15 @@ went stale, or was fixed by a query the tool refused to run — consolidated
 under one name. Most open-source observability MCP implementations' stated
 hallucination defenses (rate limiting, query timeouts, read-only execution)
 protect backend stability; few address this query-result failure mode, which
-is the one that actually pages someone at 4am. Each control below is scattered
-through the sections above; this list exists so it can be reviewed, tested,
-and cited as one thing.
+is the one that actually pages someone at 4am.
 
-- **Field-access guidance.** OTLP resource/log attributes such as service
-  and host names — the fields models most often guess wrong — live nested
-  under `resource[...]`/`attributes[...]`, not as flat columns. Some fields
-  genuinely are top-level (log/metric fields like `metric_name`, `value`,
-  `body`, `timestamp`; trace/span fields like `trace_id`, `span_id`,
-  `span_name`, `duration`, `status_code`, and more) — an exhaustive list
-  goes stale as the schema grows, so the guidance doesn't attempt one; use
-  `discover_schema` rather than assuming either way. A bare column name
-  like `service_name` is not a KQL error — it silently matches zero rows.
-  `_BASE_INSTRUCTIONS` and
-  the `search` tool description both warn about this explicitly and point
-  at `discover_schema` before guessing again. Prompt-level, not code-
-  enforced — the query engine's own behavior can't be changed from here —
-  so the control is the warning existing and staying worded precisely,
-  which is why it has a locking test: `WrongAnswerContainmentTest.
-  test_base_instructions_warn_about_bare_column_names`.
-- **Full-text search term-boundary guidance.** `search "term"` matches whole
-  delimited tokens (`_-./:` and whitespace all delimit), not substrings — a
-  plural or singular mismatch (`search "journal"` vs a body containing
-  `journals`) silently returns zero rows exactly like the bare-column-name
-  case above, but for an unrelated reason a model would not otherwise think
-  to check. `_BASE_INSTRUCTIONS` names the wildcard escape (`search
-  "journal*"`) and recommends `=~`/`!~` over `tolower(field) == ...` for
-  case-insensitive matching, since the latter also silently degrades query
-  performance by defeating index pruning. Sourced from the
-  [berserkdb/berserk-skills](https://github.com/berserkdb/berserk-skills)
-  reference agent's own accumulated field notes. Locking tests:
-  `test_base_instructions_warn_about_search_term_boundaries`,
-  `test_base_instructions_recommend_case_insensitive_operator`.
-- **KQL validation rejects blockers before execution.** A query against the
-  wrong table, or one carrying a source-introducing operator, is rejected
-  by static validation before it reaches `bzrk` — rather than running and
-  returning an empty or unrelated result that looks like a real answer. See
-  `## Security`'s "Schema-grounded KQL validation" above;
-  `WrongAnswerContainmentTest.test_validate_kql_rejects_wrong_table_prefix`
-  is the containment-framed regression test. This validation can be disabled
-  via `BERSERK_MCP_KQL_VALIDATION=off` (not recommended — an escape hatch for
-  debugging only).
-- **Schema-drift warning on saved queries.** A saved query is revalidated
-  against the *current* schema every time it runs (unless `BERSERK_MCP_KQL_VALIDATION=off`,
-  the same escape hatch as above, which skips this check and the hash
-  comparison entirely). If the schema has
-  changed since the query was saved, the response is prefixed with an
-  explicit warning naming both hashes, rather than silently returning
-  whatever the (possibly now-wrong) query still happens to match.
-  `WrongAnswerContainmentTest.test_schema_drift_warning_fires_when_stored_hash_differs`
-  proves the warning fires on drift; the companion
-  `test_schema_drift_warning_silent_when_hashes_match` proves it stays
-  silent otherwise, so it doesn't become noise nobody reads. **Known limitations:**
-  Schema snapshots are cached for up to one hour (`DEFAULT_TTL_SECONDS` in
-  `schema_registry.py`; not currently exposed as an environment variable).
-  When the schema backend fails (auth error, timeout, etc.), the fetch does
-  not raise — see tracked bug [#32](https://github.com/ssimonsen0202/berserk_mcp/issues/32)
-  — so `get_schema_snapshot` has no way to know the fetch failed and marks
-  the result "fresh" using a hash derived from whatever error text came
-  back. That hash won't match any real previously-stored hash, so a saved
-  query with a real stored hash will trigger a drift warning even though
-  nothing about the query itself changed (a false positive, not a silent
-  skip). The warning is silently skipped only when the *saved query* has no
-  stored hash at all (queries saved before this feature existed).
-- **The result envelope disambiguates the bare `(no rows)` sentinel.** An
-  empty result used to be indistinguishable between healthy, wrong window,
-  wrong tool, and a source that stopped reporting. Fixed-query tools dispatched
-  through the `SIMPLE` path (e.g., `list_hosts`, `errors_by_service`) now echo
-  their resolved window and, on empty results, a concrete per-tool next step
-  naming a real tool or argument. Tools outside this path (e.g., `logs_for_service`,
-  `search`) and environments with `BERSERK_MCP_ENVELOPE=0` return results
-  unenveloped. See `docs/result-envelope-implementation-spec.md` and
-  `ResultEnvelopeTest` for full coverage.
-- **Returned telemetry is fenced as untrusted data.** Not a containment
-  control in the same sense as the others — it defends against an agent
-  *acting on an instruction smuggled into a log line*, not against a query
-  silently returning the wrong thing — but it belongs in the same "can we
-  trust what came back" conversation. Real telemetry rows are wrapped in an
-  explicit `<untrusted_log_data>` marker before reaching the model, with a
-  matching instruction to treat the content strictly as data. This fencing
-  is issue #11; see `_fence_untrusted` and the `UntrustedDataFencing*` test
-  classes for the full call-site coverage and threat-model detail.
+Six controls, each with a locking test: field-access guidance for nested
+OTLP attributes, full-text search term-boundary guidance, KQL validation
+rejecting blockers before execution, schema-drift warnings on saved
+queries, a result envelope that disambiguates the bare `(no rows)`
+sentinel, and untrusted-data fencing against a smuggled instruction in a
+log line. Full detail, known limitations, and the regression test for
+each: [docs/wrong-answer-containment.md](docs/wrong-answer-containment.md).
 
 ## Testing
 
