@@ -46,12 +46,12 @@ Current version: **1.26.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
-- **v1.26.0** (2026-08-24) — Untrusted-data fencing, tool tiers, multi-agent
-  ingestion (Codex CLI alongside Claude Code), just-in-time tool discovery
-  (`find_tool`, 92% measured token reduction), a live quota-window check
-  (`claude_quota_status`), OpenRouter telemetry now flowing into Berserk as
-  its own source, and a schema-fetcher bug fix (a failed backend call was
-  silently cached as a "fresh" schema). See [details](docs/releases/v1.26.0.md).
+- **v1.26.0** (2026-08-24) — Untrusted-data fencing, tool tiers, just-in-time
+  tool discovery (`find_tool`, 92% measured token reduction), a live
+  quota-window check (`claude_quota_status`), an `agent` parameter on the base
+  Claude Code query tools for querying other ingested agents' data, and a
+  schema-fetcher bug fix (a failed backend call was silently cached as a
+  "fresh" schema). See [details](docs/releases/v1.26.0.md).
 - **v1.25.1** (2026-08-11) — Performance bugfixes for shipped KQL: selective
   service filtering, shallower unfiltered schema discovery, CI cost guardrails,
   and validator-derived query-budget headroom. See
@@ -457,9 +457,7 @@ Every query tool takes an optional `since` argument (`"15m ago"`, `"1h ago"`,
 ### Claude Code tools (`claude` lane only)
 
 If you ship Claude Code session logs into Berserk (service name `claude-code`), these
-tools mine that data. As of v1.26.0 (issue #42), Codex CLI sessions can ingest
-alongside Claude Code, tagged with their own `service.name` (`codex-cli`). See
-[docs/claude-code.md](docs/claude-code.md) for the pipeline.
+tools mine that data. See [docs/claude-code.md](docs/claude-code.md) for the pipeline.
 
 | Tool | What it answers |
 |---|---|
