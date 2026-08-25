@@ -2268,14 +2268,21 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertEqual(bm._http_effective_client_ip(FakeHandler(), trusted), "198.51.100.9")
 
     def test_phase8_operator_docs_cover_safe_http_settings(self):
+        # As of the docs/*.md extraction restructuring, the full HTTP
+        # settings table lives in docs/configuration.md, not inline in
+        # README.md -- README keeps a summary + link. This test now checks
+        # the doc file for the per-setting names.
         project_root = Path(bm.__file__).resolve().parent
         env_example = (project_root / ".env.example").read_text(encoding="utf-8")
         readme = (project_root / "README.md").read_text(encoding="utf-8")
+        config_doc = (project_root / "docs" / "configuration.md").read_text(
+            encoding="utf-8"
+        )
         proxy_doc = (project_root / "docs" / "mcp-http-reverse-proxy.md").read_text(
             encoding="utf-8"
         )
 
-        expected_settings = (
+        http_settings = (
             "BERSERK_MCP_HTTP_ENABLE",
             "BERSERK_MCP_HTTP_BIND",
             "BERSERK_MCP_HTTP_ALLOW_REMOTE",
@@ -2286,11 +2293,13 @@ class BerserkMcpTest(unittest.TestCase):
             "BERSERK_MCP_HTTP_MAX_CONCURRENT_REQUESTS",
             "BERSERK_MCP_HTTP_USE_FORWARDED_FOR",
             "BERSERK_MCP_HTTP_TRUSTED_PROXY_CIDRS",
-            "BERSERK_MCP_ENABLE_2026_07_28",
         )
-        for setting in expected_settings:
+        for setting in http_settings:
             self.assertIn(setting, env_example)
-            self.assertIn(setting, readme)
+            self.assertIn(setting, config_doc)
+
+        self.assertIn("BERSERK_MCP_ENABLE_2026_07_28", env_example)
+        self.assertIn("BERSERK_MCP_ENABLE_2026_07_28", readme)
 
         self.assertIn("disabled by default", env_example)
         self.assertIn("127.0.0.1:8765", env_example)
