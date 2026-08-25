@@ -974,54 +974,10 @@ evidence behind each number.
 
 ## Configure
 
-All configuration is via environment variables. All are optional:
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `BZRK_BIN` | `bzrk` | Trusted path/name of the Berserk CLI binary. Prefer an absolute path; it is required if a bare Windows name resolves inside the current working directory. |
-| `BZRK_PROFILE` | `local` | The `bzrk` profile to query. |
-| `BZRK_TIMEOUT` | `120` | Per-query timeout, seconds (worker and generation paths). |
-| `BERSERK_WORKER_JITTER_SECONDS` | `7200` | Maximum random startup delay for `--worker`; set `0` to disable. Interactive MCP calls are never jittered. Derived from the 100-worker collision sweep. |
-| `BERSERK_MCP_TOOL_BUDGET_SECONDS` | `10` (clamped to `BZRK_TIMEOUT`) | Base per-query budget for interactive `tools/call`, for short windows; derived from a five-repeat deployment p95 sweep. Scales up for wider `since` windows — see `BERSERK_MCP_BUDGET_PER_HOUR_SECONDS`. Timeout errors advise a narrower window or raising these values. |
-| `BERSERK_MCP_BUDGET_PER_HOUR_SECONDS` | `0.5` | Added to the base budget per hour of the query's `since` window (capped at `BZRK_TIMEOUT`) — a 72h query gets ~46s, not the 10s base. Set `0` to restore a flat budget regardless of window size (v1.19.0; see [release notes](docs/releases/v1.19.0.md)). |
-| `BERSERK_MCP_FAIL_COOLDOWN_SECONDS` | `30` | Suppress identical timeout retries within one MCP process; `0` disables. |
-| `BERSERK_MCP_CACHE_TTL_SECONDS` | `120` | TTL for allowlisted read-only rollup results; derived from the synthetic trace replay; `0` disables. |
-| `BERSERK_MCP_KQL_VALIDATION` | `warn` | KQL validation policy: `off`, `warn`, or `strict`. `warn` rejects malformed/control-command queries and reports performance warnings on arbitrary `search`; `strict` also blocks high-risk arbitrary and generated queries. |
-| `BERSERK_MCP_KQL_LIVE_VALIDATION` | `0` | Enables `validate_kql` with `mode=live`. Live validation executes a bounded read-only query and can consume query budget. |
-| `BERSERK_MCP_MAX_CONCURRENT_QUERIES` | `2` | Maximum in-process Berserk queries at once. `0` disables the local guard, which weakens retry-storm protection. |
-| `BERSERK_MCP_KQL_MAX_CHARS` | `50000` | Maximum user-supplied KQL length accepted by validation. |
-| `BERSERK_MCP_KQL_MAX_ROWS` | `2000` | Recommended maximum arbitrary-query result bound used by validation warnings. |
-| `BERSERK_MCP_KQL_STATS` | `auto` | `off`, `auto`, or `required`; controls whether live validation asks the CLI for `--stats`. Missing or unrecognized stats are reported as unavailable, never invented. |
-| `BERSERK_MCP_MAX_RESULT_BYTES` | `10485760` | Hard cap on captured successful `bzrk` stdout. Overflow kills and reaps the child and asks the caller to narrow the query. |
-| `BERSERK_TABLE` | `default` | The Berserk table to query. |
-| `BERSERK_MCP_LEARNED_PATH` | platform config dir | Where saved queries persist (`~/.config/berserk-mcp/learned.json` on Linux). |
-| `BERSERK_MCP_ROLE` | `all` | Active role lane: `sre`, `soc`, `claude`, `ops`, or `all`. Controls tool visibility and primer injection. |
-| `BERSERK_MCP_PRIMERS_DIR` | adjacent `primers/` dir | Optional absolute directory containing `<role>.md`. When explicitly set for an active lane, a missing/unreadable primer is a startup error. |
-| `BERSERK_MCP_REDACT` | `redact` | Output handling: `redact` (safest, default), `flag`, or `off`. An unrecognized value fails closed to `redact`. Setting `flag` or `off` logs a startup warning, because both weaken the default. |
-| `BERSERK_MCP_REDACT_ENTROPY` | unset | Set to `true` to enable high-entropy token detection. |
-| `BERSERK_MCP_REDACT_PII` | unset | Comma-separated PII checks: `email,ipv4,ipv6,credit_card`. |
-| `BERSERK_MCP_FINOPS_REDACT_ENTROPY` | `0` | Enable high-entropy filtering for AI FinOps free text. Format-valid structural IDs remain stable; secrets and PII are always redacted. |
-| `BERSERK_MCP_PSEUDONYM_KEY` | generated private key | Optional deployment-scoped HMAC secret for owner pseudonyms. If unset, a random key is created as `pseudonym.key` in the per-user config directory. Keep it stable for longitudinal joins and treat pseudonyms as personal data. |
-| `BERSERK_MCP_INGESTION_CATALOG` | adjacent catalog | Optional path to an alternate `ingestion_catalog.json`. |
-| `BERSERK_MCP_TOKENS_IN_ATTR` | `claude.tokens_input` | Claude-Code attribute holding input tokens. Override this if your forwarder emits a different name — for example `claude.usage.input_tokens`. A mismatch just falls back to the body-length estimate. |
-| `BERSERK_MCP_TOKENS_OUT_ATTR` | `claude.tokens_output` | Claude-Code attribute holding output tokens (see above). |
-| `BERSERK_MCP_PROJECT_MARKERS` | `src,tests,lib,pkg` | Path segments that mark "inside a project" for `claude_cost_report` per-project attribution. The directory before the first marker segment is the project name. |
-| `BERSERK_MCP_BUSINESS_STORE_PATH` | platform config dir | Absolute path to the private, atomically updated feature catalog and developer-effort store. New private directories are restricted to the current user; existing directory permissions are never changed. |
-| `BERSERK_MCP_RECOMMENDATION_STORE_PATH` | platform config dir | Absolute path to the private harness-decision audit store. Owner and rationale values are hashed before persistence. |
-| `BERSERK_MCP_REPORT_DIR` | platform config `reports/` | Absolute publication directory for generated Markdown/HTML dashboards. Snapshot filenames cannot contain path components. Its existing ACL/mode remains operator-owned. |
-| `BERSERK_MCP_PRICING_CATALOG_PATH` | packaged catalog | Absolute path to an alternate effective-dated pricing catalog. Unknown models remain unpriced. |
-| `BERSERK_MCP_OTLP_LOGS_ENDPOINT` | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` or unset | Optional OTLP/HTTP logs endpoint for `engineering-work` and recommendation-audit records. Non-loopback endpoints must use HTTPS. |
-| `BERSERK_MCP_OTLP_HEADERS` | `OTEL_EXPORTER_OTLP_HEADERS` or unset | Comma-separated `name=value` OTLP HTTP headers. Malformed items fail loudly and cannot override JSON `Content-Type`. |
-| `BERSERK_MCP_HTTP_ENABLE` | `0` | Optional HTTP transport. Disabled by default; stdio remains the normal Claude Desktop/Claude Code path. |
-| `BERSERK_MCP_HTTP_BIND` | `127.0.0.1:8765` | HTTP bind address when HTTP is enabled. Keep loopback when using a local reverse proxy. |
-| `BERSERK_MCP_HTTP_ALLOW_REMOTE` | unset | Required to bind HTTP to a non-loopback address. Remote bind also requires auth, Host allowlist, and CIDR allowlist. |
-| `BERSERK_MCP_HTTP_AUTH_TOKEN` | unset | Bearer token for HTTP requests. Required for non-loopback bind and recommended behind a reverse proxy. |
-| `BERSERK_MCP_HTTP_ALLOWED_HOSTS` | unset | Exact Host header allowlist. Required for non-loopback bind; wildcards are intentionally unsupported. |
-| `BERSERK_MCP_HTTP_ALLOW_CIDRS` | `127.0.0.1/32,::1/128` | Source IP/CIDR allowlist. Global allow-all CIDRs such as `0.0.0.0/0` and `::/0` are rejected. |
-| `BERSERK_MCP_HTTP_MAX_REQUEST_BYTES` | `1048576` | Maximum HTTP JSON request body size. Oversized requests return HTTP 413. |
-| `BERSERK_MCP_HTTP_MAX_CONCURRENT_REQUESTS` | `8` | Maximum concurrent HTTP requests admitted to MCP dispatch. Excess requests return HTTP 429. |
-| `BERSERK_MCP_HTTP_USE_FORWARDED_FOR` | unset | Trust `X-Forwarded-For` only when the socket peer is in `BERSERK_MCP_HTTP_TRUSTED_PROXY_CIDRS`. Disabled by default. |
-| `BERSERK_MCP_HTTP_TRUSTED_PROXY_CIDRS` | unset | CIDRs for reverse proxies whose forwarded client IP should be trusted. Required when forwarded-header mode is enabled. |
+All configuration is via environment variables, all optional — covering
+query/worker tuning, KQL validation policy, redaction and pseudonymization,
+BI/report paths, OTLP export, and the optional HTTP transport. Full table
+and defaults: [Configuration reference](docs/configuration.md).
 
 Parser-factory (LLM parser generation) has its own env vars — see
 [Parser factory](#parser-factory-llm-generated-query-packs) above.
@@ -1032,33 +988,14 @@ The CanonLoom bridge has its own two env vars (`CANONLOOM_SERVER_URL`,
 
 ### Transport security guidance
 
-Use HTTPS/TLS for every non-loopback endpoint that carries a token, API key, or
-telemetry payload:
-
-- `BERSERK_LLM_HERMES_URL` may use `http://localhost` or `http://127.0.0.1`
-  for a local model gateway. Non-loopback `http://` is rejected unless
-  `BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE=1` is explicitly set. Treat that flag as
-  a temporary private-network exception, not an enterprise default.
-- `BERSERK_DISCORD_ALERT_URL` follows the same loopback/plaintext policy. Use
-  `https://` when the bridge runs on another host, because
-  `BERSERK_DISCORD_ALERT_SECRET` is sent as `X-Auth-Token`.
-- `BERSERK_MCP_OTLP_LOGS_ENDPOINT` is stricter: non-loopback OTLP endpoints
-  must use HTTPS. Plain HTTP is accepted only for loopback collectors.
-- The optional HTTP MCP transport is disabled by default. If enabled, it binds
-  to loopback unless `BERSERK_MCP_HTTP_ALLOW_REMOTE=1` is explicitly set, and
-  remote bind fails closed without bearer auth, Host allowlisting, and CIDR
-  allowlisting. Put remote/shared deployments behind HTTPS/TLS; see
-  [MCP HTTP transport and reverse proxy deployment](docs/mcp-http-reverse-proxy.md).
-- The Berserk cluster endpoint itself is configured inside the `bzrk` CLI
-  profile via `bzrk login`. berserk-mcp shells out to `bzrk` and never reads
-  the stored bearer token or profile URL, so operators must ensure the CLI
-  profile points at an HTTPS Berserk endpoint in shared or production
-  deployments.
-
-Code enforcement already covers the endpoints owned by berserk-mcp: URL
-schemes are allowlisted, embedded credentials and control characters are
-rejected, redirects are not followed, response bodies are bounded, and remote
-OTLP requires HTTPS.
+Every non-loopback endpoint that carries a token, API key, or telemetry
+payload (Hermes, Discord alerts, OTLP export, the optional HTTP MCP
+transport, and the Berserk cluster endpoint itself) needs HTTPS/TLS, and
+code enforcement already covers the endpoints berserk-mcp owns — schemes
+allowlisted, embedded credentials and control characters rejected, no
+redirect-following, bounded response bodies, and HTTPS required for remote
+OTLP. Full per-endpoint guidance:
+[Transport security and TLS guidance](docs/tls-transport-security.md).
 
 ## Connect it to a client
 
@@ -1192,67 +1129,13 @@ model routes correctly. Keep new tool descriptions that way.
 
 ## Security
 
-- **Injection and execution-boundary guards.** Every value interpolated into KQL has a character allowlist, control-character rejection, and a length cap. Arbitrary KQL must start with the configured table. The final `bzrk` boundary rejects semicolons anywhere (including string literals) and control commands in every validation mode, before a process is spawned.
-- **Schema-grounded KQL validation.** User-originated arbitrary KQL is statically validated before `search`, `save_query`, `run_saved`, and generated-query persistence. The default `warn` mode preserves normal workflows while rejecting malformed queries and source-introducing operators (`union`, `externaldata`, `evaluate`, `find`, and operator-form `search`) and surfacing cost warnings. `strict` also blocks high-risk arbitrary/generated queries. Static cost is an estimate; it cannot know current cluster load from other tenants.
-- **Schema cache stores shape, not telemetry.** The normalized schema snapshot records columns, resource/attribute field names, bounded examples, supported idioms, and a `schema_hash`. It excludes raw bodies and is safe to rebuild when missing or corrupt. Parser-factory prompts receive compact schema context and are instructed not to invent fields.
-- **Live validation receipts do not fabricate engine stats.** `validate_kql mode=live` measures wall time locally and parses CLI stats only when available. Rows, bytes, and engine fields remain `null` with an explicit warning when the CLI does not return a supported stats format.
-- **Local query concurrency guard.** Interactive query execution is limited by `BERSERK_MCP_MAX_CONCURRENT_QUERIES` after request validation and before `bzrk` execution. Semaphore slots are released on success, timeout, and exception.
-- **Read-only by construction.** Every tool is annotated (`readOnlyHint`) and issues only read KQL. The sole exceptions are `save_query`, which writes a local query file (never Berserk), and `request_discovery`, which writes a local queue file.
-- **No shell.** `subprocess` is always invoked with an argument list, never `shell=True`. berserk-mcp contains no `eval`.
-- **No secrets in this code.** The Berserk bearer token lives only in `bzrk`'s own config. berserk-mcp never reads, stores, or logs it.
-- **Fail-closed secret scanning.** `scan_secrets` refuses to report "clean" on any parse failure or multi-table response. Either the response is fully decoded and every audit record is validated, or berserk-mcp returns a controlled `Secret scan failed` error with no content echo.
-- **Structural telemetry only to LLM providers.** The generation pipeline sends only `bag_keys(...)`, `has_body`, `has_metric`, and length-capped, fully-redacted excerpts. Raw telemetry values are never sent to any provider.
-- **Resource-key tokens are allowlisted, not just capped.** `bag_keys(resource)` output feeds the generation prompt as attribute-name tokens. Each token must match `[A-Za-z0-9._-]` — the shape of a real OTel dotted key — or berserk-mcp drops it outright. This means an instruction-shaped or control-character key from a misbehaving telemetry producer never reaches the prompt or the persisted schema cache. The list is capped at 50 keys, 80 characters each.
-- **Backend diagnostics are redacted before they cross the LLM/report boundary.** A non-auth `bzrk` execution failure — profiling, query validation, or generation retry — has its raw stdout/stderr redacted and length-capped before it enters a refinement prompt or a persisted worker report. The same fix point, `_safe_diag_text`, runs at every crossing, so none can be missed.
-- **Bounded generation resources.** A single `time.monotonic()` deadline (`BERSERK_LLM_JOB_DEADLINE_SECONDS`, default 300s) spans an entire `generate_parser_for` job. This deadline covers profiling, model discovery, every provider call, query verification, and retries — not just each individual HTTP call's own timeout. LLM provider responses are read with a hard byte cap (`MAX_PROVIDER_RESPONSE_BYTES`, 2 MB), instead of an unbounded `resp.read()`. The refinement-attempt budget (`MAX_TOTAL_ATTEMPTS`, default 8) is one total across the whole provider ladder, not `MAX_REFINEMENT_ATTEMPTS` attempts *per provider*. Hermes model discovery is cached per endpoint for 5 minutes, rather than re-queried on every attempt. The generated-job report is genuinely bounded to `REPORT_CAP` characters: oversized list fields are trimmed first, and if a single field is still oversized, the report falls back to a capped-scalar skeleton.
-- **Bounded `bzrk` output.** stdout and stderr are drained concurrently while `bzrk` runs. Successful stdout is capped by `BERSERK_MCP_MAX_RESULT_BYTES` (10 MiB by default); overflow kills and reaps the child and returns an actionable narrowing message. Non-zero diagnostics have a separate 100,000-character cap.
-- **Cap eviction preserves human entries.** The learned-query store's 500-item cap evicts the oldest *generated* entry to make room for a new generated write. It never evicts a human entry. If the store is saturated with human entries, and there is nothing generated left to evict, the generated write is refused with a `ValueError`. It never silently drops a human save, and it never silently drops the new write itself. A human save (via `save_query`) can always make room for itself, including by evicting old generated entries first.
-- **Concurrency-safe store writes.** Every JSON store uses the same validated, atomic-write primitives and portable advisory lock. Private files are `0600` with process-created `0700` directories on POSIX; Windows receives a protected current-user-only DACL. Existing directories are never chmod'd or re-ACL'd. A lock older than 30 seconds is treated as abandoned. A process suspended past that threshold can therefore create a lost-update race; this accepted residual risk and its operational mitigation are recorded in [SECURITY.md](SECURITY.md#accepted-lock-limitation).
-- **Role visibility enforced at call time, not just list time.** `tools/list` and `tools/call` use the same predicate. A tool hidden from the active role cannot be invoked directly by naming it, even though it never appeared in `tools/list`. A role-hidden tool and a genuinely nonexistent tool get an identical response; berserk-mcp never confirms that a hidden tool's name exists. `BERSERK_MCP_ROLE` is validated at startup: an unrecognized role refuses to start, with a clear error, rather than silently degrading to "almost no tools visible."
-- **Output redaction defaults to fail-closed.** `BERSERK_MCP_REDACT` defaults to `redact`, the strictest mode. An unrecognized value fails closed to `redact` rather than a weaker mode. Choosing `flag` or `off` is still fully supported. Each is an explicit, visible opt-in, with a startup warning on stderr — never a silent default.
-- **FinOps redaction preserves governed joins.** Secret and PII redaction always runs on dashboards and BI data. Format-valid recommendation, request, session, feature, project, work-item, agent, harness, schema-hash, and dedupe IDs remain byte-stable across MCP output, dashboards, and exports. Optional entropy filtering applies to free text and malformed identifiers, not blindly to valid join keys.
-- **Owner identifiers are pseudonymised, not anonymised.** Feature owners and recommendation-decision owners are converted to the same deployment-scoped HMAC pseudonym before persistence. Cleartext owner IDs do not enter BI exports or generated dashboards. The pseudonyms can still be personal data and require the same access and retention controls as the underlying management records.
-- **All KQL rejects semicolons unconditionally.** Berserk executes semicolon-separated multi-statement KQL. Both generated-query validation and the final search execution boundary therefore reject any semicolon, including one inside a quoted string literal.
-- **A malformed LLM provider reply can't crash the generation pipeline.** A provider can legitimately return `content: null` — common for a tool-call-only reply. `_parse_generated_reply` validates the type before use, so a null or non-text value fails just the one job instead of the whole `--worker` loop.
-- **`BERSERK_MAX_AUTOQUEUE` is clamped, not just parsed.** A negative value clamps to 0. An absurdly large value is capped at a hard ceiling of 500. An unparseable value falls back to the documented default of 5. This enforces the flood-control invariant regardless of the input value.
-- **CI and repository hygiene.** GitHub Actions steps are pinned to a full commit SHA, not a mutable tag. The workflow explicitly declares `permissions: contents: read`. The checkout step sets `persist-credentials: false`, so the runner never retains a token past the job. `setuptools` is version-bounded (`>=61,<90`), instead of open-ended. `.gitignore` excludes `.env*` files, private-key file extensions, generated stores and reports (`learned.json`, `discovery_queue.json`, `known_sources.json`, `schema_knowledge.json`, `amendments_log.json`, `llm_config.json`, `pseudonym.key`, `schema_snapshot_*.json`, `ai_finops_business.json`, `ai_finops_recommendations.json`, `reports/`, `.snapshots/`, `manifest.json`, `evals/results/`), lock files, and temp files.
-- **Bounded redaction.** `redact()` uses two explicit limits: `MAX_REDACT_CHARS = 1_000_000` and `MAX_REDACT_CANDIDATES = 50_000`. Its sort-merge-join pipeline fail-closes to `[REDACTED:redaction_limit]` on any bound violation. No partial original text is ever returned.
-- **Constant auth-failure messaging.** `bzrk` auth failures always return the constant string `"bzrk authentication failed; run \`bzrk login\` and retry"`. In this auth-failure path, berserk-mcp never returns raw stderr, tokens, or tenant identifiers. Non-auth backend diagnostics are still caller-visible when useful, but they are bounded and subject to output redaction.
-- **JSON-RPC 2.0 strict envelope validation.** `initialize` requires a nonempty string `protocolVersion`, and object-typed `capabilities` and `clientInfo`. `ping` and `tools/list` reject nonempty params. A notification sent as a request is rejected with `-32600`. An unexpected handler exception surfaces as `-32603`, instead of silently converting to an `isError=true` result.
-- **Generated-query policy.** An LLM-generated query must start with `{table} | ...`. It must terminate with `| take N`, where `1 ≤ N ≤ 50`. It must fit within 2,000 characters. The policy check runs on a stripped copy of the KQL, with string literals and `//` comments removed, so operator text inside a quoted string or a comment cannot satisfy the check.
-- **Provider error scrubbing.** An HTTP error from an LLM provider returns only `"HTTP <code>"`. Response bodies and exception messages are never propagated to the caller.
-- **LLM endpoint scheme allowlist and loopback-gated plaintext.** The operator-configured LLM endpoint URL (via `--set-hermes-url` or `BERSERK_LLM_HERMES_URL`) is validated at both write time and call time. Only `http://` and `https://` schemes are accepted. Control characters and newline-injection variants are rejected before any request is made. This is defense-in-depth against `file://`, `gopher://`, `ftp://`, and request-smuggling attempts, even though the operator is inside the trust boundary. Plaintext `http://` is additionally rejected for any non-loopback host, unless `BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE=1` is explicitly set — by default, a bearer token should not cross the network unencrypted.
-- **No automatic redirect following on outbound HTTP.** LLM providers, Hermes discovery, OTLP export, Discord alerts, and the eval harness all use the same no-redirect opener and bounded response reader. Credentials are never forwarded to a redirect target. URL and header validation also runs at each call boundary; remote OTLP requires HTTPS.
-- **Store and primer path validation.** Every filesystem path accepted from an environment variable or CLI output option must be absolute, traversal-free, and control-character-free. This includes all JSON stores, schema caches, reports, BI exports, and `BERSERK_MCP_PRIMERS_DIR`. An explicitly configured primer directory that lacks the active role's primer fails startup rather than silently weakening instructions.
-
-**Note on output.** A tool result reflects whatever your telemetry contains. If logs in Berserk hold sensitive values, `logs_for_service` and `search` can surface them. Redact at ingest — not here.
-
-### Security review and testing
-
-The security-relevant surface has been through a multi-round audit and an
-external scanner pass:
-
-- **Hand audit.** This covered 15 findings — 7 blocking security/DR issues,
-  plus 8 behavioral/documentation issues that were initially deferred and are
-  now closed — each with an adversarial regression test. Internal review
-  reports are not published in this repo; closure evidence lives in the test
-  suite's regression coverage.
-- **Differential re-review.** This produced 6 additional findings (`FVR-001`
-  through `FVR-006`). All 6 are closed, with regression tests in the suite.
-- **External scanner pass.** Three scanners ran against the code: Cisco AI
-  Defense `mcp-scanner` (YARA stdio and pip-audit), MCP-Shield (wire-level
-  tool description keyword scan), and Snyk Code (SAST on the GitHub
-  source). All three returned 0 true findings. MCP-Shield produced 3
-  keyword false positives on domain vocabulary (documented). Snyk produced
-  two operator-controlled-input taint findings: CWE-918 SSRF on the LLM
-  endpoint URL, and CWE-23 path traversal on the store-path env vars. Both
-  are false positives by threat model, because the operator is inside the
-  trust boundary — but both are addressed anyway, with defense-in-depth
-  scheme and path allowlists.
-- **Ongoing verification.** The test suite (`tests/`, including role
-  isolation coverage) includes adversarial regression coverage for the security
-  findings above.
-  It runs before every release. See `## Testing` below.
+Defense in depth across the execution boundary, KQL validation, secret/PII
+redaction, generation-pipeline resource bounds, concurrency-safe store
+writes, role-visibility enforcement, and outbound-HTTP hardening — each
+control has a name and an adversarial regression test. The full list of
+~30 controls, plus the audit history (hand audit, differential re-review,
+and an external scanner pass across three tools, all with 0 true findings
+outstanding): [Security controls](docs/security-controls.md).
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
