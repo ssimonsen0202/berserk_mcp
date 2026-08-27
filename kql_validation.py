@@ -66,7 +66,6 @@ _SELECTIVE_RE = re.compile(
 )
 _PROJECT_RE = re.compile(r"\bproject(?:-away|-keep)?\b", re.I)
 _EXPENSIVE_PATTERNS = [
-    (re.compile(r"\bjoin\b", re.I), "join"),
     (re.compile(r"\bmv-expand\b", re.I), "mv-expand"),
     (re.compile(r"\bbag_keys\s*\(", re.I), "bag_keys"),
     (re.compile(r"\bparse\b", re.I), "parse"),
@@ -74,9 +73,62 @@ _EXPENSIVE_PATTERNS = [
 ]
 _UNSAFE_RE = re.compile(r"\b(set|drop|alter|delete|update|ingest|create)\b", re.I)
 _CONTROL_RE = re.compile(r"^\s*\.")
+# `join` reads a second table within the pipeline; `cluster()`/`database()`/
+# `table()` reference an arbitrary cluster/database/table by name. All are
+# source-introducing in the same sense as union/evaluate/find/search -- each
+# lets a query escape the single configured table. The regex is a plain
+# substring search over the whole stripped query, so it catches
+# cluster()/database()/table() wherever they appear (any nesting depth), not
+# just at the top pipeline level.
+#
+# `toscalar(...)` is blocked outright rather than inspected: its argument is
+# itself a tabular expression, and a bare table-name reference inside it
+# (`toscalar(Secret | count)`) has no cluster()/database()/table() call to
+# match against -- regex substring matching cannot tell "another table's
+# name" apart from any other identifier without a real KQL parser. No
+# shipped query in this codebase uses toscalar; blocking it entirely closes
+# that gap instead of trying to special-case its contents.
+#
+# `lookup` reads a second (right-hand) table by name, the same shape as
+# `join`.
 _SOURCE_INTRODUCING_RE = re.compile(
-    r"(?:^|\|)\s*(union|evaluate|find|search)\b|\bexternaldata\s*\(", re.I
+    r"(?:^|\|)\s*(union|evaluate|find|search|join|lookup)\b|"
+    r"\b(externaldata|cluster|database|table|toscalar)\s*\(",
+    re.I,
 )
+
+# `in (TableName | ...)` / `!in (TableName | ...)`: real Kusto's `in`
+# operator accepts a tabular subquery directly, with no join/toscalar/
+# cluster keyword at all -- `col in (Secret | project col)` runs Secret as
+# a source. This construct has several independent disguises for "the
+# thing before the pipe": a bare identifier, a bracket-quoted table name
+# (`["Secret"]`), a function-backed tabular source (`SecretFn()`), or
+# `union` as the first token instead of a table name -- and there is no
+# reason to expect that list is exhaustive. Rather than pattern-match each
+# disguise (a Codex re-review found three of these in successive rounds),
+# this checks the one structural fact every one of them shares and an
+# ordinary scalar literal list (`in ('a', 'b')`, `in (dynamic([...]))`)
+# never has: a `|` character somewhere inside the in(...) group, at any
+# paren-nesting depth. `_strip_strings` has already blanked string-literal
+# contents by the time this runs, so a `|` inside a quoted value can't
+# produce a false positive.
+_IN_OPEN_RE = re.compile(r"\b!?in~?\s*\(", re.I)
+
+
+def _in_clause_hides_tabular_subquery(stripped):
+    for m in _IN_OPEN_RE.finditer(stripped):
+        depth = 1
+        i = m.end()
+        while i < len(stripped) and depth > 0:
+            ch = stripped[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "|":
+                return True
+            i += 1
+    return False
 _RAW_SCAN_RE = re.compile(r"\b(body|\$raw)\b[^|]{0,80}\b(contains|has_any|matches\s+regex)\b|\b(contains|has_any|matches\s+regex)\b[^|]{0,80}\b(body|\$raw)\b", re.I)
 _FIELD_REF_RE = re.compile(
     r"(resource|attributes)\s*\[\s*['\"]([^'\"]+)['\"]\s*\]|"
@@ -225,6 +277,13 @@ def validate_kql_static(kql, *, table, since, schema_fields=None, max_chars=5000
             findings.append(_finding(
                 "SOURCE_INTRODUCING_OPERATOR", "error",
                 f"Source-introducing operator {operator!r} is not allowed in user KQL.",
+                "pipeline",
+                "Query only the configured Berserk table through its existing pipeline.",
+            ))
+        elif _in_clause_hides_tabular_subquery(stripped):
+            findings.append(_finding(
+                "SOURCE_INTRODUCING_OPERATOR", "error",
+                "Source-introducing operator 'in' is not allowed in user KQL.",
                 "pipeline",
                 "Query only the configured Berserk table through its existing pipeline.",
             ))

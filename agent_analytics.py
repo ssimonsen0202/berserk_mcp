@@ -373,10 +373,11 @@ def claude_loop_check(since="6h ago", _events=None):
         # the fence too, since it's already merged into one string by the
         # time it gets here -- harmless over-fencing, not a gap.
         top = _fence(_redact(r["top_repeated_call"]))
+        sid = _fence(_redact(r["session_id"]))
         lines.append(
-            "- {session_id}: verdict={verdict}, calls={total_tool_calls}, "
+            "- {sid}: verdict={verdict}, calls={total_tool_calls}, "
             "repetition={repetition_ratio:.2f}, error_retries={error_retry_count}, "
-            "top={top} x{top_repeated_count}".format(top=top, **r)
+            "top={top} x{top_repeated_count}".format(sid=sid, top=top, **r)
         )
     return "\n".join(lines), False
 
@@ -460,9 +461,10 @@ def claude_model_fit(since="6h ago", _events=None):
         f"Summary: {over} sessions overpowered, {under} underpowered.",
     ]
     for r in reports:
+        sid = _fence(_redact(r["session_id"]))
         lines.append(
-            "- {session_id}: tier={model_tier}, complexity={complexity}, "
-            "verdict={verdict}; {rationale}".format(**r)
+            "- {sid}: tier={model_tier}, complexity={complexity}, "
+            "verdict={verdict}; {rationale}".format(sid=sid, **r)
         )
     return "\n".join(lines), False
 
@@ -735,10 +737,11 @@ def claude_token_burn(since="6h ago", _events=None):
         f"Coverage: {exact} exact sessions, {estimated} estimated sessions. Estimates use body characters / 4.",
     ]
     for r in reports:
+        sid = _fence(_redact(r["session_id"]))
         lines.append(
-            "- {session_id}: tokens={tokens} ({token_source}), "
+            "- {sid}: tokens={tokens} ({token_source}), "
             "burn_per_progress={burn_per_progress:.1f}, distinct_tools={distinct_tools}, "
-            "files_touched={files_touched}, loop={loop_verdict}, verdict={verdict}".format(**r)
+            "files_touched={files_touched}, loop={loop_verdict}, verdict={verdict}".format(sid=sid, **r)
         )
     return "\n".join(lines), False
 
@@ -831,7 +834,7 @@ def claude_cost_report(since="7d ago", group_by="day"):
              f"(slope {rep['slope_pct_per_day']:+.1f}%/day{trend_marker})"]
     if group_by == "model":
         for model in sorted(rep["models"], key=lambda k: -rep["models"][k]):
-            lines.append(f"- {model}: ~{rep['models'][model]} tokens")
+            lines.append(f"- {_fence(_redact(model))}: ~{rep['models'][model]} tokens")
     else:
         for d in rep["days"]:
             lines.append(f"- {d['day']}: ~{d['tokens']} tokens ({d['source']}), "
@@ -919,7 +922,7 @@ def claude_session_deep_dive(session_id, since="24h ago"):
              f"~{rep['burn']['tokens']} tokens ({rep['burn']['source']})"]
     for p in rep["phases"]:
         marker = f", {p['errors']} errors" if p["errors"] else ""
-        lines.append(f"- {p['first_ts']} {p['tool']} x{p['count']}{marker}")
+        lines.append(f"- {p['first_ts']} {_fence(_redact(p['tool']))} x{p['count']}{marker}")
     for g in rep["gaps"]:
         lines.append(f"- gap of {g['seconds']}s before {g['after_ts']}")
     return "\n".join(lines), False
@@ -994,7 +997,7 @@ def claude_workflow_insights(since="7d ago"):
     if rep["sequences"]:
         lines.append("Top tool sequences:")
         for s in rep["sequences"][:5]:
-            lines.append(f"- {s['pattern']} x{s['count']}")
+            lines.append(f"- {_fence(_redact(s['pattern']))} x{s['count']}")
     else:
         lines.append("Top tool sequences: (not enough repeated activity)")
     if rep["hotspots"]:
@@ -1006,7 +1009,7 @@ def claude_workflow_insights(since="7d ago"):
     if rep["inefficient"]:
         lines.append("Top-decile burn per distinct target:")
         for r in rep["inefficient"][:5]:
-            lines.append(f"- {r['session']}: ~{r['tokens_per_target']} tokens/target")
+            lines.append(f"- {_fence(_redact(r['session']))}: ~{r['tokens_per_target']} tokens/target")
     return "\n".join(lines), False
 
 

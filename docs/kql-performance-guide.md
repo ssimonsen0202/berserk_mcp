@@ -140,11 +140,12 @@ Stable finding codes include:
 |---|---|
 | `EMPTY_QUERY`, `QUERY_TOO_LONG`, `INVALID_SINCE` | malformed input before KQL analysis |
 | `WRONG_TABLE`, `CONTROL_COMMAND`, `MULTI_STATEMENT_USER_QUERY`, `UNSAFE_OPERATOR` | blocked shape or mutation/control syntax |
+| `SOURCE_INTRODUCING_OPERATOR` | blocked: `union`, `evaluate`, `find`, `search`, `join`, `lookup`, `externaldata(`, `cluster(`, `database(`, `table(`, or `toscalar(` — anything that reads a source other than the configured table, at any nesting depth. `toscalar(` is blocked outright (not inspected) since its argument is itself a tabular expression and a bare table-name reference inside it can't be distinguished from any other identifier by substring matching. `in (...)`/`!in (...)`/`in~ (...)` are blocked whenever a `|` appears anywhere inside the parens at any nesting depth — a real Kusto `in` tabular subquery (`col in (Secret \| project col)`) always contains one; an ordinary scalar literal list never does, regardless of disguise (bare table name, bracket-quoted name, function-backed source, or `union` as the first token). |
 | `UNBOUNDED_RESULT`, `RESULT_BOUND_TOO_LARGE` | missing or oversized result bound |
 | `UNKNOWN_FIELD` | field not present in the normalized schema snapshot; suggestions are deterministic |
 | `WIDE_PROJECTION`, `RAW_CONTAINS_SCAN` | raw `body`, `$raw`, `resource`, or `attributes` may be exported or scanned broadly |
 | `MISSING_SELECTIVE_FILTER`, `SORT_BEFORE_FILTER`, `SORT_WITHOUT_BOUND` | pipeline ordering likely wastes work |
-| `EXPENSIVE_OPERATOR`, `HIGH_CARDINALITY_GROUP`, `SERIES_TOO_WIDE` | joins, expansions, bag scans, regex, raw grouping, or overly-wide series work |
+| `EXPENSIVE_OPERATOR`, `HIGH_CARDINALITY_GROUP`, `SERIES_TOO_WIDE` | expansions, bag scans, regex, raw grouping, or overly-wide series work |
 
 The validator reports `risk=low|medium|high` from fixed weights. Positive
 signals such as early `metric_name` or `resource['service.name']` filters,
