@@ -70,6 +70,54 @@
 > doc should keep evolving as both sides of the market/engineering read sharpen
 > each other, not stay fixed as of any one date.
 
+> **Update, 2026-08-27.** Three items move from "open" to "shipped" since the
+> last update, one of them directly against §4/§5's own stated priorities:
+>
+> - **Issue #14, just-in-time tool discovery (`find_tool`)** — closed and
+>   shipped. This is §4(a)'s "highest-leverage change available to us" and
+>   §5's item 6, both now done: measured 92% token reduction cutting the
+>   resident schema from 69 tools to 8 anchors + search. Real-model eval
+>   confirms the lever works but does not fully close the reliability gap on
+>   its own — cutting the schema did not close the gap to zero for the 7-8B
+>   models already shown to fail outright in the §4 update above; it is a
+>   real, measured improvement for models in the reliability range, not a
+>   rescue for models below it. §4's own guidance (self-hosted deployments
+>   should target ≥24B, not rely on schema-shrinking to make a sub-14B model
+>   viable) still holds and is now the documented recommendation.
+> - **Issue #43, live quota-window tracking** — closed and shipped
+>   (`claude_quota_status`). Reads Claude Code's own Keychain OAuth token and
+>   calls the (undocumented, unverified-shape) usage endpoint; falls back to
+>   the existing log-derived estimate on any failure, including no Keychain
+>   entry or non-macOS. Answers the retrospective-vs-real-time gap named when
+>   this item was first scoped.
+> - **Issue #55, OpenRouter telemetry as its own ingested source** — closed
+>   and shipped. Extends the multi-agent ingestion story from #42 (Codex CLI)
+>   to non-Claude models routed through OpenRouter — same governance/cost
+>   lane, a third source feeding it. Tool count is 70 as of this update (was
+>   69 at the last one, 59 when this brief was written).
+>
+> **On §3's "security hole in the middle of our own argument."** That section
+> flagged unfenced raw telemetry as embarrassing-not-to-fix. A security review
+> on 2026-08-27 (Codex, four re-review rounds) confirmed the underlying
+> concern is real and recurring, not a one-off: alongside the originally-fixed
+> gap (#11), the review found session ID, model name, and tool name reaching
+> the model unfenced in six `agent_analytics.py` report functions the earlier
+> fix didn't cover, plus a KQL-validator gap letting a query escape the
+> configured table (`join`, `cluster()`/`database()`/`table()`, and several
+> disguises of a tabular subquery inside `in (...)` all validated cleanly),
+> an OAuth-token redirect-forwarding risk in the new #43 quota tool, and a
+> boolean-coercion bug in the CanonLoom `auto_promote` authorization check.
+> All five fixed, each with a regression test, verified through full CI
+> before merge. Worth naming here rather than only in the investor brief:
+> this is exactly the failure mode §3 predicted — a fixed-query surface still
+> needs its own boundary continuously re-audited, it doesn't stay closed by
+> construction. The KQL-validator fix in particular is now a general
+> structural check (any `|` inside an `in(...)` group, at any nesting depth)
+> rather than a blocklist of specific bypass shapes, after three successive
+> review rounds each found a new disguise for the same underlying gap —
+> worth remembering as a pattern next time a validator gets a narrow,
+> shape-specific patch instead of a structural one.
+
 # Berserk MCP — where the market went, and where we sit
 
 Short brief for the Berserk devs. Two questions:

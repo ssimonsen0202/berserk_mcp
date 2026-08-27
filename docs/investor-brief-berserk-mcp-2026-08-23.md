@@ -1,6 +1,6 @@
 # Berserk MCP: the agent-facing layer of Berserk, and what it means for go-to-market
 
-**Status: DRAFT** — investor briefing prepared 2026-08-23. Not yet reviewed/approved for external distribution.
+**Status: DRAFT** — investor briefing prepared 2026-08-23, updated 2026-08-27. Not yet reviewed/approved for external distribution.
 
 How the MCP server complements the core Berserk platform, where that positions Berserk against the current observability and AI-governance market, and what it implies for go-to-market from here.
 
@@ -14,7 +14,7 @@ Berserk is a unified observability platform: infrastructure and security telemet
 flowchart LR
     Infra["Infrastructure\nlogs · metrics · traces"] -->|OTLP| Core
     Agents["AI Agents\nClaude Code · Codex · ..."] -->|OTLP| Core
-    Core["Berserk Core\ningestion · KQL engine\nSRE · SOC · FinOps"] --> MCP["berserk-mcp\n69 tools, tiered for\nreliability & data-fencing"]
+    Core["Berserk Core\ningestion · KQL engine\nSRE · SOC · FinOps"] --> MCP["berserk-mcp\n70 tools, tiered for\nreliability & data-fencing"]
     MCP -.->|agents query back for live answers| Agents
 ```
 
@@ -27,14 +27,15 @@ This reflexive design is the point. berserk-mcp doesn't just let an agent ask "w
 - Untrusted-data fencing: log/trace content is treated as attacker-influenceable, not trusted, by design
 - Model-routing reliability validated empirically via OpenRouter — a neutral, vendor-agnostic test bed, not just against Anthropic's own models — across 8 real models spanning 2 local and 6 cloud providers[^5]
 - Multi-agent telemetry ingestion (Claude Code + Codex), merged and shipped — a code review before merge caught and fixed 5 real reliability bugs in the ingestion path (silent data loss under concurrent writes, a state-corruption risk on a hard kill) that a happy-path test alone wouldn't have surfaced
+- OpenRouter usage telemetry now ingested as its own source (issue #55) — the governance and cost layer extends to non-Claude models routed through OpenRouter, not just Claude Code
+- Live quota-window visibility, shipped (issue #43) — real-time 5-hour/7-day usage-window status, not just retrospective reporting from ingested logs
+- An independent security review found and fixed 5 issues in one day[^6] — including a KQL-validator gap that could let a query read outside the configured table, and telemetry fields reaching the model unfenced — each with a regression test added before merge. Evidence the "untrusted-data fencing" claim above is a maintained property, not a one-time design decision.
 
 > **What the OpenRouter testing actually found:** the reliability floor for this tool-calling design is the 24B-parameter model class, not "small" in general — a 12B model tested below a dumb keyword-matching baseline, while every 24B+ model cleared it comfortably, and the best performer (93% tool-selection, 98% argument accuracy) cost under $100/month for a 4-engineer team even at heavy usage.[^5] That's a measured claim about a specific, known limit — not a marketing "works with any model."
 
 ### The reflexive layer
 - Per-feature and per-project AI cost economics, today
 - Evidence-backed harness recommendations with an approve/reject audit trail
-- Live quota-window visibility (planned, issue #43)
-- Active kill-switch for runaway agent behavior (planned, issue #44)
 
 ---
 
@@ -89,9 +90,11 @@ The shipped platform plus the near-term roadmap supports a specific reframe: sto
 
 | Today — Observe & analyze | Near-term — Quantify & alert | Mid-term — Govern & defend |
 |---|---|---|
-| Multi-agent telemetry ingestion | Live quota-window visibility (#43) | Active kill-switch for runaway agents (#44) |
-| Cost / spend economics per feature & project | Weekly digest with one actionable tip (#46) | Hash-chained, exportable audit ledger (#17 / #19) |
-| Reliability-engineered tool exposure | | ATT&CK-mapped agent security detection, portable to Sentinel/Defender (#29 / #30) |
+| Multi-agent telemetry ingestion | Weekly digest with one actionable tip (#46) | Hash-chained, exportable audit ledger (#17 / #19) |
+| Cost / spend economics per feature & project | | ATT&CK-mapped agent security detection, portable to Sentinel/Defender (#29 / #30) |
+| Reliability-engineered tool exposure | | |
+| Live quota-window visibility (#43, shipped) | | |
+| OpenRouter telemetry as its own governed source (#55, shipped) | | |
 
 That progression — from watching, to quantifying, to actively governing and defending — is a credible platform story, not a scramble of disconnected features. It's also the specific sequence a security-conscious buyer in the new-logo wedge would ask for, in the order they'd ask for it.
 
@@ -103,7 +106,8 @@ That progression — from watching, to quantifying, to actively governing and de
 [^2]: [MarkTechPost, "Top LLM Observability and Evaluation Platforms in 2026" (Aug 2026)](https://www.marktechpost.com/2026/08/09/top-llm-observability-and-evaluation-platforms-in-2026-langfuse-langsmith-braintrust-arize-and-more-compared/); market-dynamics framing per the same survey of current platforms.
 [^3]: [Datadog MCP Server documentation](https://docs.datadoghq.com/mcp_server/); [Grafana Labs, MCP server for Prometheus/Loki/Tempo](https://grafana.com/blog/ai-observability-MCP-servers/).
 [^4]: [SiliconANGLE, "AWS launches FinOps agent to bring AI cost governance to cloud spend" (Jun 2026)](https://siliconangle.com/2026/06/11/aws-launches-finops-agent-bring-ai-cost-governance-cloud-spend-finopsx/); adoption figure per FinOps Foundation "State of FinOps 2026" survey commentary.
-[^5]: Full methodology, per-model table, and cost/caching analysis: [`model-routing-cost-validation-2026-08-23.md`](model-routing-cost-validation-2026-08-23.md). Models tested: 2 local (Ollama, Qwen2.5:7b / Llama3.1:8b) and 6 via OpenRouter (mistral-nemo, mistral-saba, mistral-small-3.2-24b-instruct, deepseek-v4-flash, deepseek-chat, stealth/ox-alpha). Caveat carried over honestly from that document: this is a first real data pass on this repo's own 69-tool schema, not yet a fully guardrailed model-ladder sweep (provider pinning and forced tool-parameter passthrough were not both applied) — directionally solid, not the final word.
+[^5]: Full methodology, per-model table, and cost/caching analysis: [`model-routing-cost-validation-2026-08-23.md`](model-routing-cost-validation-2026-08-23.md). Models tested: 2 local (Ollama, Qwen2.5:7b / Llama3.1:8b) and 6 via OpenRouter (mistral-nemo, mistral-saba, mistral-small-3.2-24b-instruct, deepseek-v4-flash, deepseek-chat, stealth/ox-alpha). Caveat carried over honestly from that document: this is a first real data pass on the repo's own tool schema (69 tools at test time, 70 today), not yet a fully guardrailed model-ladder sweep (provider pinning and forced tool-parameter passthrough were not both applied) — directionally solid, not the final word.
+[^6]: Security review 2026-08-27: 5 findings (KQL source-boundary validation gap, telemetry fields reaching the model outside the untrusted-data fence, a prompt-injection delimiter gap, an OAuth token redirect-forwarding risk, and a boolean-coercion bug in an authorization check), each independently reproduced before fixing and covered by a new regression test, verified through a full CI run before merge.
 
 ### Related
 
