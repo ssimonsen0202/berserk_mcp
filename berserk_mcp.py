@@ -465,7 +465,10 @@ _ANGLE_CLOSE_RE = r"(?:>|&gt;?|&#0*62;?|&#x0*3e;?|&amp;gt;?|&amp;#0*62;?|&amp;#x
 # an attacker-controlled value cannot break out of the fence by encoding the
 # slash in the closing tag differently. Includes semicolonless variants and
 # double-encoded variants (&amp;#47; etc).
-_SLASH_RE = r"(?:/|&#0*47;?|&#x0*2f;?|&amp;#0*47;?|&amp;#x0*2f;?)"
+# &sol; is the HTML5 named character reference for "/" -- also covered in
+# both plain and double-encoded (&amp;sol;) form, same as the numeric/hex
+# variants (Codex re-review finding: the named form was missing).
+_SLASH_RE = r"(?:/|&#0*47;?|&#x0*2f;?|&amp;#0*47;?|&amp;#x0*2f;?|&sol;?|&amp;sol;?)"
 _UNTRUSTED_DATA_CLOSE_RE = re.compile(
     rf"{_ANGLE_OPEN_RE}\s*{_SLASH_RE}\s*untrusted_log_data\s*{_ANGLE_CLOSE_RE}",
     re.IGNORECASE,
@@ -3252,13 +3255,26 @@ def _handle_call_uncached(name, arguments):
         body = {"url": url}
         if "stop_after" in arguments:
             body["stop_after"] = arguments["stop_after"]
+        # auto_promote is an authorization gate that defaults OFF: a
+        # malformed/non-boolean value (e.g. the string "false", which is
+        # truthy in Python) must fail closed and NOT authorize an
+        # unattended promotion (SEC-05, Codex security review; same class
+        # of bug save_query's overwrite= guards against a few hundred
+        # lines up).
         if "auto_promote" in arguments:
-            body["auto_promote"] = bool(arguments["auto_promote"])
+            body["auto_promote"] = arguments["auto_promote"] is True
+        # record_telemetry is an audit control that defaults ON: a
+        # malformed/non-boolean value must fail OPEN (keep recording), not
+        # silently disable the audit trail. This is the opposite polarity
+        # from auto_promote above -- only a real, literal False turns it
+        # off (Codex re-review finding on an earlier `is True` fix here,
+        # which coerced any non-exact-True value, including a caller's
+        # mistyped boolean, to False).
         if "record_telemetry" in arguments:
-            body["record_telemetry"] = bool(arguments["record_telemetry"])
+            body["record_telemetry"] = arguments["record_telemetry"] is not False
         return _canonloom_call("/pipeline/run", "POST", body)
     if name == "canonloom_list_artifacts":
-        if arguments.get("include_staging"):
+        if arguments.get("include_staging") is True:
             promoted, err = _canonloom_call("/artifacts", "GET")
             staging, serr = _canonloom_call("/artifacts/staging", "GET")
             if err:

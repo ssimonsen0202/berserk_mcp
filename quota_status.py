@@ -30,6 +30,7 @@ import urllib.error
 import urllib.request
 
 import agent_analytics
+import _http
 
 KEYCHAIN_SERVICE = os.environ.get("BERSERK_MCP_QUOTA_KEYCHAIN_SERVICE", "Claude Code-credentials")
 USAGE_ENDPOINT = os.environ.get("BERSERK_MCP_QUOTA_ENDPOINT", "https://api.anthropic.com/api/oauth/usage")
@@ -71,10 +72,16 @@ def _read_oauth_token(run=subprocess.run, platform_name=None):
     return token if isinstance(token, str) and token else None
 
 
-def _fetch_live_usage(token, opener=urllib.request.urlopen):
+def _fetch_live_usage(token, opener=_http.NO_REDIRECT_OPENER.open):
     """Calls the (undocumented, unstable) usage endpoint. Returns the
     parsed JSON dict, or None on ANY failure -- network error, non-200,
-    unexpected body shape. Never raises."""
+    unexpected body shape, or a blocked redirect. Never raises.
+
+    Uses the shared no-redirect opener (SEC-04, Codex security review):
+    plain urlopen follows redirects and re-sends this request's
+    Authorization: Bearer <oauth token> header to whatever host the
+    redirect names. A redirect is treated the same as any other failure --
+    degrade to the log-derived fallback, never forward the token onward."""
     req = urllib.request.Request(
         USAGE_ENDPOINT,
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
@@ -87,11 +94,14 @@ def _fetch_live_usage(token, opener=urllib.request.urlopen):
             if status != 200:
                 return None
             body = resp.read()
-    except Exception:
+    except Exception as exc:
         # Defensive by design: the live endpoint is undocumented and
         # unverified (see module docstring). Any failure here -- network,
-        # TLS, timeout, or something not yet seen -- must degrade to the
-        # log-derived fallback, never propagate.
+        # TLS, timeout, a blocked redirect, or something not yet seen --
+        # must degrade to the log-derived fallback, never propagate.
+        close = getattr(exc, "close", None)
+        if callable(close):
+            close()
         return None
     try:
         data = json.loads(body)
@@ -112,7 +122,7 @@ def _extract_live_fields(data):
     return out
 
 
-def get_quota_status(since="5h ago", run=subprocess.run, opener=urllib.request.urlopen,
+def get_quota_status(since="5h ago", run=subprocess.run, opener=_http.NO_REDIRECT_OPENER.open,
                       platform_name=None, _total_tokens_estimate=agent_analytics.total_tokens_estimate):
     """Main entry point. Tries the live Keychain+endpoint path first;
     falls back to log-derived estimation on ANY failure. Never raises,

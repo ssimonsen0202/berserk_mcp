@@ -52,12 +52,65 @@ class KqlValidationTest(unittest.TestCase):
             "evaluate": "default | evaluate plugin() | take 1",
             "find": "default | find withsource=s in (*) where body has 'x' | take 1",
             "search": "default | search 'needle' | take 1",
+            "join": "default | join kind=inner (default | take 1) on trace_id | take 10",
+            "cluster": (
+                "default | where value in (toscalar(cluster('https://evil.example')."
+                "database('OtherDb').table('Secret') | take 1)) | take 5"
+            ),
+            "database": "default | where value in (toscalar(database('OtherDb').table('Secret') | take 1)) | take 5",
+            "table": "default | extend x = toscalar(table('Secret') | take 1) | take 5",
+            # Codex re-review finding: a bare table-name reference inside
+            # toscalar(...), with no cluster()/database()/table() call
+            # wrapping it, was not caught by the cluster/database/table
+            # function-name check above -- toscalar(Secret | count)
+            # references another table directly by name and previously
+            # validated cleanly. No legitimate shipped query in this
+            # codebase uses toscalar, so block it outright rather than try
+            # to distinguish "table name" from "other identifier" by regex.
+            "toscalar": "default | extend x = toscalar(Secret | count) | take 5",
+            # Second Codex re-review finding: real Kusto's `in` operator
+            # accepts a tabular subquery directly -- `col in (TableName |
+            # project col)` -- with no join/toscalar/cluster keyword at
+            # all. A bare identifier immediately followed by a pipe inside
+            # `in (...)` is that shape; a scalar literal list never has a
+            # bare identifier directly followed by a pipe there.
+            "in-subquery": "default | where trace_id in (Secret | project trace_id) | take 5",
+            "not-in-subquery": "default | where trace_id !in (Secret | project trace_id) | take 5",
+            # Third Codex re-review round: the bare-identifier-before-pipe
+            # heuristic above only recognized ONE disguise for a tabular
+            # subquery inside in(...). Real Kusto has several more shapes
+            # that are just as valid: a bracket-quoted table name, a
+            # function-backed tabular source, and `union` as the first
+            # token instead of a bare table name. All of these -- and any
+            # future disguise -- share one structural fact a scalar literal
+            # list can never have: a `|` character somewhere inside the
+            # in(...) group. The fix below checks for that directly
+            # (paren-depth-aware pipe scan) instead of pattern-matching
+            # specific disguises, closing the whole class at once.
+            "in-subquery-bracketed-name": 'default | where trace_id in (["Secret"] | project trace_id) | take 5',
+            "in-subquery-function-backed": "default | where trace_id in (SecretFn() | project trace_id) | take 5",
+            "in-subquery-union-first-token": "default | where trace_id in (union Secret | project trace_id) | take 5",
+            # `lookup` reads a second (right-hand) table by name, the same
+            # shape as `join`.
+            "lookup": "default | lookup kind=leftouter (Secret | project trace_id) on trace_id | take 5",
         }
         for operator, query in queries.items():
             with self.subTest(operator=operator):
                 report = self.report(query, schema_fields=None)
                 self.assertFalse(report["valid"])
                 self.assertIn("SOURCE_INTRODUCING_OPERATOR", self.codes(report))
+
+    def test_in_with_scalar_literal_list_is_not_blocked(self):
+        # Negative control: `in` with an ordinary scalar list (not a
+        # tabular subquery) must keep working -- this is the KQL_WORDS-
+        # documented, everyday shape, not the exploit shape above.
+        for query in (
+            "default | where severity_text in ('ERROR', 'WARN') | take 5",
+            "default | where metric_name in (dynamic(['a', 'b'])) | take 5",
+        ):
+            with self.subTest(query=query):
+                report = self.report(query, schema_fields=None)
+                self.assertNotIn("SOURCE_INTRODUCING_OPERATOR", self.codes(report))
 
     def test_source_operator_words_inside_literals_do_not_trigger(self):
         for query in (
@@ -80,13 +133,13 @@ class KqlValidationTest(unittest.TestCase):
         self.assertIn("WIDE_PROJECTION", self.codes(r))
         self.assertIn("SORT_BEFORE_FILTER", self.codes(r))
         self.assertIn("SORT_WITHOUT_BOUND", self.codes(r))
-        r = self.report("default | where body matches regex 'timeout.*' | join kind=inner (default | take 1) on trace_id | take 10")
+        r = self.report("default | where body matches regex 'timeout.*' | mv-expand resource | take 10")
         self.assertIn("EXPENSIVE_OPERATOR", self.codes(r))
         self.assertIn("RAW_CONTAINS_SCAN", self.codes(r))
 
     def test_selective_predicates_lower_risk_but_do_not_erase_expensive_operator(self):
-        broad = self.report("default | join kind=inner (default | take 1) on trace_id | take 10")
-        narrow = self.report("default | where metric_name == 'x' | join kind=inner (default | take 1) on trace_id | take 10")
+        broad = self.report("default | mv-expand resource | take 10")
+        narrow = self.report("default | where metric_name == 'x' | mv-expand resource | take 10")
         self.assertLess(narrow["score"], broad["score"])
         self.assertIn("EXPENSIVE_OPERATOR", self.codes(narrow))
 

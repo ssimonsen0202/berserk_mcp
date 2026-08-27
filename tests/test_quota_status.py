@@ -1,7 +1,10 @@
 import json
 import subprocess
 import sys
+import threading
 import unittest
+import urllib.error
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -166,6 +169,97 @@ class GetQuotaStatusTest(unittest.TestCase):
             _total_tokens_estimate=lambda since: (0, True, False),
         )
         self.assertIn(result["source"], {"estimated", "unavailable"})
+
+
+class FetchLiveUsageRedirectSecurityTest(unittest.TestCase):
+    """SEC-04 (Codex security review): _fetch_live_usage's default opener
+    was plain urllib.request.urlopen, which follows redirects and re-sends
+    the same request -- including the Authorization: Bearer <oauth token>
+    header -- to the redirect target. USAGE_ENDPOINT is env-overridable
+    (BERSERK_MCP_QUOTA_ENDPOINT), and even the hardcoded default could
+    someday 30x, so a compromised or misconfigured endpoint could exfiltrate
+    the live Keychain OAuth token to an attacker-controlled host. Mirrors
+    the real-server redirect pattern already used for the eval harness's
+    outbound POST (test_eval_post_does_not_follow_redirect_with_credential
+    in test_security_primitives.py)."""
+
+    def _run_redirect_probe(self, call):
+        """Stand up a real redirect+target server pair, point USAGE_ENDPOINT
+        at the redirector, and call `call()`. Returns the list of headers
+        the target actually received (empty means the redirect was blocked
+        before the token could reach it)."""
+        received = []
+
+        class Target(BaseHTTPRequestHandler):
+            def do_GET(self):
+                received.append(dict(self.headers.items()))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *args):
+                pass
+
+        target_server = HTTPServer(("127.0.0.1", 0), Target)
+        target_port = target_server.server_address[1]
+
+        class Redirect(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{target_port}/")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        redirect_server = HTTPServer(("127.0.0.1", 0), Redirect)
+        redirect_port = redirect_server.server_address[1]
+        for server in (target_server, redirect_server):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+        orig_endpoint = qs.USAGE_ENDPOINT
+        qs.USAGE_ENDPOINT = f"http://127.0.0.1:{redirect_port}/"
+        try:
+            call()
+        finally:
+            qs.USAGE_ENDPOINT = orig_endpoint
+            redirect_server.shutdown()
+            target_server.shutdown()
+            redirect_server.server_close()
+            target_server.server_close()
+        return received
+
+    def test_default_opener_does_not_follow_redirect_with_bearer_token(self):
+        result_holder = {}
+
+        def call():
+            # _fetch_live_usage never raises by contract -- it must swallow
+            # the blocked-redirect HTTPError internally and degrade to None
+            # (the caller's existing fallback path), not leak the token.
+            result_holder["result"] = qs._fetch_live_usage("secret-oauth-token")
+
+        received = self._run_redirect_probe(call)
+        self.assertIsNone(result_holder["result"])
+        self.assertEqual(received, [])
+
+    def test_get_quota_status_production_call_shape_does_not_follow_redirect(self):
+        # This is the exact call shape berserk_mcp.py's claude_quota_status
+        # dispatch actually uses (quota_status.get_quota_status(since=since),
+        # no opener= override) -- a fix to _fetch_live_usage's own default
+        # is dead code against this path, because get_quota_status has its
+        # OWN separate opener=urllib.request.urlopen default and explicitly
+        # passes it down, shadowing whatever _fetch_live_usage defaults to
+        # (Codex re-review finding).
+        run = lambda *a, **k: fake_completed_process(
+            0, json.dumps({"claudeAiOauth": {"accessToken": "secret-oauth-token"}}))
+
+        def call():
+            qs.get_quota_status(
+                run=run, platform_name="Darwin",
+                _total_tokens_estimate=lambda since: (0, True, False),
+            )
+
+        received = self._run_redirect_probe(call)
+        self.assertEqual(received, [])
 
 
 class QuotaStatusToolIntegrationTest(unittest.TestCase):
