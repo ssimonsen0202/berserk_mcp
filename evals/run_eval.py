@@ -194,6 +194,8 @@ def call_mock(user, tools):
             return "claude_recent"
         if "log" in p:
             return "logs_for_service"
+        if "root cause" in p or ("investigat" in p and "error" in p):
+            return "investigate_error_rate"
         if "error" in p:
             return "errors_by_service"
         if "cpu" in p:
