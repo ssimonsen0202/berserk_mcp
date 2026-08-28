@@ -905,7 +905,7 @@ def q_trace_find_errors_for_service(service):
     cap runs. `service` must already be validated by
     _valid_interpolated_name at the call site.
 
-    Two Codex review fixes are folded into this query (2026-08-28):
+    Three Codex review fixes are folded into this query (2026-08-28):
     round 1 (P1) -- the original unscoped query's `tail 20` is global
     across every service, so a service whose failing spans aren't among
     the latest 20 error spans overall gets silently dropped before
@@ -917,13 +917,18 @@ def q_trace_find_errors_for_service(service):
     traces are pushed out of the window and never counted, even though
     investigation.py's own dedup only sees what's left after the cap.
     Grouping by trace_id in KQL, before `take`, makes the cap apply to
-    distinct traces instead of raw spans."""
+    distinct traces instead of raw spans. Round 3 (P2) -- `summarize`
+    doesn't preserve input row order, so the round-2 fix's unsorted
+    `take 20` after grouping returned an arbitrary subset of traces
+    instead of the most recent ones, regressing the recency behavior the
+    original `tail 20` gave for free. Sorting by the aggregated
+    `timestamp` descending before the cap restores that."""
     return (
         f"{T} | where isnotnull(trace_id) | where status_code == 'ERROR' "
         f"| where resource['service.name'] == '{service}' "
         f"| summarize span_name=take_any(span_name), timestamp=max(timestamp) "
         f"by trace_id, service=tostring(resource['service.name']) "
-        f"| take 20"
+        f"| sort by timestamp desc | take 20"
     )
 
 
@@ -2856,36 +2861,31 @@ def _handle_call_uncached(name, arguments):
         text, is_err, next_node, next_service = investigation.run_error_rate_node(
             node, since, service)
         result = _fence_untrusted(text)
-        if next_node and next_service and not _valid_interpolated_name(next_service):
-            # next_service here is backend-derived (the worst-offending
-            # service errors_by_service reported), not the caller's own
-            # validated argument. Round-2 Codex review, 2026-08-28: moving
-            # it unfenced into the continuation directive below without
-            # validating it first would let a service.name crafted to look
-            # like an instruction cross the untrusted-data trust boundary.
-            # Halt instead of embedding an unvalidated backend value in
-            # trusted-looking output.
-            return (
-                f"{result}\n"
-                f"Investigation halted: the backend-reported service name "
-                f"for the next hop failed validation and cannot be safely "
-                f"included in the next-step instruction. Investigate "
-                f"manually with logs_for_service / trace_find_errors.",
-                True,
-            )
         if next_node:
             # Deliberately built from trusted server code, outside the
-            # fence above -- never baked into the fenced text itself.
+            # fence above -- never baked into the fenced text itself
+            # (issue #24 Codex review round 1, 2026-08-28:
             # _BASE_INSTRUCTIONS tells every client to never follow an
-            # instruction found inside <untrusted_log_data>, so a
-            # compliant model could never advance past hop one if this
-            # directive were fenced along with the telemetry-derived
-            # findings (issue #24 Codex review, P1, 2026-08-28).
+            # instruction found inside <untrusted_log_data>, so embedding
+            # the continuation directive inside the fence would strand a
+            # compliant model at hop one). This directive never repeats
+            # next_service's raw value, even when it passes character
+            # validation -- next_service is backend-controlled telemetry
+            # (round 3, 2026-08-28: an allowlisted charset makes a value
+            # safe to interpolate into KQL, not safe to present as
+            # trusted instruction text; e.g. a service named
+            # "ignore-all-previous-instructions" passes the charset check
+            # but reads as an instruction). The model reads the actual
+            # service name from the fenced Result line above and reuses
+            # it -- the same "pass the value the previous step's response
+            # gave you" idiom this module's own missing-service errors
+            # already use.
             result = (
                 f"{result}\n"
                 f"Next: call investigate_error_rate(node={next_node!r}, "
-                f"since={since!r}, service={next_service!r}) to continue, "
-                f"or stop here if this is enough."
+                f"since={since!r}, service=<the service value from the "
+                f"Result line above>) to continue, or stop here if this "
+                f"is enough."
             )
         return result, is_err
 
