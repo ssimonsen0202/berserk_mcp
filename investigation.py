@@ -29,6 +29,7 @@ ERROR_RATE_INVESTIGATE_PER_MIN = 10
 # exists yet; revisit once this tree has run against live incidents.
 _RECENT_BUCKET_COUNT = 5
 _SPIKE_MULTIPLIER = 3
+_MIN_SPIKE_BUCKETS = _RECENT_BUCKET_COUNT * 2  # need real baseline, not just recent
 
 
 def configure(bzrk_search, since_hours, q_errors, q_soc_log_spike, q_trace_find_errors):
@@ -129,12 +130,79 @@ def _node_start(since):
     )
 
 
+def _node_check_log_spike(since, service):
+    if not service:
+        return (
+            "check_log_spike requires service (pass the value the start "
+            "node's response gave you).",
+            True, None,
+        )
+    rows, err = _run_json(_q_soc_log_spike, since)
+    if err is not None:
+        return (
+            f"Checked: soc_log_spike (since={since}) — FAILED\n"
+            f"Error: {err}\n"
+            f"Investigation halted at check_log_spike. The error-rate "
+            f"elevation from the previous step is still valid; this "
+            f"step's result is unknown, not \"no spike.\"",
+            True, None,
+        )
+    row = next((r for r in rows if str(r.get("service")) == service), None)
+    if row is None:
+        return (
+            f"Checked: soc_log_spike (since={since})\n"
+            f"No log-volume data for service={service!r} in this window "
+            f"— FAILED\n"
+            f"Investigation halted at check_log_spike.",
+            True, None,
+        )
+    hits = row.get("hits")
+    if not isinstance(hits, list) or len(hits) < _MIN_SPIKE_BUCKETS:
+        return (
+            f"Checked: soc_log_spike (since={since})\n"
+            f"Result: insufficient buckets for service={service!r} to "
+            f"assess a spike (need >= {_MIN_SPIKE_BUCKETS}) — FAILED\n"
+            f"Investigation halted at check_log_spike.",
+            True, None,
+        )
+    recent = hits[-_RECENT_BUCKET_COUNT:]
+    baseline = hits[:-_RECENT_BUCKET_COUNT]
+    recent_mean = sum(recent) / len(recent)
+    baseline_mean = sum(baseline) / len(baseline)
+    is_spike = (
+        recent_mean > 0 if baseline_mean == 0
+        else recent_mean > baseline_mean * _SPIKE_MULTIPLIER
+    )
+    if not is_spike:
+        return (
+            f"Checked: soc_log_spike (since={since})\n"
+            f"Result: service={service!r} recent volume {recent_mean:.1f}/min "
+            f"vs baseline {baseline_mean:.1f}/min — not a spike "
+            f"(threshold {_SPIKE_MULTIPLIER}x)\n"
+            f"Investigation complete.\n"
+            f"Verdict: error rate elevated for {service!r} but no "
+            f"correlated log-volume spike; recommend manual review.",
+            False, None,
+        )
+    return (
+        f"Checked: soc_log_spike (since={since})\n"
+        f"Result: service={service!r} recent volume {recent_mean:.1f}/min "
+        f"vs baseline {baseline_mean:.1f}/min — spike confirmed\n"
+        f"Branch: correlated spike\n"
+        f"Next: call investigate_error_rate(node=\"check_traces\", "
+        f"since={since!r}, service=\"{service}\") to continue.",
+        False, "check_traces",
+    )
+
+
 def run_error_rate_node(node, since, service):
     """Execute exactly one hop of the elevated-error-rate tree. Returns
     (text, is_error, next_node) -- next_node is None at every terminal
     state (concluded or halted)."""
     if node == "start":
         return _node_start(since)
+    if node == "check_log_spike":
+        return _node_check_log_spike(since, service)
     return (
         f"Unknown node {node!r}. Call investigate_error_rate with no "
         f"node argument (or node=\"start\") to begin a new investigation.",

@@ -118,5 +118,71 @@ class StartNodeTest(unittest.TestCase):
         self.assertIn("bzrk timed out after 120s", text)
 
 
+class CheckLogSpikeNodeTest(unittest.TestCase):
+    def setUp(self):
+        inv.configure(
+            bzrk_search=self._search, since_hours=lambda s: 1.0,
+            q_errors="Q_ERRORS", q_soc_log_spike="Q_SPIKE", q_trace_find_errors="Q_TRACE",
+        )
+        self.responses = {}
+
+    def _search(self, kql, since):
+        return self.responses[kql]
+
+    def _spike_response(self, service, hits):
+        return bzrk_json_table(["service", "hits"], [[service, hits]]), False
+
+    def test_no_service_param_is_a_validation_error(self):
+        text, is_error, next_node = inv.run_error_rate_node("check_log_spike", "1h ago", None)
+        self.assertTrue(is_error)
+        self.assertIsNone(next_node)
+        self.assertIn("service", text.lower())
+
+    def test_spike_advances_to_check_traces(self):
+        # 55 baseline buckets averaging ~2, last 5 buckets averaging 20 --
+        # 20 > 2 * SPIKE_MULTIPLIER (3), so this is a spike.
+        hits = [2] * 55 + [20] * 5
+        self.responses["Q_SPIKE"] = self._spike_response("checkout", hits)
+        text, is_error, next_node = inv.run_error_rate_node(
+            "check_log_spike", "1h ago", "checkout")
+        self.assertFalse(is_error)
+        self.assertEqual(next_node, "check_traces")
+        self.assertIn("check_traces", text)
+        self.assertIn("service=\"checkout\"", text)
+
+    def test_no_spike_concludes_with_manual_review_recommendation(self):
+        hits = [2] * 60  # flat, no spike
+        self.responses["Q_SPIKE"] = self._spike_response("checkout", hits)
+        text, is_error, next_node = inv.run_error_rate_node(
+            "check_log_spike", "1h ago", "checkout")
+        self.assertFalse(is_error)
+        self.assertIsNone(next_node)
+        self.assertIn("manual review", text.lower())
+
+    def test_service_not_present_in_series_halts(self):
+        self.responses["Q_SPIKE"] = self._spike_response("auth", [1] * 60)
+        text, is_error, next_node = inv.run_error_rate_node(
+            "check_log_spike", "1h ago", "checkout")
+        self.assertTrue(is_error)
+        self.assertIsNone(next_node)
+        self.assertIn("no log-volume data", text.lower())
+
+    def test_insufficient_buckets_halts(self):
+        self.responses["Q_SPIKE"] = self._spike_response("checkout", [1, 2, 3])
+        text, is_error, next_node = inv.run_error_rate_node(
+            "check_log_spike", "1h ago", "checkout")
+        self.assertTrue(is_error)
+        self.assertIsNone(next_node)
+        self.assertIn("insufficient", text.lower())
+
+    def test_backend_failure_halts(self):
+        self.responses["Q_SPIKE"] = ("bzrk timed out", True)
+        text, is_error, next_node = inv.run_error_rate_node(
+            "check_log_spike", "1h ago", "checkout")
+        self.assertTrue(is_error)
+        self.assertIsNone(next_node)
+        self.assertIn("FAILED", text)
+
+
 if __name__ == "__main__":
     unittest.main()
