@@ -1,6 +1,6 @@
 # Investigation decision tree: implementation spec
 
-Status: DRAFT — brainstormed and approved 2026-08-27, not yet implemented.
+Status: IMPLEMENTED — brainstormed and approved 2026-08-27, shipped 2026-08-28.
 Addresses issue #24 ("Investigation decision tree, composition ceiling, no
 code execution"), which itself derives from `docs/berserk-dev-brief-2026-08-20.md`
 §3's "composition ceiling" weakness and §5 priority item 8.

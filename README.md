@@ -422,6 +422,7 @@ Every query tool takes an optional `since` argument (`"15m ago"`, `"1h ago"`,
 | Tool | What it answers |
 |---|---|
 | `sre_error_rate` | Error log events by service grouped per minute — "is the error rate climbing?" |
+| `investigate_error_rate` | Fixed decision-tree root-cause walk for an elevated error rate — errors_by_service → correlated log-spike → failing traces, one hop per call. |
 | `sre_host_headroom` | CPU load and memory by host — "which VM is saturated?" |
 | `sre_ingest_health` | Berserk ingest lag and dropped data — "is observability lagging?" |
 | `sre_service_health` | Full health summary for one named service: event volume, error count, log/metric split, last seen. |
