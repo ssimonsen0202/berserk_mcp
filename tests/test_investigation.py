@@ -235,5 +235,88 @@ class CheckTracesNodeTest(unittest.TestCase):
         self.assertIsNone(next_node)
 
 
+class FullWalkTest(unittest.TestCase):
+    def setUp(self):
+        inv.configure(
+            bzrk_search=self._search, since_hours=lambda s: 1.0,
+            q_errors="Q_ERRORS", q_soc_log_spike="Q_SPIKE", q_trace_find_errors="Q_TRACE",
+        )
+        self.responses = {}
+
+    def _search(self, kql, since):
+        return self.responses[kql]
+
+    def test_full_walk_elevated_spike_traces_found(self):
+        self.responses["Q_ERRORS"] = (
+            bzrk_json_table(["service", "errors"], [["checkout", 700]]), False)
+        self.responses["Q_SPIKE"] = (
+            bzrk_json_table(["service", "hits"], [["checkout", [2] * 55 + [20] * 5]]), False)
+        self.responses["Q_TRACE"] = (
+            bzrk_json_table(
+                ["trace_id", "span_name", "timestamp", "service"],
+                [["t1", "POST /checkout", "2026-08-28T00:00:00Z", "checkout"]],
+            ), False)
+
+        text1, err1, next1 = inv.run_error_rate_node("start", "1h ago", None)
+        self.assertFalse(err1)
+        self.assertEqual(next1, "check_log_spike")
+
+        text2, err2, next2 = inv.run_error_rate_node("check_log_spike", "1h ago", "checkout")
+        self.assertFalse(err2)
+        self.assertEqual(next2, "check_traces")
+
+        text3, err3, next3 = inv.run_error_rate_node("check_traces", "1h ago", "checkout")
+        self.assertFalse(err3)
+        self.assertIsNone(next3)
+        self.assertIn("root cause is likely", text3)
+
+    def test_full_walk_elevated_but_no_spike_early_exit(self):
+        self.responses["Q_ERRORS"] = (
+            bzrk_json_table(["service", "errors"], [["checkout", 700]]), False)
+        self.responses["Q_SPIKE"] = (
+            bzrk_json_table(["service", "hits"], [["checkout", [5] * 60]]), False)
+
+        _, err1, next1 = inv.run_error_rate_node("start", "1h ago", None)
+        self.assertFalse(err1)
+        self.assertEqual(next1, "check_log_spike")
+
+        text2, err2, next2 = inv.run_error_rate_node("check_log_spike", "1h ago", "checkout")
+        self.assertFalse(err2)
+        self.assertIsNone(next2)
+        self.assertIn("manual review", text2.lower())
+
+
+class DisplayFormatIndependenceTest(unittest.TestCase):
+    """Proves the architecture decision (branch logic never depends on a
+    fixed tool's display-formatted text) actually holds, not just that
+    it's stated as intent (spec's own required regression test)."""
+
+    def test_branch_logic_unaffected_by_reformatted_but_same_structured_value(self):
+        # Two structurally-identical responses that would render as very
+        # different display text if a fixed tool changed its formatting
+        # (different key order, extra whitespace) but carry the same
+        # decision-relevant value. Branch outcome must be identical.
+        variant_a = json.dumps({"Tables": [{
+            "schema": {"columns": [{"name": "service"}, {"name": "errors"}]},
+            "rows": [["checkout", 700]],
+        }]})
+        variant_b = json.dumps({"Tables": [{
+            "schema": {"columns": [{"name": "errors"}, {"name": "service"}]},
+            "rows": [[700, "checkout"]],
+        }]}, indent=4)  # different formatting, different column order
+
+        for variant in (variant_a, variant_b):
+            with self.subTest(variant=variant[:30]):
+                inv.configure(
+                    bzrk_search=lambda kql, since, v=variant: (v, False),
+                    since_hours=lambda s: 1.0,
+                    q_errors="Q_ERRORS", q_soc_log_spike="Q_SPIKE",
+                    q_trace_find_errors="Q_TRACE",
+                )
+                _, is_error, next_node = inv.run_error_rate_node("start", "1h ago", None)
+                self.assertFalse(is_error)
+                self.assertEqual(next_node, "check_log_spike")
+
+
 if __name__ == "__main__":
     unittest.main()
