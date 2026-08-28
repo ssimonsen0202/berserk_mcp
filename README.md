@@ -42,10 +42,17 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.26.0**. This is a bullet-point overview, most recent
+Current version: **1.27.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.27.0** (2026-08-28) — Five security findings from an independent
+  Codex review (KQL validator bypasses, unfenced telemetry attributes, an
+  injection-delimiter gap, an OAuth-header redirect leak, and a
+  string-truthiness authorization bug), and `investigate_error_rate`
+  (issue #24): a fixed, step-by-step decision-tree investigation tool for
+  elevated error rate, scoped to SRE/Ops. See
+  [details](docs/releases/v1.27.0.md).
 - **v1.26.0** (2026-08-24) — Untrusted-data fencing, tool tiers, just-in-time
   tool discovery (`find_tool`, 92% measured token reduction), a live
   quota-window check (`claude_quota_status`), an `agent` parameter on the base
