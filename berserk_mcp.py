@@ -72,6 +72,7 @@ from pathlib import Path
 import _http
 import _store
 import agent_analytics
+import investigation
 import ai_finops
 import ingestion_advisor
 import kql_validation
@@ -1910,6 +1911,13 @@ agent_analytics.configure(
     )[0],
     fence=lambda text: _fence_untrusted(text, inline=True),
 )
+investigation.configure(
+    bzrk_search=bzrk_search_json,
+    since_hours=_since_hours,
+    q_errors=Q_ERRORS,
+    q_soc_log_spike=Q_SOC_LOG_SPIKE,
+    q_trace_find_errors=Q_TRACE_FIND_ERRORS,
+)
 ai_finops.configure(
     search=bzrk_search_json,
     table=TABLE,
@@ -2245,6 +2253,7 @@ TOOLS = [
     {"name": "trace_analyze", "description": "Full breakdown of one trace by trace_id — every span in time order plus correlated log lines from the same trace_id. Use after trace_find_slow/trace_find_errors surface a trace_id worth investigating.", "inputSchema": {"type": "object", "properties": {"trace_id": {"type": "string", "maxLength": MAX_TRACE_ID_CHARS, "description": "trace_id from trace_find_slow/trace_find_errors/search"}}, "required": ["trace_id"]}},
     # --- SRE role tools (reliability, headroom, saturation, error rates, rollback signals) ---
     {"name": "sre_error_rate", "roles": ["sre"], "description": "SRE view of ERROR log events grouped by service and minute. Use for 'is the error rate climbing', 'which service is burning error budget', or 'what should we rollback first'.", "inputSchema": {"type": "object", "properties": _since()}},
+    {"name": "investigate_error_rate", "roles": ["sre"], "description": "Fixed decision-tree investigation for an elevated error rate: checks errors_by_service, and if elevated, walks correlated log-volume spike and failing-trace checks — one hop per call, reproducible, no agent-authored composition. Start with no arguments (or node='start'); each response tells you the next call to make.", "inputSchema": {"type": "object", "properties": dict({"node": {"type": "string", "description": "which hop to run; omit or 'start' to begin a new investigation"}, "service": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "required for node='check_log_spike'/'check_traces' — the service name the previous step's response gave you"}}, **_since())}},
     {"name": "forecast_capacity", "roles": ["sre"], "description": "Forecast when an allowlisted host gauge may reach its ceiling using a native series fit. Use for 'when will memory fill?' or 'at this trend when does capacity run out?'. Refuses unreliable trends instead of inventing a date.", "inputSchema": {"type": "object", "properties": dict({"metric": {"type": "string", "enum": sorted(_FORECAST_METRICS)}, "host": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "optional host.name filter"}}, **_since()), "required": ["metric"]}},
     {"name": "sre_host_headroom", "roles": ["sre"], "description": "SRE view of host CPU load and memory used side-by-side. Use for 'which host is hottest', 'where is headroom lowest', or 'which VM is nearest saturation'.", "inputSchema": {"type": "object", "properties": _since()}},
     {"name": "sre_ingest_health", "roles": ["sre"], "description": "SRE view of Berserk ingest lag and dropped-data signals per host. Use for 'is ingest healthy', 'are we dropping telemetry', or 'is observability lagging'.", "inputSchema": {"type": "object", "properties": _since()}},
@@ -2367,6 +2376,7 @@ TITLES = {
     "list_metrics": "List Metrics",
     "bzrk_query_perf": "Berserk Query Performance",
     "sre_error_rate": "SRE: Error Rate",
+    "investigate_error_rate": "Investigate: Error Rate",
     "sre_host_headroom": "SRE: Host Headroom",
     "sre_ingest_health": "SRE: Ingest Health",
     "sre_service_health": "SRE: Service Health",
@@ -2790,6 +2800,14 @@ def _handle_call_uncached(name, arguments):
         if not out or out.strip() == "(no rows)":
             return f"No anomalies detected (window {since}).", False
         return f"Anomaly decomposition for window {since}; non-zero anomaly markers indicate spikes:\n{_fence_untrusted(out)}", False
+
+    if name == "investigate_error_rate":
+        node = str(arguments.get("node") or "start").strip()
+        service = arguments.get("service")
+        service = str(service).strip() if service else None
+        since = arguments.get("since") or "1h ago"
+        text, is_err, _next_node = investigation.run_error_rate_node(node, since, service)
+        return _fence_untrusted(text), is_err
 
     if name == "forecast_capacity":
         metric = str(arguments.get("metric") or "").strip()
