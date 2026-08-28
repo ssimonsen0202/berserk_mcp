@@ -901,19 +901,29 @@ Q_TRACE_FIND_ERRORS = (
 
 def q_trace_find_errors_for_service(service):
     """investigate_error_rate-only variant of Q_TRACE_FIND_ERRORS, scoped to
-    one service before the `tail` cap runs (issue #24 Codex review, P1,
-    2026-08-28): the unscoped query's `tail 20` is global across every
-    service, so a service whose failing spans aren't among the latest 20
-    error spans overall gets silently dropped before investigation.py's
-    Python-side filter ever sees them, producing a false "no failing
-    traces" verdict. `service` must already be validated by
-    _valid_interpolated_name at the call site."""
+    one service and collapsed to one row per trace_id before the `take`
+    cap runs. `service` must already be validated by
+    _valid_interpolated_name at the call site.
+
+    Two Codex review fixes are folded into this query (2026-08-28):
+    round 1 (P1) -- the original unscoped query's `tail 20` is global
+    across every service, so a service whose failing spans aren't among
+    the latest 20 error spans overall gets silently dropped before
+    investigation.py's Python-side filter ever sees them, producing a
+    false "no failing traces" verdict. Scoping by service here fixes
+    that. Round 2 (P2) -- capping *raw spans* (even service-scoped) before
+    grouping by trace_id still undercounts: if one trace_id contributes
+    most of the 20 rows (e.g. several retried spans), older distinct
+    traces are pushed out of the window and never counted, even though
+    investigation.py's own dedup only sees what's left after the cap.
+    Grouping by trace_id in KQL, before `take`, makes the cap apply to
+    distinct traces instead of raw spans."""
     return (
         f"{T} | where isnotnull(trace_id) | where status_code == 'ERROR' "
         f"| where resource['service.name'] == '{service}' "
-        f"| project trace_id, span_name, timestamp, "
-        f"service=tostring(resource['service.name']) "
-        f"| tail 20"
+        f"| summarize span_name=take_any(span_name), timestamp=max(timestamp) "
+        f"by trace_id, service=tostring(resource['service.name']) "
+        f"| take 20"
     )
 
 
@@ -2846,6 +2856,23 @@ def _handle_call_uncached(name, arguments):
         text, is_err, next_node, next_service = investigation.run_error_rate_node(
             node, since, service)
         result = _fence_untrusted(text)
+        if next_node and next_service and not _valid_interpolated_name(next_service):
+            # next_service here is backend-derived (the worst-offending
+            # service errors_by_service reported), not the caller's own
+            # validated argument. Round-2 Codex review, 2026-08-28: moving
+            # it unfenced into the continuation directive below without
+            # validating it first would let a service.name crafted to look
+            # like an instruction cross the untrusted-data trust boundary.
+            # Halt instead of embedding an unvalidated backend value in
+            # trusted-looking output.
+            return (
+                f"{result}\n"
+                f"Investigation halted: the backend-reported service name "
+                f"for the next hop failed validation and cannot be safely "
+                f"included in the next-step instruction. Investigate "
+                f"manually with logs_for_service / trace_find_errors.",
+                True,
+            )
         if next_node:
             # Deliberately built from trusted server code, outside the
             # fence above -- never baked into the fenced text itself.
