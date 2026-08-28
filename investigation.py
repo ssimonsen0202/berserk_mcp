@@ -30,6 +30,7 @@ ERROR_RATE_INVESTIGATE_PER_MIN = 10
 _RECENT_BUCKET_COUNT = 5
 _SPIKE_MULTIPLIER = 3
 _MIN_SPIKE_BUCKETS = _RECENT_BUCKET_COUNT * 2  # need real baseline, not just recent
+_MAX_EXAMPLE_TRACES = 3
 
 
 def configure(bzrk_search, since_hours, q_errors, q_soc_log_spike, q_trace_find_errors):
@@ -195,6 +196,50 @@ def _node_check_log_spike(since, service):
     )
 
 
+def _node_check_traces(since, service):
+    if not service:
+        return (
+            "check_traces requires service (pass the value the previous "
+            "step's response gave you).",
+            True, None,
+        )
+    rows, err = _run_json(_q_trace_find_errors, since)
+    if err is not None:
+        return (
+            f"Checked: trace_find_errors (since={since}) — FAILED\n"
+            f"Error: {err}\n"
+            f"Investigation halted at check_traces.",
+            True, None,
+        )
+    matching = [r for r in rows if str(r.get("service")) == service]
+    if not matching:
+        return (
+            f"Checked: trace_find_errors (since={since})\n"
+            f"Result: no failing traces found for service={service!r}\n"
+            f"Investigation complete.\n"
+            f"Verdict: error rate elevated, correlated log-volume spike "
+            f"confirmed for {service!r}, but no failing traces found — "
+            f"investigate ingestion lag or a non-trace-instrumented "
+            f"failure path.",
+            False, None,
+        )
+    examples = "; ".join(
+        f"{r.get('span_name')} ({r.get('trace_id')})"
+        for r in matching[:_MAX_EXAMPLE_TRACES]
+    )
+    return (
+        f"Checked: trace_find_errors (since={since})\n"
+        f"Result: {len(matching)} failing traces found for "
+        f"service={service!r}: {examples}\n"
+        f"Investigation complete.\n"
+        f"Verdict: error rate elevated, correlated log-volume spike "
+        f"confirmed, {len(matching)} failing traces found for "
+        f"{service!r} — root cause is likely in {service!r}'s own "
+        f"request path, not a downstream dependency.",
+        False, None,
+    )
+
+
 def run_error_rate_node(node, since, service):
     """Execute exactly one hop of the elevated-error-rate tree. Returns
     (text, is_error, next_node) -- next_node is None at every terminal
@@ -203,6 +248,8 @@ def run_error_rate_node(node, since, service):
         return _node_start(since)
     if node == "check_log_spike":
         return _node_check_log_spike(since, service)
+    if node == "check_traces":
+        return _node_check_traces(since, service)
     return (
         f"Unknown node {node!r}. Call investigate_error_rate with no "
         f"node argument (or node=\"start\") to begin a new investigation.",

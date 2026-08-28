@@ -184,5 +184,56 @@ class CheckLogSpikeNodeTest(unittest.TestCase):
         self.assertIn("FAILED", text)
 
 
+class CheckTracesNodeTest(unittest.TestCase):
+    def setUp(self):
+        inv.configure(
+            bzrk_search=self._search, since_hours=lambda s: 1.0,
+            q_errors="Q_ERRORS", q_soc_log_spike="Q_SPIKE", q_trace_find_errors="Q_TRACE",
+        )
+        self.responses = {}
+
+    def _search(self, kql, since):
+        return self.responses[kql]
+
+    def test_no_service_param_is_a_validation_error(self):
+        text, is_error, next_node = inv.run_error_rate_node("check_traces", "1h ago", None)
+        self.assertTrue(is_error)
+        self.assertIsNone(next_node)
+
+    def test_failing_traces_found_concludes_with_root_cause_verdict(self):
+        rows = [
+            ["t1", "POST /checkout", "2026-08-28T00:00:00Z", "checkout"],
+            ["t2", "GET /cart", "2026-08-28T00:01:00Z", "checkout"],
+            ["t3", "POST /pay", "2026-08-28T00:02:00Z", "auth"],
+        ]
+        self.responses["Q_TRACE"] = bzrk_json_table(
+            ["trace_id", "span_name", "timestamp", "service"], rows), False
+        text, is_error, next_node = inv.run_error_rate_node(
+            "check_traces", "1h ago", "checkout")
+        self.assertFalse(is_error)
+        self.assertIsNone(next_node)
+        self.assertIn("2 failing", text)
+        self.assertIn("checkout", text)
+        self.assertNotIn("auth", text)  # filtered to the offending service
+
+    def test_no_matching_traces_concludes_with_ingestion_gap_hypothesis(self):
+        rows = [["t1", "GET /health", "2026-08-28T00:00:00Z", "other-service"]]
+        self.responses["Q_TRACE"] = bzrk_json_table(
+            ["trace_id", "span_name", "timestamp", "service"], rows), False
+        text, is_error, next_node = inv.run_error_rate_node(
+            "check_traces", "1h ago", "checkout")
+        self.assertFalse(is_error)
+        self.assertIsNone(next_node)
+        self.assertIn("no failing traces", text.lower())
+        self.assertIn("ingestion lag", text.lower())
+
+    def test_backend_failure_halts(self):
+        self.responses["Q_TRACE"] = ("bzrk timed out", True)
+        text, is_error, next_node = inv.run_error_rate_node(
+            "check_traces", "1h ago", "checkout")
+        self.assertTrue(is_error)
+        self.assertIsNone(next_node)
+
+
 if __name__ == "__main__":
     unittest.main()
