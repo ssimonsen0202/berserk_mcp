@@ -2803,8 +2803,10 @@ def _handle_call_uncached(name, arguments):
 
     if name == "investigate_error_rate":
         node = str(arguments.get("node") or "start").strip()
-        service = arguments.get("service")
-        service = str(service).strip() if service else None
+        service = str(arguments.get("service") or "").strip()
+        if service and not _valid_interpolated_name(service):
+            return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
+        service = service or None
         since = arguments.get("since") or "1h ago"
         text, is_err, _next_node = investigation.run_error_rate_node(node, since, service)
         return _fence_untrusted(text), is_err

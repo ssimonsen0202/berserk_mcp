@@ -6268,6 +6268,21 @@ class InvestigateErrorRateTest(unittest.TestCase):
         self.assertTrue(err)
         self.assertIn("unknown node", text.lower())
 
+    def test_rejects_invalid_service_name(self):
+        text, err = bm.handle_call("investigate_error_rate", {"service": "bad name!"})
+        self.assertTrue(err)
+        self.assertIn("invalid service name", text)
+        self.assertIn("allowed: letters, digits, '.', '_', '-'", text)
+
+    def test_accepts_valid_service_name(self):
+        doc = {"Tables": [{
+            "schema": {"columns": [{"name": "service"}, {"name": "errors"}]},
+            "rows": [["my-service", 5]],
+        }]}
+        self._mock_bzrk(json.dumps(doc))
+        text, err = bm.handle_call("investigate_error_rate", {"service": "my-service"})
+        self.assertFalse(err, text)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
