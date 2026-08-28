@@ -37,10 +37,17 @@ def configure(bzrk_search, since_hours, q_errors, q_soc_log_spike, q_trace_find_
     """bzrk_search: callable(kql, since) -> (json_text, is_error), the same
     bzrk_search_json berserk_mcp.py wires into agent_analytics. since_hours:
     callable(since_str) -> float hours, berserk_mcp.py's own _since_hours
-    (passed in rather than imported, to avoid the cycle). q_*: the exact
-    KQL constants berserk_mcp.py already defines for errors_by_service,
-    soc_log_spike, and trace_find_errors -- reused verbatim so this tree's
-    queries never drift from the fixed tools' own."""
+    (passed in rather than imported, to avoid the cycle). q_errors: the
+    exact KQL constant berserk_mcp.py already defines for errors_by_service
+    (fixed string -- the start node has no service to scope by yet; it's
+    the one finding it). q_soc_log_spike, q_trace_find_errors: callables
+    service -> kql, scoped to the one service this hop cares about (Codex
+    review finding, 2026-08-28: the fixed tools' own unscoped queries cap
+    at a global `take`/`tail` before this module's Python-side service
+    filter ever runs, so a service outside that global top-N silently
+    reads as "no data" even when it has real matching rows -- scoping the
+    query itself, not just post-filtering its already-truncated result,
+    is the actual fix)."""
     global _bzrk_search, _since_hours, _q_errors, _q_soc_log_spike, _q_trace_find_errors
     _bzrk_search = bzrk_search
     _since_hours = since_hours
@@ -70,13 +77,29 @@ def _run_json(kql, since):
     # of correctly concluding "no errors, nothing to investigate."
     if str(out or "").strip() == "(no rows)":
         return [], None
+    if not str(out or "").strip()[:1] in "[{":
+        # Codex review finding, 2026-08-28: bzrk_search_json deliberately
+        # falls back to plain aligned-table text on older bzrk builds that
+        # reject --json (see its own docstring in berserk_mcp.py). That
+        # fallback is not a corrupted response -- it's a real, documented
+        # compatibility path -- but this module can't safely reconstruct
+        # array-valued columns (soc_log_spike's make-series `hits` series)
+        # from flat table text, so it still can't proceed. Say so plainly
+        # instead of the generic "unexpected non-JSON response", which
+        # reads like backend corruption rather than a version mismatch.
+        return None, (
+            "backend returned a non-JSON response, consistent with an "
+            "older bzrk build that doesn't support --json (this "
+            "investigation tool requires --json for structured branching "
+            f"and cannot parse legacy table output): {str(out)[:200]}"
+        )
     try:
         parsed = json.loads(out)
     except (json.JSONDecodeError, TypeError):
-        return None, f"unexpected non-JSON response: {out[:200]}"
+        return None, f"unexpected non-JSON response: {str(out)[:200]}"
     records = agent_analytics._json_records(parsed)
     if records is None:
-        return None, f"unrecognized response shape: {out[:200]}"
+        return None, f"unrecognized response shape: {str(out)[:200]}"
     return records, None
 
 
@@ -94,7 +117,7 @@ def _node_start(since):
             f"Checked: errors_by_service (since={since}) — FAILED\n"
             f"Error: {err}\n"
             f"Investigation halted at start.",
-            True, None,
+            True, None, None,
         )
     if not rows:
         return (
@@ -102,7 +125,7 @@ def _node_start(since):
             f"Result: no errors\n"
             f"Investigation complete.\n"
             f"Verdict: no errors in window, nothing to investigate.",
-            False, None,
+            False, None, None,
         )
     top = max(rows, key=lambda r: _as_int(r.get("errors")))
     service = str(top.get("service") or "(unknown)")
@@ -117,17 +140,14 @@ def _node_start(since):
             f"Threshold: >{ERROR_RATE_INVESTIGATE_PER_MIN}/min to investigate\n"
             f"Investigation complete.\n"
             f"Verdict: error rate normal, no further checks.",
-            False, None,
+            False, None, None,
         )
     return (
         f"Checked: errors_by_service (since={since})\n"
         f"Result: {count} errors for service {service!r} (~{rate:.1f}/min)\n"
         f"Threshold: >{ERROR_RATE_INVESTIGATE_PER_MIN}/min investigate\n"
-        f"Branch: investigate (elevated)\n"
-        f"Next: call investigate_error_rate(node=\"check_log_spike\", "
-        f"since={since!r}, service=\"{service}\") to continue, or stop "
-        f"here if this is enough.",
-        False, "check_log_spike",
+        f"Branch: investigate (elevated)",
+        False, "check_log_spike", service,
     )
 
 
@@ -136,9 +156,10 @@ def _node_check_log_spike(since, service):
         return (
             "check_log_spike requires service (pass the value the start "
             "node's response gave you).",
-            True, None,
+            True, None, None,
         )
-    rows, err = _run_json(_q_soc_log_spike, since)
+    kql = _q_soc_log_spike(service)
+    rows, err = _run_json(kql, since)
     if err is not None:
         return (
             f"Checked: soc_log_spike (since={since}) — FAILED\n"
@@ -146,8 +167,10 @@ def _node_check_log_spike(since, service):
             f"Investigation halted at check_log_spike. The error-rate "
             f"elevation from the previous step is still valid; this "
             f"step's result is unknown, not \"no spike.\"",
-            True, None,
+            True, None, None,
         )
+    # The query is already scoped to `service`; this lookup is defense in
+    # depth (a backend that ignored the filter shouldn't silently pass).
     row = next((r for r in rows if str(r.get("service")) == service), None)
     if row is None:
         return (
@@ -155,7 +178,7 @@ def _node_check_log_spike(since, service):
             f"No log-volume data for service={service!r} in this window "
             f"— FAILED\n"
             f"Investigation halted at check_log_spike.",
-            True, None,
+            True, None, None,
         )
     hits = row.get("hits")
     if not isinstance(hits, list) or len(hits) < _MIN_SPIKE_BUCKETS:
@@ -164,7 +187,7 @@ def _node_check_log_spike(since, service):
             f"Result: insufficient buckets for service={service!r} to "
             f"assess a spike (need >= {_MIN_SPIKE_BUCKETS}) — FAILED\n"
             f"Investigation halted at check_log_spike.",
-            True, None,
+            True, None, None,
         )
     recent = hits[-_RECENT_BUCKET_COUNT:]
     baseline = hits[:-_RECENT_BUCKET_COUNT]
@@ -183,16 +206,14 @@ def _node_check_log_spike(since, service):
             f"Investigation complete.\n"
             f"Verdict: error rate elevated for {service!r} but no "
             f"correlated log-volume spike; recommend manual review.",
-            False, None,
+            False, None, None,
         )
     return (
         f"Checked: soc_log_spike (since={since})\n"
         f"Result: service={service!r} recent volume {recent_mean:.1f}/min "
         f"vs baseline {baseline_mean:.1f}/min — spike confirmed\n"
-        f"Branch: correlated spike\n"
-        f"Next: call investigate_error_rate(node=\"check_traces\", "
-        f"since={since!r}, service=\"{service}\") to continue.",
-        False, "check_traces",
+        f"Branch: correlated spike",
+        False, "check_traces", service,
     )
 
 
@@ -201,18 +222,28 @@ def _node_check_traces(since, service):
         return (
             "check_traces requires service (pass the value the previous "
             "step's response gave you).",
-            True, None,
+            True, None, None,
         )
-    rows, err = _run_json(_q_trace_find_errors, since)
+    kql = _q_trace_find_errors(service)
+    rows, err = _run_json(kql, since)
     if err is not None:
         return (
             f"Checked: trace_find_errors (since={since}) — FAILED\n"
             f"Error: {err}\n"
             f"Investigation halted at check_traces.",
-            True, None,
+            True, None, None,
         )
+    # The query is already scoped to `service`; this filter is defense in
+    # depth. Dedup by trace_id -- Q_TRACE_FIND_ERRORS returns one row per
+    # error *span*, and multiple spans (and their status changes) can
+    # share one trace_id, so counting rows overcounts and can repeat the
+    # same trace in the example list (Codex review finding, 2026-08-28).
     matching = [r for r in rows if str(r.get("service")) == service]
-    if not matching:
+    distinct = {}
+    for r in matching:
+        distinct.setdefault(r.get("trace_id"), r)
+    distinct_traces = list(distinct.values())
+    if not distinct_traces:
         return (
             f"Checked: trace_find_errors (since={since})\n"
             f"Result: no failing traces found for service={service!r}\n"
@@ -221,29 +252,42 @@ def _node_check_traces(since, service):
             f"confirmed for {service!r}, but no failing traces found — "
             f"investigate ingestion lag or a non-trace-instrumented "
             f"failure path.",
-            False, None,
+            False, None, None,
         )
     examples = "; ".join(
         f"{r.get('span_name')} ({r.get('trace_id')})"
-        for r in matching[:_MAX_EXAMPLE_TRACES]
+        for r in distinct_traces[:_MAX_EXAMPLE_TRACES]
     )
     return (
         f"Checked: trace_find_errors (since={since})\n"
-        f"Result: {len(matching)} failing traces found for "
+        f"Result: {len(distinct_traces)} failing traces found for "
         f"service={service!r}: {examples}\n"
         f"Investigation complete.\n"
         f"Verdict: error rate elevated, correlated log-volume spike "
-        f"confirmed, {len(matching)} failing traces found for "
+        f"confirmed, {len(distinct_traces)} failing traces found for "
         f"{service!r} — root cause is likely in {service!r}'s own "
         f"request path, not a downstream dependency.",
-        False, None,
+        False, None, None,
     )
 
 
 def run_error_rate_node(node, since, service):
     """Execute exactly one hop of the elevated-error-rate tree. Returns
-    (text, is_error, next_node) -- next_node is None at every terminal
-    state (concluded or halted)."""
+    (text, is_error, next_node, next_service).
+
+    text carries only telemetry-derived findings for this hop -- never the
+    fixed continuation directive. The caller (berserk_mcp.py's dispatch)
+    is responsible for presenting `next_node`/`next_service` as the "call
+    this next" instruction *outside* whatever untrusted-data fence it
+    applies to `text` (Codex review finding, 2026-08-28: this module used
+    to bake "Next: call investigate_error_rate(...)" into the same text
+    that gets fenced as untrusted at the dispatch boundary -- since the
+    server's own instructions tell every client to never follow anything
+    inside that fence, a compliant model could never actually advance past
+    the first hop. next_node/next_service are structured values this
+    module fully controls, letting the caller build that instruction from
+    trusted server code instead of the fenced text). Both are None at
+    every terminal state (concluded or halted)."""
     if node == "start":
         return _node_start(since)
     if node == "check_log_spike":
@@ -253,5 +297,5 @@ def run_error_rate_node(node, since, service):
     return (
         f"Unknown node {node!r}. Call investigate_error_rate with no "
         f"node argument (or node=\"start\") to begin a new investigation.",
-        True, None,
+        True, None, None,
     )
