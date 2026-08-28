@@ -117,6 +117,15 @@
 > review rounds each found a new disguise for the same underlying gap —
 > worth remembering as a pattern next time a validator gets a narrow,
 > shape-specific patch instead of a structural one.
+>
+> **To directly close the loop on §3's specific claim below:** "we return
+> raw log lines to the model unfenced" is no longer true and hasn't been
+> since #11 closed (2026-07-27ish, well before this brief's original
+> writing) — `search` and `logs_for_service` results are wrapped in
+> `<untrusted_log_data>` markers before reaching the model. §3's body text
+> is dated on this point; the 2026-08-27 review found and closed adjacent
+> gaps (report-line sinks in `agent_analytics.py`, not the core query
+> path #11 already covers), it did not reopen the original claim.
 
 # Berserk MCP — where the market went, and where we sit
 
