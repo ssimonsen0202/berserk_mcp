@@ -6241,5 +6241,48 @@ class ToolSchemaValidityTest(unittest.TestCase):
         self.assertEqual(roles_schema["items"], {"type": "string"})
 
 
+class InvestigateErrorRateTest(unittest.TestCase):
+    def setUp(self):
+        self._orig = bm.run_bzrk
+
+    def tearDown(self):
+        bm.run_bzrk = self._orig
+
+    def _mock_bzrk(self, out, err=False):
+        bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: (out, err)
+
+    def test_start_node_dispatches_and_returns_text(self):
+        doc = {"Tables": [{
+            "schema": {"columns": [{"name": "service"}, {"name": "errors"}]},
+            "rows": [["checkout", 5]],
+        }]}
+        self._mock_bzrk(json.dumps(doc))
+        text, err = bm.handle_call("investigate_error_rate", {})
+        self.assertFalse(err, text)
+        self.assertIn("normal", text.lower())
+
+    def test_unknown_node_is_reported_as_error(self):
+        self._mock_bzrk("(no rows)")
+        text, err = bm.handle_call(
+            "investigate_error_rate", {"node": "not_a_real_node"})
+        self.assertTrue(err)
+        self.assertIn("unknown node", text.lower())
+
+    def test_rejects_invalid_service_name(self):
+        text, err = bm.handle_call("investigate_error_rate", {"service": "bad name!"})
+        self.assertTrue(err)
+        self.assertIn("invalid service name", text)
+        self.assertIn("allowed: letters, digits, '.', '_', '-'", text)
+
+    def test_accepts_valid_service_name(self):
+        doc = {"Tables": [{
+            "schema": {"columns": [{"name": "service"}, {"name": "errors"}]},
+            "rows": [["my-service", 5]],
+        }]}
+        self._mock_bzrk(json.dumps(doc))
+        text, err = bm.handle_call("investigate_error_rate", {"service": "my-service"})
+        self.assertFalse(err, text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

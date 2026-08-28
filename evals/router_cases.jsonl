@@ -39,3 +39,4 @@
 {"id": "jworkflow_sequences", "prompt": "What tool sequences does Claude Code use most often?", "expect_tool": "claude_workflow_insights", "tier": "small"}
 {"id": "jworkflow_hotspots", "prompt": "Where are the error hotspots across Claude Code sessions?", "expect_tool": "claude_workflow_insights", "tier": "small"}
 {"id": "jworkflow_burn", "prompt": "Which sessions are burning the most tokens relative to their targets?", "expect_tool": "claude_workflow_insights", "tier": "small"}
+{"id": "investigate_error_spike", "prompt": "why is checkout-service's error rate elevated? I want the root cause, not just the count.", "expect_tool": "investigate_error_rate"}

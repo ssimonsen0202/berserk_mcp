@@ -30,7 +30,7 @@ berserk-mcp = "berserk_mcp:main"
 berserk-claude = "ai_finops:launcher_main"
 
 [tool.setuptools]
-py-modules = ["berserk_mcp", "parser_factory", "agent_analytics", "ai_finops", "secret_scan", "ingestion_advisor", "kql_validation", "schema_registry", "_store", "_http", "tool_discovery", "quota_status"]
+py-modules = ["berserk_mcp", "parser_factory", "agent_analytics", "ai_finops", "secret_scan", "ingestion_advisor", "kql_validation", "schema_registry", "_store", "_http", "tool_discovery", "quota_status", "investigation"]
 
 [tool.setuptools.data-files]
 "share/berserk-mcp" = ["ingestion_catalog.json", "pricing_catalog.json"]

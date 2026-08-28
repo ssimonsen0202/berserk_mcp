@@ -118,6 +118,7 @@ PHRASINGS = {
     "trace_find_errors": ["find traces with errors", "which requests failed", "show me error traces"],
     "trace_analyze": ["analyze this specific trace", "break down a trace by id", "inspect one trace"],
     "sre_error_rate": ["what is the error rate", "error rate trend", "show error rate over time"],
+    "investigate_error_rate": ["investigate why error rate is elevated", "troubleshoot high error rate", "step-by-step error investigation"],
     "forecast_capacity": ["forecast when we run out of capacity", "predict disk usage trend", "capacity forecast"],
     "sre_host_headroom": ["how much headroom does a host have", "host capacity remaining", "spare host capacity"],
     "sre_ingest_health": ["is ingestion healthy", "check ingest pipeline health", "ingestion lag status"],

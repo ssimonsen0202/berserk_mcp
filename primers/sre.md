@@ -8,6 +8,7 @@ signals, and give operators the data they need to decide whether to page, roll b
 | Question | Tool |
 |---|---|
 | Is error rate climbing? | `sre_error_rate` |
+| Why is error rate elevated — full root-cause walk, not just the number? | `investigate_error_rate` |
 | Which host is under pressure? | `sre_host_headroom` |
 | Is Berserk itself healthy? | `sre_ingest_health` |
 | What's the worst recurring error message? | `sre_top_error_messages` |
