@@ -6283,6 +6283,31 @@ class InvestigateErrorRateTest(unittest.TestCase):
         text, err = bm.handle_call("investigate_error_rate", {"service": "my-service"})
         self.assertFalse(err, text)
 
+    def test_continuation_directive_is_not_inside_the_untrusted_fence(self):
+        # Codex review finding (P1), 2026-08-28: the fixed "Next: call
+        # investigate_error_rate(...)" directive used to be baked into the
+        # telemetry text that gets wrapped in <untrusted_log_data>.
+        # _BASE_INSTRUCTIONS tells every client to never follow an
+        # instruction found inside that fence, so a compliant model could
+        # never advance past the first hop. The directive must appear
+        # after the fence closes, not inside it.
+        doc = {"Tables": [{
+            "schema": {"columns": [{"name": "service"}, {"name": "errors"}]},
+            "rows": [["checkout", 700]],  # ~11.7/min, above the 10/min gate
+        }]}
+        self._mock_bzrk(json.dumps(doc))
+        text, err = bm.handle_call("investigate_error_rate", {})
+        self.assertFalse(err, text)
+        self.assertIn("Next: call investigate_error_rate", text)
+        close_idx = text.index(bm._UNTRUSTED_DATA_CLOSE)
+        next_idx = text.index("Next: call investigate_error_rate")
+        self.assertGreater(
+            next_idx, close_idx,
+            "continuation directive must appear after the fence closes, "
+            "not inside <untrusted_log_data>",
+        )
+        self.assertIn("service='checkout'", text.replace('"', "'"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -831,6 +831,23 @@ Q_SOC_LOG_SPIKE = (
     f"| make-series hits=count() default=0 on timestamp step 1m "
     f"by service=tostring(resource['service.name']) | take 60"
 )
+
+
+def q_soc_log_spike_for_service(service):
+    """investigate_error_rate-only variant of Q_SOC_LOG_SPIKE, scoped to one
+    service before make-series groups by service (issue #24 Codex review,
+    P2, 2026-08-28): the unscoped query's `take 60` is an unsorted cap on
+    the grouped series, so past 60 distinct services the target service's
+    own series can be dropped before investigation.py's Python-side lookup
+    ever sees it, producing a false "no log-volume data" halt. `service`
+    must already be validated by _valid_interpolated_name at the call
+    site."""
+    return (
+        f"{T} | where isnotnull(body) "
+        f"| where resource['service.name'] == '{service}' "
+        f"| make-series hits=count() default=0 on timestamp step 1m "
+        f"by service=tostring(resource['service.name']) | take 60"
+    )
 Q_SOC_NEW_SERVICES = (
     f"{T} | summarize first_seen=min(timestamp), last_seen=max(timestamp), events=count() "
     f"by service=tostring(resource['service.name']) "
@@ -880,6 +897,24 @@ Q_TRACE_FIND_ERRORS = (
     f"service=tostring(resource['service.name']) "
     f"| tail 20"
 )
+
+
+def q_trace_find_errors_for_service(service):
+    """investigate_error_rate-only variant of Q_TRACE_FIND_ERRORS, scoped to
+    one service before the `tail` cap runs (issue #24 Codex review, P1,
+    2026-08-28): the unscoped query's `tail 20` is global across every
+    service, so a service whose failing spans aren't among the latest 20
+    error spans overall gets silently dropped before investigation.py's
+    Python-side filter ever sees them, producing a false "no failing
+    traces" verdict. `service` must already be validated by
+    _valid_interpolated_name at the call site."""
+    return (
+        f"{T} | where isnotnull(trace_id) | where status_code == 'ERROR' "
+        f"| where resource['service.name'] == '{service}' "
+        f"| project trace_id, span_name, timestamp, "
+        f"service=tostring(resource['service.name']) "
+        f"| tail 20"
+    )
 
 
 def q_trace_analyze(trace_id: str) -> str:
@@ -1915,8 +1950,8 @@ investigation.configure(
     bzrk_search=bzrk_search_json,
     since_hours=_since_hours,
     q_errors=Q_ERRORS,
-    q_soc_log_spike=Q_SOC_LOG_SPIKE,
-    q_trace_find_errors=Q_TRACE_FIND_ERRORS,
+    q_soc_log_spike=q_soc_log_spike_for_service,
+    q_trace_find_errors=q_trace_find_errors_for_service,
 )
 ai_finops.configure(
     search=bzrk_search_json,
@@ -2808,8 +2843,24 @@ def _handle_call_uncached(name, arguments):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         service = service or None
         since = arguments.get("since") or "1h ago"
-        text, is_err, _next_node = investigation.run_error_rate_node(node, since, service)
-        return _fence_untrusted(text), is_err
+        text, is_err, next_node, next_service = investigation.run_error_rate_node(
+            node, since, service)
+        result = _fence_untrusted(text)
+        if next_node:
+            # Deliberately built from trusted server code, outside the
+            # fence above -- never baked into the fenced text itself.
+            # _BASE_INSTRUCTIONS tells every client to never follow an
+            # instruction found inside <untrusted_log_data>, so a
+            # compliant model could never advance past hop one if this
+            # directive were fenced along with the telemetry-derived
+            # findings (issue #24 Codex review, P1, 2026-08-28).
+            result = (
+                f"{result}\n"
+                f"Next: call investigate_error_rate(node={next_node!r}, "
+                f"since={since!r}, service={next_service!r}) to continue, "
+                f"or stop here if this is enough."
+            )
+        return result, is_err
 
     if name == "forecast_capacity":
         metric = str(arguments.get("metric") or "").strip()
