@@ -263,3 +263,55 @@ Sample size is 2 cases against 2 models -- enough to prove the harness works
 end-to-end and that the core fenced-extraction mechanism functions, not
 enough to draw a general reliability number. More cases belong to whoever
 picks up issue #77 or extends this file.
+
+## Addendum, 2026-08-29: multi-server setting (issue #78)
+
+Every eval this project has run before this tests berserk-mcp's tools in
+isolation. Real agents usually don't work that way -- an agent asking about
+`checkout-service`'s error rate plausibly also has a Slack or GitHub MCP
+server loaded in the same context. Multiple 2026 MCP benchmarks (MCP-Bench,
+MCP-Atlas) explicitly test this and report that "strong models maintain
+stable performance across multi-server settings, while weaker/small models
+show clear degradation."
+
+Added `--with-foreign-tools` to `evals/run_eval.py`: appends a fixture
+9-tool Slack/GitHub-shaped schema (`evals/foreign_tools_fixture.py`, never
+executed, just present as schema noise) alongside berserk-mcp's real tools.
+Ran the full 47-case set against the three production-recommended models,
+isolated vs. combined:
+
+| Model | Isolated | Combined | Delta |
+|---|---|---|---|
+| `deepseek/deepseek-v4-flash` (default) | 45/47 (96%) | 44/47 (94%) | -2pp |
+| `deepseek/deepseek-chat` (escalation) | 43/47 (91%) | 46/47 (98%) | **+6pp** |
+| `mistralai/mistral-saba` (fast tier) | 43/47 (91%) | 41/47 (87%) | -4pp |
+
+**This is a mixed result, reported honestly rather than fit to the
+hypothesis.** `mistral-saba` -- already the weakest of the three -- shows
+the clearest degradation, consistent with the literature. `deepseek-v4-flash`
+shows a small drop. `deepseek-chat` improved, which contradicts the simple
+"weaker models degrade more" story. Each run here is a single pass
+(`--repeats 1`, matching every other eval in this document); a few
+percentage points on a 47-case set is 1-3 individual cases, and real API
+sampling isn't perfectly deterministic even at `temperature=0`. This is not
+enough data to confidently separate a true multi-server effect from
+run-to-run noise -- averaging over `--repeats 3` or more, for whoever
+extends this, would answer that properly.
+
+**One concrete finding worth flagging regardless of the aggregate number:**
+on `mistral-saba`, `investigate_error_spike` -- the flagship case for the
+tool this whole session's earlier work focused on -- passes in isolation
+but fails with foreign tools present, routing to `sre_error_rate` instead.
+The same case is fine on both other models in both conditions. This is a
+real, reproducible instance of the effect the benchmarks describe, even if
+the aggregate numbers above don't universally confirm it: a tool that
+correctly routes in isolation can still lose to an unrelated tool's noise
+once the schema gets bigger, on the weaker tier specifically.
+
+### Reproducing this
+
+```bash
+python3 evals/run_eval.py evals/router_cases.jsonl --backend openai \
+  --base-url https://openrouter.ai/api/v1 --key-env OPENROUTER_API_KEY \
+  --model <model> --tool-choice auto --with-foreign-tools
+```

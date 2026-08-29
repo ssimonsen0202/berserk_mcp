@@ -481,6 +481,10 @@ def main():
     ap.add_argument("--repeats", type=int, default=1)
     ap.add_argument("--limit", type=int, default=0, help="run only first N cases")
     ap.add_argument("--tool-choice", default="", help="override tool_choice")
+    ap.add_argument("--with-foreign-tools", action="store_true",
+                    help="also send a fixture Slack/GitHub-shaped tool schema alongside "
+                         "berserk-mcp's own tools, simulating a real agent that has other, "
+                         "unrelated MCP servers loaded in the same context (issue #78)")
     # Two-tier routing flags (Phase 3.3)
     ap.add_argument("--tier-policy", action="store_true",
                     help="enable two-tier routing: small model routes, deep model handles "
@@ -515,6 +519,9 @@ def main():
     backend = args_ns.backend
     if backend in ("openai", "ollama", "lmstudio"):
         oa_tools = to_openai_tools(tools)
+        if args_ns.with_foreign_tools:
+            import foreign_tools_fixture
+            oa_tools = oa_tools + foreign_tools_fixture.to_openai_foreign_tools()
         base = args_ns.base_url or {
             "openai": "https://api.openai.com/v1",
             "ollama": "http://127.0.0.1:11434/v1",
@@ -532,6 +539,9 @@ def main():
                 base, key, args_ns.model, system, prior_messages, oa_tools, tc)
     elif backend == "anthropic":
         an_tools = to_anthropic_tools(tools)
+        if args_ns.with_foreign_tools:
+            import foreign_tools_fixture
+            an_tools = an_tools + foreign_tools_fixture.to_anthropic_foreign_tools()
         key = os.environ.get(args_ns.key_env or "ANTHROPIC_API_KEY", "")
         if not key:
             sys.exit("ANTHROPIC_API_KEY not set in environment.")
