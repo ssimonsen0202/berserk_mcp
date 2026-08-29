@@ -182,15 +182,16 @@ def call_mock(user, tools):
             return "search"
         if "schema" in p or "tables" in p or "columns" in p:
             return "schema"
-        if "claude" in p and "error" in p:
+        cc_agent = "claude" in p or "codex" in p
+        if cc_agent and "error" in p:
             return "claude_errors"
-        if "claude" in p and ("tool" in p and "use" in p):
+        if cc_agent and ("tool" in p and "use" in p):
             return "claude_tools"
-        if "claude" in p and "session" in p:
+        if cc_agent and "session" in p:
             return "claude_sessions"
-        if "claude" in p and "search" in p:
+        if cc_agent and "search" in p:
             return "claude_search"
-        if "claude" in p:
+        if cc_agent:
             return "claude_recent"
         if "log" in p:
             return "logs_for_service"

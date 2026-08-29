@@ -16,6 +16,8 @@
 {"id": "cc_tools", "prompt": "Which tools has Claude Code used the most?", "expect_tool": "claude_tools"}
 {"id": "cc_errors", "prompt": "Were there any failed tool calls in Claude Code recently?", "expect_tool": "claude_errors"}
 {"id": "cc_search", "prompt": "Search the Claude Code logs for the word timeout.", "expect_tool": "claude_search", "expect_args": {"term": "timeout"}}
+{"id": "cc_agent_codex", "prompt": "What has Codex CLI been doing in the last hour?", "expect_tool": "claude_recent", "expect_args": {"agent": "codex"}}
+{"id": "cc_agent_codex_search", "prompt": "Search Codex CLI's logs for the word timeout.", "expect_tool": "claude_search", "expect_args": {"term": "timeout", "agent": "codex"}}
 {"id": "ambiguous_load", "prompt": "Which of my VMs is the most overloaded on CPU?", "expect_tool": "host_cpu"}
 {"id": "ambiguous_hot_container", "prompt": "Find the single hottest container by processor usage.", "expect_tool": "top_cpu"}
 {"id": "list_saved", "prompt": "What custom queries have I saved so far?", "expect_tool": "list_saved"}

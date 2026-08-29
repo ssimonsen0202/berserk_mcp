@@ -128,3 +128,62 @@ shape:
 - `mistral-small-3.2-24b-instruct`'s numbers come from the same 69-tool
   OpenRouter eval as everything else here, not from an actual local
   deployment -- self-hosted latency/behavior is not yet verified.
+
+## Addendum, 2026-08-29: `investigate_error_rate` re-check (70-tool schema)
+
+`investigate_error_rate` (issue #24) shipped after the sweep above ran, so
+the schema grew from 69 to 70 tools and `evals/router_cases.jsonl` grew from
+41 to 42 cases (new case: `investigate_error_spike`). Only the mock
+keyword router had ever tested that case before this. Re-ran the full
+42-case set through the three OpenRouter models this doc recommends for
+production, at `tool_choice=auto`:
+
+| Model | Tool-sel | Arg acc | `investigate_error_spike` | Cost (42 cases) |
+|---|---|---|---|---|
+| `deepseek/deepseek-v4-flash` (default) | 95% (40/42) | 95% | routed correctly | $0.0240 |
+| `deepseek/deepseek-chat` (escalation) | 93% (39/42) | 95% | routed correctly | $0.3286 |
+| `mistralai/mistral-saba` (fast tier) | 88% (37/42) | 95% | **routed to `sre_service_health` instead** | $0.0306 |
+
+All three scores hold steady or improve slightly versus the 08-23 sweep
+(deepseek-chat 93%→93%, deepseek-v4-flash 88%→95%, mistral-saba 83%→88%) --
+not a like-for-like comparison (41 vs. 42 cases), but no regression either.
+
+**Real finding:** `mistral-saba`, this doc's recommended fast/latency tier,
+does not reliably reach the new tool -- it picked a plausible neighbor
+(`sre_service_health`) instead of `investigate_error_rate` on the one case
+that exercises it. `deepseek-v4-flash` (the default tier) and
+`deepseek-chat` (the escalation tier) both got it right. This does not
+change the recommendation above, since `investigate_error_rate` sits behind
+the default tier in normal operation -- but it is a concrete reason not to
+route SRE-lane traffic through the fast tier alone if the caller expects
+`investigate_error_rate` to be reachable. Worth re-checking after any
+future tool-description change to `investigate_error_rate` or
+`sre_service_health` aimed at sharpening the distinction between them.
+
+## Addendum, 2026-08-29: `agent` parameter re-check (v1.26.0, issue #42)
+
+`claude_recent`/`claude_sessions`/`claude_tools`/`claude_errors`/`claude_search`
+took an optional `agent` parameter in v1.26.0 (issue #42), but no eval case
+had ever exercised whether a real model actually supplies it. Added two
+cases (`cc_agent_codex`, `cc_agent_codex_search`) that ask about "Codex
+CLI" instead of "Claude Code" and expect `agent="codex"` in the call.
+
+| Model | Both cases | Notes |
+|---|---|---|
+| `deepseek/deepseek-v4-flash` (default) | 2/2, exact `agent="codex"` both times | |
+| `mistralai/mistral-saba` (fast tier) | 1/2 | got the plain-recent case right; on the search case it picked the raw `search` escape hatch instead of `claude_search` |
+
+Same pattern as the `investigate_error_rate` check above: the fast tier
+handles the common case but misses on a less obvious phrasing. Not a
+blocker for the current recommendation, but a second data point that
+`mistral-saba` is the tier to watch first if routing accuracy regresses in
+production, not the default tier.
+
+Also fixed while adding these cases: `evals/run_eval.py`'s mock keyword
+router gated every `claude_*` branch on the literal substring `"claude"`,
+so a prompt that says "Codex CLI" instead of "Claude Code" fell through to
+the wrong default and would have silently failed the CI gate the same way
+the `investigate_error_rate` case did on 2026-08-28 (see the PR #70 CI
+history). Extended each branch to match `"claude" in p or "codex" in p`
+before adding the new cases, verified locally with `ci_gate.py` before
+either landed.
