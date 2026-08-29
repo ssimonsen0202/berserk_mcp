@@ -189,13 +189,15 @@ def call_mock(user, tools):
             return "claude_tools"
         if cc_agent and "session" in p:
             return "claude_sessions"
-        if cc_agent and "search" in p:
+        if cc_agent and ("search" in p or ("find" in p and "word" in p)):
             return "claude_search"
         if cc_agent:
             return "claude_recent"
+        if "healthy" in p or "rollback signal" in p:
+            return "sre_service_health"
         if "log" in p:
             return "logs_for_service"
-        if "root cause" in p or ("investigat" in p and "error" in p):
+        if "root cause" in p or "causing" in p or ("investigat" in p and "error" in p):
             return "investigate_error_rate"
         if "error" in p:
             return "errors_by_service"
