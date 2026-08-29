@@ -123,14 +123,14 @@ def _http_error_message(error):
     return f"HTTP {code} from backend"
 
 
-def call_openai_compatible(base_url, api_key, model, system, user, tools, tool_choice):
+def _openai_chat_call(base_url, api_key, model, messages, tools, tool_choice):
+    """Shared by the single-turn and multi-turn OpenAI-compatible callers --
+    both just build a different `messages` list and hand it here."""
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = "Bearer " + api_key
     body = {"model": model, "temperature": 0, "max_tokens": 512,
-            "tools": tools, "tool_choice": tool_choice,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}]}
+            "tools": tools, "tool_choice": tool_choice, "messages": messages}
     data, dt = _post(base_url.rstrip("/") + "/chat/completions", headers, body)
     msg = data["choices"][0]["message"]
     calls = msg.get("tool_calls") or []
@@ -144,17 +144,44 @@ def call_openai_compatible(base_url, api_key, model, system, user, tools, tool_c
     return None, {}, dt, data.get("usage", {})
 
 
-def call_anthropic(api_key, model, system, user, tools, tool_choice):
+def call_openai_compatible(base_url, api_key, model, system, user, tools, tool_choice):
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    return _openai_chat_call(base_url, api_key, model, messages, tools, tool_choice)
+
+
+def call_openai_compatible_multi_turn(base_url, api_key, model, system, prior_messages,
+                                       tools, tool_choice):
+    """Like call_openai_compatible, but `prior_messages` is a full OpenAI-shaped
+    conversation (user ask, assistant tool_call, tool result) instead of a bare
+    user string -- issue #75, testing whether a model continues a multi-hop tool
+    flow correctly, not just picks the first tool."""
+    messages = [{"role": "system", "content": system}] + prior_messages
+    return _openai_chat_call(base_url, api_key, model, messages, tools, tool_choice)
+
+
+def _anthropic_messages_call(api_key, model, system, messages, tools, tool_choice):
+    """Shared by the single-turn and multi-turn Anthropic callers."""
     headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01",
                "content-type": "application/json"}
     body = {"model": model, "max_tokens": 512, "temperature": 0, "system": system,
-            "tools": tools, "tool_choice": tool_choice,
-            "messages": [{"role": "user", "content": user}]}
+            "tools": tools, "tool_choice": tool_choice, "messages": messages}
     data, dt = _post("https://api.anthropic.com/v1/messages", headers, body)
     for block in data.get("content", []):
         if block.get("type") == "tool_use":
             return block["name"], block.get("input", {}), dt, data.get("usage", {})
     return None, {}, dt, data.get("usage", {})
+
+
+def call_anthropic(api_key, model, system, user, tools, tool_choice):
+    return _anthropic_messages_call(
+        api_key, model, system, [{"role": "user", "content": user}], tools, tool_choice)
+
+
+def call_anthropic_multi_turn(api_key, model, system, prior_messages, tools, tool_choice):
+    """Like call_anthropic, but `prior_messages` is a full Anthropic-shaped
+    conversation (user ask, assistant tool_use block, user tool_result block)
+    instead of a bare user string -- see call_openai_compatible_multi_turn."""
+    return _anthropic_messages_call(api_key, model, system, prior_messages, tools, tool_choice)
 
 
 def call_mock(user, tools):
@@ -211,6 +238,59 @@ def call_mock(user, tools):
             return "list_hosts"
         return "list_containers"
     return pick(), {}, 0.0, {}
+
+
+# ---------- multi-turn fixtures (issue #75) ----------
+def build_investigate_hop1_fixture(top_service="checkout", top_errors=700, since="1h ago"):
+    """Run the real investigate_error_rate dispatch (start node) against a
+    mocked bzrk backend, returning the exact fenced response text a real MCP
+    client would see. Reused as fixture content for multi-turn eval cases so
+    the fixture can never drift from actual server behavior -- imports
+    berserk_mcp directly and monkeypatches run_bzrk, the same pattern
+    tests/test_berserk_mcp.py's InvestigateErrorRateTest already uses. This
+    is fixture generation, not a routing-accuracy measurement, so importing
+    the module directly (rather than going through the MCP stdio protocol
+    like the rest of this file does) is the right tool here."""
+    import berserk_mcp as bm
+    doc = {"Tables": [{
+        "schema": {"columns": [{"name": "service"}, {"name": "errors"}]},
+        "rows": [[top_service, top_errors]],
+    }]}
+    orig_run_bzrk = bm.run_bzrk
+    bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: (json.dumps(doc), False)
+    try:
+        text, _is_err = bm.handle_call("investigate_error_rate", {"since": since})
+    finally:
+        bm.run_bzrk = orig_run_bzrk
+    return text
+
+
+def build_multi_turn_messages(is_anthropic, prompt, hop1_text):
+    """Build the prior-turn conversation for a multi-turn case: the user's
+    original question, the assistant's first investigate_error_rate call
+    (with no arguments, matching how a real model starts an investigation),
+    and the tool's real fenced hop-1 response. Shaped per-backend since
+    OpenAI-compatible and Anthropic APIs represent a tool call/result
+    differently."""
+    if is_anthropic:
+        return [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": [{
+                "type": "tool_use", "id": "toolu_hop1",
+                "name": "investigate_error_rate", "input": {},
+            }]},
+            {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": "toolu_hop1", "content": hop1_text,
+            }]},
+        ]
+    return [
+        {"role": "user", "content": prompt},
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": "call_hop1", "type": "function",
+            "function": {"name": "investigate_error_rate", "arguments": "{}"},
+        }]},
+        {"role": "tool", "tool_call_id": "call_hop1", "content": hop1_text},
+    ]
 
 
 # ---------- usage/cost extraction ----------
@@ -444,6 +524,10 @@ def main():
 
         def run_one(user):
             return call_openai_compatible(base, key, args_ns.model, system, user, oa_tools, tc)
+
+        def run_multi_turn(prior_messages):
+            return call_openai_compatible_multi_turn(
+                base, key, args_ns.model, system, prior_messages, oa_tools, tc)
     elif backend == "anthropic":
         an_tools = to_anthropic_tools(tools)
         key = os.environ.get(args_ns.key_env or "ANTHROPIC_API_KEY", "")
@@ -453,9 +537,21 @@ def main():
 
         def run_one(user):
             return call_anthropic(key, args_ns.model, system, user, an_tools, tc)
+
+        def run_multi_turn(prior_messages):
+            return call_anthropic_multi_turn(
+                key, args_ns.model, system, prior_messages, an_tools, tc)
     else:  # mock
         def run_one(user):
             return call_mock(user, tools)
+
+        def run_multi_turn(prior_messages):
+            # A keyword matcher has no way to extract a value out of the
+            # fenced tool-result text -- an honest, always-wrong floor,
+            # not a harness limitation. Multi-turn cases are never added
+            # to the mock-gated router_cases.jsonl / ci_gate.py file, so
+            # this never affects the CI accuracy threshold.
+            return None, {}, 0.0, {}
 
     label = f"{backend}:{args_ns.model or 'mock'}"
     print(f"\n=== berserk-mcp router eval — {label} "
@@ -463,12 +559,24 @@ def main():
     print(f"{'case':<22}{'expected':<20}{'got':<20}{'tool':<6}{'arg':<5}{'ms':>7}")
     print("-" * 80)
 
+    is_anthropic = backend == "anthropic"
     rows, tool_hits, arg_hits, lat = [], 0, 0, []
     total = 0
     for case in cases:
         for _ in range(args_ns.repeats):
             try:
-                name, cargs, dt, usage = run_one(case["prompt"])
+                if "multi_turn" in case:
+                    mt = case["multi_turn"]
+                    hop1_text = build_investigate_hop1_fixture(
+                        top_service=mt.get("top_service", "checkout"),
+                        top_errors=mt.get("top_errors", 700),
+                        since=mt.get("since", "1h ago"),
+                    )
+                    prior_messages = build_multi_turn_messages(
+                        is_anthropic, case["prompt"], hop1_text)
+                    name, cargs, dt, usage = run_multi_turn(prior_messages)
+                else:
+                    name, cargs, dt, usage = run_one(case["prompt"])
             except urllib.error.HTTPError as e:
                 sys.exit("\n" + _http_error_message(e))
             except Exception as e:
