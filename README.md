@@ -1145,8 +1145,17 @@ concurrency-safe store writes, role-visibility enforcement, and
 outbound-HTTP hardening. Each control has a name and an adversarial
 regression test. See [Security controls](docs/security-controls.md) for
 the full list of about 30 controls, plus the audit history: a hand audit, a
-differential re-review, and an external scanner pass across three tools,
-all with zero true findings outstanding.
+differential re-review, and an external scanner pass across three tools.
+One open finding as of 2026-08-29: the HTTP transport's DNS-rebinding
+protection (`BERSERK_MCP_HTTP_ALLOWED_HOSTS`) is opt-in rather than
+defaulted on for a loopback bind — see
+[docs/mcp-conformance.md](docs/mcp-conformance.md) and
+[issue #84](https://github.com/ssimonsen0202/berserk_mcp/issues/84).
+
+The server has also been run against the official
+[MCP conformance test suite](https://github.com/modelcontextprotocol/conformance) —
+results, including that one finding, in
+[docs/mcp-conformance.md](docs/mcp-conformance.md).
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
