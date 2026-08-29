@@ -187,3 +187,43 @@ the `investigate_error_rate` case did on 2026-08-28 (see the PR #70 CI
 history). Extended each branch to match `"claude" in p or "codex" in p`
 before adding the new cases, verified locally with `ci_gate.py` before
 either landed.
+
+## Addendum, 2026-08-29: description fix for both `mistral-saba` misses
+
+Both real misses recorded above (`investigate_error_rate` -> `sre_service_health`,
+and the `claude_search` -> raw `search` miss) trace to specific, fixable gaps
+in the tool descriptions, not a model-capability limit:
+
+- `investigate_error_rate`'s description never said "root cause" or "why"
+  anywhere, even though that's the literal language in the failing prompt.
+  Added `Root-cause investigation for an elevated error rate` up front and
+  `'why is X's error rate up'`/`'find the root cause'` to the use-for
+  examples -- the same pattern `sre_service_health` and `sre_error_rate`
+  already use for their own disambiguation.
+- `claude_search` led with "Claude Code" and buried the multi-agent
+  capability in a parenthetical. Named a concrete other agent (Codex CLI)
+  up front instead, so the prompt's own words textually match the
+  description.
+
+Added 3 new eval cases rather than re-testing only the 2 known misses, to
+avoid overfitting the fix to one example each: a second, differently-phrased
+root-cause prompt (`investigate_error_root_cause_2`); a guard-rail case
+confirming a plain health question still routes to `sre_service_health`,
+not `investigate_error_rate` (`sre_service_health_guardrail`); and a second
+cross-agent search phrasing (`cc_agent_codex_search_2`).
+
+| Model | Before (44 cases) | After (47 cases) | Notes |
+|---|---|---|---|
+| `mistralai/mistral-saba` (fast tier) | 38/44 (86%) | 43/47 (91%) | both originally-targeted misses now pass; guard-rail passes (no overcorrection); zero regressions on previously-passing cases |
+| `deepseek/deepseek-v4-flash` (default) | 40/42 (95%, prior addendum) | 45/47 (96%) | all 6 new/changed cases correct, no regression from the description edit |
+
+**One residual case, deliberately not chased further:** `investigate_error_root_cause_2`
+("auth-service's errors jumped this morning -- dig in and tell me what's
+actually causing it") still routes to `sre_error_rate` on `mistral-saba`
+even after adding a second disambiguation line for that tool specifically.
+`deepseek-v4-flash` gets it right. Per the same held-out-validation
+discipline this addendum is built on, this was not chased with a third
+description tweak targeting this one phrasing -- that risks overfitting the
+description to a single adversarial example rather than a real, general
+gap. Left as a known limit; folded into issue #77's planned structured
+tool-description audit rather than fixed reactively here.

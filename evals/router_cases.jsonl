@@ -18,6 +18,9 @@
 {"id": "cc_search", "prompt": "Search the Claude Code logs for the word timeout.", "expect_tool": "claude_search", "expect_args": {"term": "timeout"}}
 {"id": "cc_agent_codex", "prompt": "What has Codex CLI been doing in the last hour?", "expect_tool": "claude_recent", "expect_args": {"agent": "codex"}}
 {"id": "cc_agent_codex_search", "prompt": "Search Codex CLI's logs for the word timeout.", "expect_tool": "claude_search", "expect_args": {"term": "timeout", "agent": "codex"}}
+{"id": "investigate_error_root_cause_2", "prompt": "auth-service's errors jumped this morning — dig in and tell me what's actually causing it.", "expect_tool": "investigate_error_rate"}
+{"id": "sre_service_health_guardrail", "prompt": "Is api-gateway healthy right now?", "expect_tool": "sre_service_health", "expect_args": {"service": "api-gateway"}}
+{"id": "cc_agent_codex_search_2", "prompt": "Find the word panic in Codex CLI's tool output.", "expect_tool": "claude_search", "expect_args": {"term": "panic", "agent": "codex"}}
 {"id": "ambiguous_load", "prompt": "Which of my VMs is the most overloaded on CPU?", "expect_tool": "host_cpu"}
 {"id": "ambiguous_hot_container", "prompt": "Find the single hottest container by processor usage.", "expect_tool": "top_cpu"}
 {"id": "list_saved", "prompt": "What custom queries have I saved so far?", "expect_tool": "list_saved"}
