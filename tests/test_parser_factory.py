@@ -392,6 +392,38 @@ class LlmClientTest(ParserFactoryTestBase):
         self.assertEqual(len(self._llm_get_calls), 2)
 
 
+class HermesModelsUrlTest(unittest.TestCase):
+    """Pure function, no fixtures needed. Real bug found live, 2026-08-29:
+    the old positional derivation (rsplit('/', 3)[0] + '/api/models')
+    happened to work for the hardcoded localhost default but produced a
+    doubled, wrong URL for a real provider at a different path depth."""
+
+    def test_localhost_default_shape_unchanged(self):
+        self.assertEqual(
+            pf.hermes_models_url("http://localhost:3000/api/chat/completions"),
+            "http://localhost:3000/api/models",
+        )
+
+    def test_openrouter_shape_now_correct(self):
+        # Confirmed live: the old derivation produced
+        # https://openrouter.ai/api/api/models (HTTP 404). The real
+        # endpoint is https://openrouter.ai/api/v1/models.
+        self.assertEqual(
+            pf.hermes_models_url("https://openrouter.ai/api/v1/chat/completions"),
+            "https://openrouter.ai/api/v1/models",
+        )
+
+    def test_url_not_ending_in_chat_completions_returns_none(self):
+        self.assertIsNone(pf.hermes_models_url("https://example.com/v1/completions"))
+
+    def test_url_with_trailing_slash_returns_none(self):
+        # Deliberately strict rather than guessing at a normalized form --
+        # an unexpected shape should fail loudly (None -> a clear error
+        # upstream), not silently produce a wrong URL.
+        self.assertIsNone(
+            pf.hermes_models_url("https://example.com/v1/chat/completions/"))
+
+
 # ---------- P2: source profiling and schema knowledge store ----------
 class SourceProfileTest(ParserFactoryTestBase):
     def test_fieldstats_resource_paths_are_normalized(self):

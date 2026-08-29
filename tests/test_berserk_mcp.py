@@ -4498,6 +4498,38 @@ class DoctorPreflightTest(unittest.TestCase):
             if orig_env is not None:
                 os.environ["BERSERK_LLM_HERMES_URL"] = orig_env
 
+    def test_llm_reachability_probes_the_correct_url_for_a_real_provider(self):
+        # Real bug found live, 2026-08-29: _doctor_check_llm_reachability
+        # derived /api/models positionally (rsplit('/', 3)[0]), which
+        # happened to work for the hardcoded localhost default but produced
+        # a doubled, wrong URL for a provider at a different path depth --
+        # https://openrouter.ai/api/v1/chat/completions derived to
+        # https://openrouter.ai/api/api/models (real HTTP 404 against the
+        # live API). Now routed through the shared, suffix-based
+        # parser_factory.hermes_models_url(), fixed for both. This test
+        # locks the actual URL probed, not just pass/fail.
+        import _http
+        orig_get = _http.http_get_json
+        orig_env = os.environ.pop("BERSERK_LLM_HERMES_URL", None)
+        os.environ["BERSERK_LLM_HERMES_URL"] = "https://openrouter.ai/api/v1/chat/completions"
+        probed = {}
+
+        def fake_get(url, headers, timeout=120):
+            probed["url"] = url
+            return {"data": []}, None
+
+        _http.http_get_json = fake_get
+        try:
+            result = bm._doctor_check_llm_reachability()
+            self.assertEqual(probed["url"], "https://openrouter.ai/api/v1/models")
+            self.assertEqual(result["status"], "pass")
+        finally:
+            _http.http_get_json = orig_get
+            if orig_env is not None:
+                os.environ["BERSERK_LLM_HERMES_URL"] = orig_env
+            else:
+                os.environ.pop("BERSERK_LLM_HERMES_URL", None)
+
     def test_canonloom_reachability_skip_when_unconfigured(self):
         orig = os.environ.pop("CANONLOOM_SERVER_URL", None)
         try:
