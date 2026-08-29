@@ -66,9 +66,21 @@ the [`bzrk`](https://docs.bzrk.dev) CLI and log in to a profile — see the
 ## Tests
 
 Every PR runs the full suite on Linux + Windows × Python 3.9 / 3.11 / 3.12. Any
-non-draft PR targeting `main` also gets an automatic CodeRabbit review (config:
+non-draft PR targeting `main` also gets a CodeRabbit review (config:
 `.coderabbit.yaml`), and security-sensitive changes get a manual Codex review
-pass. Locally:
+pass.
+
+CodeRabbit's own automatic-review trigger needs 10+ GitHub stars on the repo,
+which this project doesn't have yet — reviews still happen, just via an
+explicit `@coderabbitai review` comment. A scheduled workflow
+(`.github/workflows/coderabbit-review-trigger.yml`, hourly, matching the
+account's 1-review/hour plan cap) posts that comment on the oldest open PR
+that hasn't been reviewed at its current commit yet, so this doesn't depend
+on a human remembering to ask. Once the repo passes the star threshold,
+CodeRabbit's own automatic review takes over and this workflow becomes a
+no-op (it always checks for an unreviewed commit first).
+
+Locally:
 
 ```bash
 python tests/test_berserk_mcp.py     # fast focused run, must stay green

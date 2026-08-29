@@ -1,0 +1,64 @@
+name: Trigger CodeRabbit review
+
+# This repo's CodeRabbit plan does not auto-review PRs (GitHub gates
+# automatic review behind a 10-star minimum, and this repo has fewer).
+# CodeRabbit still reviews on request -- commenting "@coderabbitai review"
+# on a PR works regardless of star count. This workflow does that on a
+# schedule so open PRs get reviewed without a human remembering to ask.
+#
+# The account's plan allows 1 included review per hour, so this workflow
+# triggers at most one PR per run and skips any PR CodeRabbit has already
+# reviewed at its current head commit, so a quiet repo doesn't waste the
+# hourly allowance re-triggering an unchanged PR.
+
+on:
+  schedule:
+    - cron: "0 * * * *"  # hourly, matching the plan's 1-review/hour cap
+  workflow_dispatch: {}   # manual run button, for testing or an on-demand nudge
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment @coderabbitai review on the oldest un-reviewed open PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Non-draft PRs targeting main, oldest-updated first -- matches
+          # .coderabbit.yaml's own auto_review scope, and means no PR
+          # starves behind a busier one.
+          prs=$(gh pr list --repo "$REPO" --state open --base main \
+                --json number,isDraft,updatedAt,headRefOid \
+                --jq '[.[] | select(.isDraft == false)] | sort_by(.updatedAt)')
+
+          # Process substitution, not a pipe -- a piped `while read` runs in
+          # a subshell in bash, so `exit` inside it would only end the
+          # subshell and fall through to the "nothing to do" message below
+          # even after a successful trigger. This form keeps the loop in
+          # the current shell.
+          while read -r pr_json; do
+            pr=$(jq -r '.number' <<<"$pr_json")
+            head_sha=$(jq -r '.headRefOid' <<<"$pr_json")
+
+            last_reviewed_sha=$(gh api "repos/$REPO/pulls/$pr/reviews" \
+              --jq '[.[] | select(.user.login == "coderabbitai[bot]")] | last | .commit_id // ""')
+
+            if [ "$last_reviewed_sha" = "$head_sha" ]; then
+              echo "PR #$pr: already reviewed at $head_sha, skipping"
+              continue
+            fi
+
+            echo "PR #$pr: triggering review at $head_sha"
+            gh pr comment "$pr" --repo "$REPO" --body "@coderabbitai review"
+            exit 0  # one trigger per run -- matches the account's hourly cap
+          done < <(echo "$prs" | jq -c '.[]')
+
+          echo "No open, non-draft PR against main needs a review right now."
