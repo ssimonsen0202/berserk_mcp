@@ -227,3 +227,39 @@ description tweak targeting this one phrasing -- that risks overfitting the
 description to a single adversarial example rather than a real, general
 gap. Left as a known limit; folded into issue #77's planned structured
 tool-description audit rather than fixed reactively here.
+
+## Addendum, 2026-08-29: first multi-turn eval run (issue #75)
+
+`investigate_error_rate`'s hop-2 continuation had never been tested against
+a real model -- the single-shot `router_cases.jsonl` harness structurally
+can only test `node="start"`. The new multi-turn mode (`evals/run_eval.py`
++ `evals/router_cases_multiturn.jsonl`) seeds a real hop-1 fixture (built by
+calling the actual server dispatch, not a hand-written string) and checks
+whether the model correctly reads the fenced Result line and continues the
+investigation with the right `node`/`service`.
+
+| Model | `investigate_hop2_extract_service_checkout` | `investigate_hop2_extract_service_auth` |
+|---|---|---|
+| `deepseek/deepseek-v4-flash` | pass -- correctly extracted `service="checkout"` from the fenced text and continued | fail -- abandoned the explicit continuation instruction, called `sre_error_rate` instead |
+| `mistralai/mistral-saba` | pass -- same correct extraction | fail -- made no tool call at all |
+
+**What this confirms:** the round-3 Codex fix (PR #72) -- never echoing the
+raw service value unfenced, instead pointing the model at the fenced Result
+line -- works. Both models successfully extracted `"checkout"` out of fenced
+text they were told not to treat as instructions, on the first real test of
+that specific mechanism.
+
+**What this surfaces as new:** the second case fails for both models, but
+not because of multi-turn mechanics -- the prompt ("auth-service's errors
+jumped -- find the root cause") is the same hard root-cause phrasing that
+already failed for `mistral-saba` in single-shot mode
+(`investigate_error_root_cause_2`, addendum above). Here it fails even
+though the model is *handed* the correct continuation instruction in the
+previous turn, which is a stronger failure than picking the wrong tool cold
+-- worth noting for issue #77's audit, not a new bug in the multi-turn
+harness itself.
+
+Sample size is 2 cases against 2 models -- enough to prove the harness works
+end-to-end and that the core fenced-extraction mechanism functions, not
+enough to draw a general reliability number. More cases belong to whoever
+picks up issue #77 or extends this file.
