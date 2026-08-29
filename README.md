@@ -11,7 +11,7 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 > guess costs you a retry. Every tool in berserk-mcp wraps one *verified*
 > Kusto/KQL query. The model picks an intent — for example `top_cpu`,
 > `errors_by_service`, or `sre_host_headroom`. The query itself stays fixed.
-> This fixed-query design is the whole point. It lets even small or cheap
+> This fixed-query design is the core idea. It lets even small or cheap
 > models answer observability questions reliably.
 
 - **Works with Claude Desktop, Claude Code, and any MCP client.** By default, berserk-mcp speaks MCP protocol version `2025-06-18` over stdio (newline-delimited JSON-RPC 2.0). It implements every required method — `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call` — with strict envelope validation and adversarial regression tests. See [Connect it to a client](#connect-it-to-a-client) for `claude_desktop_config.json` and `claude mcp add` recipes.
@@ -22,7 +22,7 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 - **Cross-platform.** berserk-mcp runs anywhere the `bzrk` CLI runs, including Windows.
 - **Safe by construction.** berserk-mcp uses fixed queries. It validates input on every free-text tool. It never calls `shell=True`. The Berserk token never touches this code.
 - **Self-extending (new in 1.7).** An optional [parser factory](#parser-factory-llm-generated-query-packs) detects *new* sources arriving in Berserk. It uses an LLM to author, execute-verify, and save KQL "query packs" for each new source. The design follows Microsoft Sentinel's [ASIM parser AI agent](https://learn.microsoft.com/en-gb/azure/sentinel/normalization-create-parsers-ai-agent). It tries cheap providers first, enforces hard runaway fail-safes, and never lets a generated query overwrite a human one.
-- **Knowledge-artifact lifecycle bridge.** An optional [CanonLoom bridge](#canonloom-knowledge-artifact-lifecycle-bridge) exposes a separate, self-hosted service for turning a source URL into a validated, versioned skill artifact — source acquisition, relevance scoring, artifact-diff comparison, generation, structural/injection validation, and git-committed promotion. berserk-mcp only speaks to CanonLoom's HTTP API; nothing about CanonLoom's own dependencies (FastAPI, Anthropic, `pygit2`, and its stricter Python 3.14+ floor) touches berserk-mcp's own zero-dependency footprint.
+- **Knowledge-artifact lifecycle bridge.** An optional [CanonLoom bridge](#canonloom-knowledge-artifact-lifecycle-bridge) exposes a separate, self-hosted service that turns a source URL into a validated, versioned skill artifact. This covers source acquisition, relevance scoring, artifact-diff comparison, generation, structural/injection validation, and git-committed promotion. berserk-mcp only speaks to CanonLoom's HTTP API. None of CanonLoom's own dependencies (FastAPI, Anthropic, `pygit2`, and its stricter Python 3.14+ floor) touch berserk-mcp's own zero-dependency footprint.
 
 > ## ⚠️ Disclaimer — please read
 >
@@ -46,13 +46,13 @@ Current version: **1.27.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
-- **v1.27.0** (2026-08-28) — Five security findings from an independent
-  Codex review (KQL validator bypasses, unfenced telemetry attributes, an
-  injection-delimiter gap, an OAuth-header redirect leak, and a
-  string-truthiness authorization bug), and `investigate_error_rate`
-  (issue #24): a fixed, step-by-step decision-tree investigation tool for
-  elevated error rate, scoped to SRE/Ops. See
-  [details](docs/releases/v1.27.0.md).
+- **v1.27.0** (2026-08-28) — Five security fixes from an independent Codex
+  review: KQL validator bypasses, unfenced telemetry attributes, a gap in
+  the injection delimiter, an OAuth-header redirect leak, and a bug that
+  read the text `"false"` as true. Also adds `investigate_error_rate`
+  (issue #24): a fixed, step-by-step tool that walks a decision tree to
+  find the cause of an elevated error rate, scoped to the SRE/Ops lane.
+  See [details](docs/releases/v1.27.0.md).
 - **v1.26.0** (2026-08-24) — Untrusted-data fencing, tool tiers, just-in-time
   tool discovery (`find_tool`, 92% measured token reduction), a live
   quota-window check (`claude_quota_status`), an `agent` parameter on the base
@@ -96,26 +96,27 @@ fail-safes, role profiles, and the initial release) are in
 ## Why this exists
 
 **Berserk** is a self-hosted, OTEL-native, schemaless observability engine. It
-is built for petabyte scale. Berserk ingests logs, metrics, and traces over
-OTLP. You query this data with a Kusto-style language (KQL), through the
-`bzrk` CLI or the web UI. Berserk is [headless by design](https://www.bzrk.dev):
-built for "agents asking questions," not for dashboards. Berserk supplies the
-storage and the query engine. On its own, Berserk still assumes the asker —
-human or agent — already knows KQL.
+handles petabyte scale. Berserk ingests logs, metrics, and traces over OTLP.
+You query this data with a Kusto-style language (KQL), through the `bzrk`
+CLI or the web UI. Berserk is [headless by design](https://www.bzrk.dev). It
+is built for agents that ask questions, not for dashboards. Berserk supplies
+the storage and the query engine. On its own, Berserk still assumes the
+asker — human or agent — already knows KQL.
 
-**The gap.** A raw query language is the one thing LLMs handle badly. Point a
-model at `bzrk` directly, and it invents table names, mistypes fields, and
-burns tokens on retries. Two obvious fixes were tried first: pasting the
-schema into the prompt, and few-shot KQL examples. Neither fix held — the
+**The gap.** LLMs handle raw query languages badly. If you point a model at
+`bzrk` directly, it invents table names, mistypes fields, and wastes tokens
+on retries. Two fixes seemed obvious at first: paste the schema into the
+prompt, or give the model few-shot KQL examples. Neither fix held — the
 model kept guessing. Hardcoding the queries did work.
 
 **What berserk-mcp adds.** berserk-mcp is a translation layer in front of
 Berserk. It exposes observability *intents* as MCP tools — for example
-`top_cpu`, `errors_by_service`, `sre_service_health`. Each tool wraps a query
-already verified against the live schema. The model never authors KQL; it
-picks an intent and a time window. berserk-mcp does **not** replace Berserk's
-storage, query engine, or UI. It makes them **agent-accessible and reliable
-on small, cheap, or local models**.
+`top_cpu`, `errors_by_service`, `sre_service_health`. Each tool wraps a
+query that berserk-mcp has already verified against the live schema. The
+model never authors KQL. It only picks an intent and a time window.
+berserk-mcp does **not** replace Berserk's storage, query engine, or UI. It
+makes them **agent-accessible and reliable on small, cheap, or local
+models**.
 
 Beyond the fixed tools, berserk-mcp adds three layers that default Berserk
 does not have:
@@ -161,19 +162,20 @@ agent-facing surface:
 
 Berserk ships its own MCP server, `bzrk mcp`. It is a raw query console:
 `query`/`start_query` sessions, table/database discovery, and `get_docs` for
-KQL reference. Its design bet is "the agent writes the KQL." That console is
-the right substrate for a human-grade KQL author. It is the wrong everyday
-interface for most models — models guess table names, botch aggregations,
-and burn tokens on retries.
+KQL reference. Its design assumes the agent writes the KQL itself. That
+console suits a skilled human KQL author well. It is the wrong everyday
+interface for most models — they guess table names, botch aggregations, and
+waste tokens on retries.
 
-berserk-mcp is the **deterministic interpretation layer on top of the same
-substrate**. The model picks a verified intent. berserk-mcp does the math.
-The answer comes back as a conclusion — a verdict, a baseline deviation, a
-cost trend — not a row dump.
+berserk-mcp is a **deterministic layer on top of the same backend**. The
+model picks a verified intent. berserk-mcp does the math. The answer comes
+back as a conclusion — a verdict, a baseline deviation, a cost trend — not a
+row dump.
 
-Use the native MCP when a human-grade KQL author drives the session. Use
+Use the native MCP server when a skilled KQL author drives the session. Use
 berserk-mcp when you want *any* model, including small local ones, to answer
-reliably. Both servers run side-by-side in the same client without conflict.
+reliably. Both servers run side by side in the same client without
+conflict.
 
 ### Sovereign and defense deployments (fully local stack)
 
@@ -185,12 +187,12 @@ air-gapped environments:
 - **berserk-mcp** is pure Python stdlib. It has no third-party packages, no
   telemetry, and no phone-home. You can audit its five small files in an
   afternoon.
-- **The LLM layer can run locally too.** The parser factory's provider ladder
-  speaks the OpenAI-compatible API. Any locally hosted open-weight model —
-  via Ollama, llama.cpp, vLLM, or LM Studio — plugs in as the `hermes`
-  endpoint. No frontier API is required. The fixed-query design collapses
-  the capability bar the model needs: it picks a tool and a time window; it
-  never authors KQL.
+- **The LLM layer can run locally too.** The parser factory's provider
+  ladder speaks the OpenAI-compatible API. Any locally hosted open-weight
+  model — through Ollama, llama.cpp, vLLM, or LM Studio — plugs in as the
+  `hermes` endpoint. No frontier API is required. The fixed-query design
+  also lowers the skill the model needs: it only picks a tool and a time
+  window. It never authors KQL.
 - **Defense-in-depth on the egress path.** Even when an LLM endpoint is
   configured, it receives only structural telemetry — key names, shapes,
   redacted excerpts — never raw values. The endpoint URL is
@@ -199,18 +201,18 @@ air-gapped environments:
 **What we've actually verified about self-hosted model viability**, not just
 asserted (full methodology and data:
 [docs/model-routing-cost-validation-2026-08-23.md](docs/model-routing-cost-validation-2026-08-23.md)).
-This corrects earlier guidance in this section — "small local models route
-reliably" turned out not to hold once measured against this server's real
-70-tool schema, and a sovereignty-focused reader deserves the accurate
-number, not the hopeful one:
+This corrects earlier guidance in this section. That guidance claimed
+"small local models route reliably." Measured against this server's real
+70-tool schema, that claim did not hold. A reader building a sovereign
+deployment needs the accurate number, not the hopeful one:
 
 - **7-8B local models are not viable.** Qwen2.5:7b and Llama3.1:8b, tested
   locally via Ollama against the real schema, scored 5-7% tool-selection
-  accuracy — far below a dumb keyword-matching baseline (66%). Public
-  tool-calling benchmarks (BFCL) rank these families well, but those
-  benchmarks measure a much smaller tool count; they are not a reliable
-  predictor at this schema size (see the now-superseded shortlist in
-  [`evals/model-eval-plan.md`](evals/model-eval-plan.md)).
+  accuracy — far below a simple keyword-matching baseline (66%). Public
+  tool-calling benchmarks (BFCL) rank these families well. But those
+  benchmarks measure a much smaller tool count. They do not predict
+  performance reliably at this schema size (see the now-superseded
+  shortlist in [`evals/model-eval-plan.md`](evals/model-eval-plan.md)).
 - **The measured reliability floor is the ~24B parameter class**, and one
   real candidate at that tier is confirmed genuinely self-hostable under an
   open license: `mistral-small-3.2-24b-instruct` (Apache 2.0, confirmed on
@@ -232,13 +234,13 @@ number, not the hopeful one:
 Berserk's own positioning splits into two cases.
 [AI Ops](https://www.bzrk.dev/use-cases/ai-ops/) says "any MCP-aware agent can
 query your telemetry directly." [Defence](https://www.bzrk.dev/use-cases/defense/)
-says "nothing leaves the trust boundary you control." Taken separately, these
-two cases pull in opposite directions. The AI Ops case assumes a capable
-model that authors KQL and reasons over raw results. But a frontier model is
-itself an egress dependency, and the Defence case rules that out.
-Berserk-the-engine solves this for the *data*: self-hosted, WORM storage, no
-foreign jurisdiction. It does not solve this for the *reasoning layer* on top
-of the data.
+says "nothing leaves the trust boundary you control." Taken separately,
+these two cases conflict. The AI Ops case assumes a capable model that
+authors KQL and reasons over raw results. But a frontier model is itself an
+egress dependency, and the Defence case rules that out. Berserk itself
+solves this for the *data*: self-hosted, WORM storage, no foreign
+jurisdiction. It does not solve this for the *reasoning layer* on top of
+the data.
 
 berserk-mcp closes that gap. The model only ever picks a tool and a time
 window. It never authors KQL and never sees raw values. This means a small,
@@ -250,14 +252,14 @@ boundary, not just the telemetry store.
 This is not hypothetical. One production-like deployment uses a
 Discord-facing local agent to answer on-call questions against Berserk. The
 agent logs every tool call and every full prompt/reply back into Berserk
-itself: model name, redacted arguments, redacted results, and session ID, all
-as structured, queryable records. This is the same durable,
-back-testable "what did the agent actually do" record that Berserk's AI Ops
-page highlights in its Ethira governance case study — running end-to-end
-against berserk-mcp instead of a bespoke integration. The `claude_*` tool
-family (`claude_cost_report`, `claude_token_burn`, `claude_workflow_insights`,
-and others) delivers the same token-usage/BI story from that page. These
-tools are already implemented and already answering real queries.
+itself: model name, redacted arguments, redacted results, and session ID —
+all as structured, queryable records. Berserk's AI Ops page highlights this
+same durable, back-testable "what did the agent actually do" record in its
+Ethira governance case study. Here it runs end-to-end against berserk-mcp
+instead of a bespoke integration. The `claude_*` tool family
+(`claude_cost_report`, `claude_token_burn`, `claude_workflow_insights`, and
+others) delivers the same token-usage/BI story from that page. These tools
+are already implemented and already answering real queries.
 
 The target operating model is **two-tier local**. A locally hosted
 open-weight model at the measured reliability floor (~24B class — see
@@ -345,7 +347,7 @@ flowchart TB
 
 The diagram makes three things clear:
 
-1. **The bearer token never enters this code.** `bzrk` owns the token in its own configuration. berserk-mcp invokes it with an argv list: no shell, no token in berserk-mcp process memory, no token in berserk-mcp logs. Private-file permissions are platform-specific; see [Security](#security).
+1. **The bearer token never enters this code.** `bzrk` owns the token in its own configuration. berserk-mcp invokes it with an argv list: no shell, no token in berserk-mcp process memory, no token in berserk-mcp logs. Private-file permissions are platform-specific — see [Security](#security).
 2. **The learning loop closes back into the cheap lane.** Pay the capable model once to author and verify a query. After that, the cheap lane runs the query free, forever, via `run_saved`.
 3. **The worker is the automation bridge.** When `request_discovery` queues a new source, the worker drains the queue on its own — it discovers the source, authors KQL, and saves the query, with no operator KQL authoring.
 
@@ -650,18 +652,18 @@ limitation and directs the caller to `search` with an exact `has` term.
 
 ## Cost & BI reporting
 
-A canonical cost and attribution layer, separate from the MCP tool calls
-above — driven by CLI flags and a wrapper binary (`berserk-claude`), not
-`tools/call`. Native Claude Code OpenTelemetry is the preferred input.
-Reports normalize input, output, cache-read, cache-creation, long-context,
-and chargeable server-tool usage into a versioned public API-equivalent
-cost — not an invoice, and an unknown model is left unpriced rather than
-assigned a guessed rate. Launch Claude with governed work context so
-telemetry attributes to a feature without inspecting prompts or source
-code; import planning/actuals through a neutral CSV/NDJSON contract; export
-management-ready BI datasets and dashboards from the same model. Generated
-outputs contain aggregates and coverage metadata, never prompts, code, or
-cleartext owner IDs.
+berserk-mcp also ships a separate cost and attribution layer. It runs
+through CLI flags and a wrapper binary (`berserk-claude`), not `tools/call`.
+Native Claude Code OpenTelemetry is the preferred input. Reports normalize
+input, output, cache-read, cache-creation, long-context, and chargeable
+server-tool usage into one versioned, public-API-equivalent cost. This is
+not an invoice. An unknown model stays unpriced rather than getting a
+guessed rate. You can launch Claude with governed work context, so
+telemetry attributes to a feature without exposing prompts or source code.
+You import planning and actuals through a neutral CSV/NDJSON contract. You
+export management-ready BI datasets and dashboards from the same model.
+Generated outputs contain aggregates and coverage metadata only — never
+prompts, code, or cleartext owner IDs.
 
 Full CLI reference (flags, business-data record shapes, export/dashboard
 format, privacy/permission details):
@@ -1092,12 +1094,12 @@ so this script fills that gap without berserk-mcp needing to know it.
 
 ## Choosing a model
 
-The whole point of the fixed-query design is that **the model never writes
-KQL**. It only picks a tool and a time window. This collapses the
-capability bar: instead of "can author correct Kusto," a model only needs
-"can do basic tool-calling." That is what makes cheap and local models
-viable in principle — but the real floor is higher than earlier guidance
-here claimed. A real-model eval sweep (2026-08-22/23; 8 models, 2 local via
+The fixed-query design's core idea is that **the model never writes KQL**.
+It only picks a tool and a time window. This lowers the skill the model
+needs: instead of "can author correct Kusto," it only needs "can do basic
+tool-calling." That is what makes cheap and local models viable in
+principle. But the real floor is higher than earlier guidance here
+claimed. A real-model eval sweep (2026-08-22/23; 8 models, 2 local via
 Ollama and 6 cloud via OpenRouter; full methodology and per-model table in
 [docs/model-routing-cost-validation-2026-08-23.md](docs/model-routing-cost-validation-2026-08-23.md))
 found:
@@ -1137,33 +1139,35 @@ model routes correctly. Keep new tool descriptions that way.
 
 ## Security
 
-Defense in depth across the execution boundary, KQL validation, secret/PII
-redaction, generation-pipeline resource bounds, concurrency-safe store
-writes, role-visibility enforcement, and outbound-HTTP hardening — each
-control has a name and an adversarial regression test. The full list of
-~30 controls, plus the audit history (hand audit, differential re-review,
-and an external scanner pass across three tools, all with 0 true findings
-outstanding): [Security controls](docs/security-controls.md).
+berserk-mcp applies defense in depth across the execution boundary, KQL
+validation, secret/PII redaction, generation-pipeline resource bounds,
+concurrency-safe store writes, role-visibility enforcement, and
+outbound-HTTP hardening. Each control has a name and an adversarial
+regression test. See [Security controls](docs/security-controls.md) for
+the full list of about 30 controls, plus the audit history: a hand audit, a
+differential re-review, and an external scanner pass across three tools,
+all with zero true findings outstanding.
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## Wrong-answer containment
 
-berserk-mcp's own controls against a *confident false negative* — an agent
-reporting a clean bill of health because a query silently matched zero rows,
-went stale, or was fixed by a query the tool refused to run — consolidated
-under one name. Most open-source observability MCP implementations' stated
-hallucination defenses (rate limiting, query timeouts, read-only execution)
-protect backend stability; few address this query-result failure mode, which
-is the one that actually pages someone at 4am.
+berserk-mcp groups its controls against a *confident false negative* under
+one name. A confident false negative is an agent reporting a clean bill of
+health when a query silently matched zero rows, went stale, or the tool
+refused to run a broken query. Most open-source observability MCP
+implementations state hallucination defenses like rate limiting, query
+timeouts, and read-only execution. These protect backend stability. Few
+address this query-result failure mode — the one that actually pages
+someone at 4am.
 
-Six controls, each with a locking test: field-access guidance for nested
-OTLP attributes, full-text search term-boundary guidance, KQL validation
-rejecting blockers before execution, schema-drift warnings on saved
-queries, a result envelope that disambiguates the bare `(no rows)`
+Six controls make this up, each with a locking test: field-access guidance
+for nested OTLP attributes, full-text search term-boundary guidance, KQL
+validation that rejects blockers before execution, schema-drift warnings on
+saved queries, a result envelope that tells apart the bare `(no rows)`
 sentinel, and untrusted-data fencing against a smuggled instruction in a
-log line. Full detail, known limitations, and the regression test for
-each: [docs/wrong-answer-containment.md](docs/wrong-answer-containment.md).
+log line. See [docs/wrong-answer-containment.md](docs/wrong-answer-containment.md)
+for full detail, known limits, and the regression test for each.
 
 ## Testing
 
@@ -1198,10 +1202,10 @@ confirms, among other things:
 
 ## Extending — add a new tool in five minutes
 
-The whole point of berserk-mcp is fixed, verified queries. Adding a tool is
-a small, mechanical ritual. Aim to keep the routing surface small (about 20
-core tools), and let the long tail accumulate behind `save_query`/`run_saved`
-via the learning loop.
+berserk-mcp's core idea is fixed, verified queries. Adding a tool is a
+short, mechanical task. Keep the routing surface small (about 20 core
+tools). Let less common tools accumulate behind `save_query`/`run_saved`
+through the learning loop.
 
 Before writing KQL, read the [Berserk KQL performance guide](docs/kql-performance-guide.md).
 It covers index-friendly predicates, `tail` for recency, narrow projections,
