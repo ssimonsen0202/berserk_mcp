@@ -289,7 +289,6 @@ flowchart LR
   classDef mcp       fill:#161b22,stroke:#8b949e,color:#c9d1d9
   classDef security  fill:#3a0d0d,stroke:#f85149,color:#c9d1d9
   classDef berserk   fill:#1d1d3a,stroke:#a371f7,color:#c9d1d9
-  classDef optional  fill:#0d1117,stroke:#8b949e,color:#8b949e,stroke-dasharray:5 5
 
   User([User / agent · Claude Code, Claude Desktop, etc.]):::user
 
@@ -303,20 +302,22 @@ flowchart LR
   Bzrk["bzrk CLI\nholds the bearer token"]:::berserk
   Gw[("Your Berserk instance\nKQL engine + storage")]:::berserk
 
-  CL["CanonLoom\n(separate project, optional)"]:::optional
-
   User -- "ask a question" --> Tools
   Tools -. "argv, no shell" .-> Bzrk
   Bzrk -- "read-only, bearer auth" --> Gw
   Redact -- "filtered answer" --> User
-  Tools -. "only if CANONLOOM_SERVER_URL is set" .-> CL
 ```
 
-Three things worth knowing about this diagram:
+Two things worth knowing about this diagram:
 
 1. **The bearer token never enters this code.** `bzrk` owns the token in its own configuration. berserk-mcp invokes it with an argv list: no shell, no token in berserk-mcp process memory, no token in berserk-mcp logs. Private-file permissions are platform-specific — see [Security](#security).
 2. **Every tool response passes through the secret/PII filter before reaching a model.** It fails closed: if the redaction mode is unset, it defaults to the safest setting (`redact`) rather than passing text through unfiltered.
-3. **CanonLoom is a separate project, not a dependency.** It's an independent knowledge-lifecycle pipeline reached over plain HTTP, purely opt-in — every `canonloom_*` tool checks `CANONLOOM_SERVER_URL` at call time and returns a clear configuration error if it's unset. Every other tool in this diagram works fully with `CANONLOOM_SERVER_URL` never set.
+
+This diagram covers the core, always-on path. berserk-mcp also bridges
+optionally to CanonLoom — a separate project, reached over plain HTTP,
+purely opt-in via `CANONLOOM_SERVER_URL`. Every `canonloom_*` tool checks
+that variable at call time and returns a clear configuration error if it's
+unset; nothing in the diagram above requires it to be running.
 
 This is the high-level picture. The cheap/deep model split, the
 learning-loop cache, the discovery worker, role filtering, and transport
