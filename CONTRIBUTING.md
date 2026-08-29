@@ -65,7 +65,10 @@ the [`bzrk`](https://docs.bzrk.dev) CLI and log in to a profile — see the
 
 ## Tests
 
-Every PR runs the full suite on Linux + Windows × Python 3.9 / 3.11 / 3.12. Locally:
+Every PR runs the full suite on Linux + Windows × Python 3.9 / 3.11 / 3.12. Any
+non-draft PR targeting `main` also gets an automatic CodeRabbit review (config:
+`.coderabbit.yaml`), and security-sensitive changes get a manual Codex review
+pass. Locally:
 
 ```bash
 python tests/test_berserk_mcp.py     # fast focused run, must stay green
