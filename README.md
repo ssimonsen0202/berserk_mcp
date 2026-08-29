@@ -289,23 +289,26 @@ flowchart TB
   classDef cheap     fill:#0d3a1d,stroke:#3fb950,color:#c9d1d9
   classDef deep      fill:#3a1d0d,stroke:#d29922,color:#c9d1d9
   classDef mcp       fill:#161b22,stroke:#8b949e,color:#c9d1d9
+  classDef security  fill:#3a0d0d,stroke:#f85149,color:#c9d1d9
   classDef berserk   fill:#1d1d3a,stroke:#a371f7,color:#c9d1d9
   classDef store     fill:#0d1117,stroke:#8b949e,color:#c9d1d9,stroke-dasharray:3 3
+  classDef optional  fill:#0d1117,stroke:#8b949e,color:#8b949e,stroke-dasharray:5 5
 
   User([User · Slack bot · agent framework]):::user
 
   subgraph H["MCP Host  (Claude Code · Claude Desktop · LangChain · ChatOps bot)"]
     direction TB
     Cheap["⚡ DEFAULT lane\ncheap / local model\ngpt-4.1-mini · Haiku · self-hosted ≥24B\nonly picks tools + time windows"]:::cheap
-    Deep["🧠 @deep / scheduled lane\ncapable model\nsonnet · GPT-class\nauthors + verifies KQL"]:::deep
+    Deep["🧠 @deep / scheduled lane\ncapable model\nsonnet · GPT-class\nauthors + verifies KQL · generate_parser"]:::deep
   end
 
-  subgraph M["berserk-mcp  (stdio · JSON-RPC 2.0 · zero-dep stdlib Python)"]
+  subgraph M["berserk-mcp  (stdio, always-on · optional HTTP transport · JSON-RPC 2.0 · zero-dep stdlib Python)"]
     direction TB
     RoleFilter["Role filter  BERSERK_MCP_ROLE=sre|soc|claude|ops|all\ntools/list filtered at protocol level\nprimer injected at initialize"]:::mcp
     Tools["Fixed tools — verified KQL\ntop_cpu · errors_by_service · host_cpu\nlogs_for_service · sre_* · soc_* · claude_*"]:::mcp
-    Disc["Discovery tools\nlist_metrics · discover_schema\ncontainer_hosts · list_services · schema"]:::mcp
+    Disc["Discovery tools\nfind_tool (JIT, BERSERK_MCP_DISCOVERY=1)\nlist_metrics · discover_schema\ncontainer_hosts · list_services · schema"]:::mcp
     Learn["Learning loop\nsearch → save_query → run_saved\nverify-before-persist · amendments log · 500 cap"]:::mcp
+    Redact["Secret / PII output filter\napply_output_filter — every tool response\nfail-closed: unset mode defaults to redact"]:::security
     Queue[("discovery_queue.json\nknown_sources.json\namendments_log.json")]:::store
     Store[("learned.json\n~/.config/berserk-mcp")]:::store
   end
@@ -319,6 +322,11 @@ flowchart TB
     Tbl[("default table\nOTLP logs · metrics · traces")]:::berserk
   end
 
+  subgraph CL["CanonLoom  (separate project, optional)"]
+    direction TB
+    CLGw["canonloom-server HTTP API\nrequires CANONLOOM_SERVER_URL"]:::optional
+  end
+
   User -- "natural-language Q" --> Cheap
   User -- "@deep prompt · once-a-day cron" --> Deep
 
@@ -329,6 +337,7 @@ flowchart TB
 
   Deep -- "discover → search KQL → save_query" --> Learn
   Deep -- "request_discovery" --> Queue
+  Deep -. "canonloom_run_pipeline / list_artifacts / etc." .-> CLGw
 
   Queue --> Worker
   Worker -- "save_query per source" --> Learn
@@ -342,14 +351,30 @@ flowchart TB
   Bzrk -- "read-only KQL over bearer auth" --> Gw
   Gw --> Tbl
 
+  Tools --> Redact
+  Disc --> Redact
+  Learn --> Redact
+  Redact -- "filtered result" --> Cheap
+  Redact -. "filtered result" .-> Deep
+
   Learn -. "saved queries reusable by Cheap forever" .-> Cheap
 ```
 
-The diagram makes three things clear:
+The diagram makes four things clear:
 
 1. **The bearer token never enters this code.** `bzrk` owns the token in its own configuration. berserk-mcp invokes it with an argv list: no shell, no token in berserk-mcp process memory, no token in berserk-mcp logs. Private-file permissions are platform-specific — see [Security](#security).
-2. **The learning loop closes back into the cheap lane.** Pay the capable model once to author and verify a query. After that, the cheap lane runs the query free, forever, via `run_saved`.
-3. **The worker is the automation bridge.** When `request_discovery` queues a new source, the worker drains the queue on its own — it discovers the source, authors KQL, and saves the query, with no operator KQL authoring.
+2. **Every tool response passes through the output filter before reaching a model.** `apply_output_filter` runs on the result of every tool call, not just the dedicated `scan_secrets` audit tool — it fails closed: if the redaction mode is unset, it defaults to the safest setting (`redact`) rather than passing text through unfiltered.
+3. **The learning loop closes back into the cheap lane.** Pay the capable model once to author and verify a query. After that, the cheap lane runs the query free, forever, via `run_saved`.
+4. **The worker is the automation bridge.** When `request_discovery` queues a new source, the worker drains the queue on its own — it discovers the source, authors KQL, and saves the query, with no operator KQL authoring.
+
+**CanonLoom is a separate project, not a dependency.** It's an independent
+knowledge-lifecycle pipeline that berserk-mcp bridges to over plain HTTP,
+purely opt-in. Every `canonloom_*` tool reads `CANONLOOM_SERVER_URL` at call
+time and returns a clear configuration error if it's unset — there's no
+import-time coupling, no bundled client, and no code path that requires
+CanonLoom to be installed or running. Every other lane in this diagram (fixed
+tools, discovery, the learning loop, the worker) is fully functional with
+`CANONLOOM_SERVER_URL` never set.
 
 ### Example ingestion topology (not shown in the diagram)
 
