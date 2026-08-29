@@ -1,0 +1,64 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+early_access: false
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+  path_filters:
+    - "!evals/results/**"
+    - "!**/*.lock"
+    - "!docs/releases/**"
+  path_instructions:
+    - path: "berserk_mcp.py"
+      instructions: >
+        This is the MCP server dispatch table and query layer. Flag: any
+        f-string that interpolates a caller-controlled value into KQL
+        without going through _valid_interpolated_name or an equivalent
+        allowlist first; any tool result returned to the model that skips
+        _fence_untrusted on backend-derived text; any new tool whose
+        description doesn't say what it's for in plain, unambiguous
+        language (tool descriptions are this project's router -- see
+        CONTRIBUTING.md). Do not flag missing type hints or docstring
+        style; this project deliberately keeps those minimal.
+    - path: "investigation.py"
+      instructions: >
+        Fixed decision-tree investigation logic (issue #24). Flag: any
+        value derived from telemetry (not a validated caller argument)
+        that could reach model-facing output without going through the
+        same validation caller-supplied values get -- this exact class of
+        bug shipped and was fixed three times in this file's history
+        (PR #70, #72). Flag any KQL query builder that caps/limits rows
+        before grouping or deduplicating, since that class of bug has
+        also shipped here before.
+    - path: "tests/**"
+      instructions: >
+        Prefer tests that assert on real backend response shapes over
+        invented ones -- this project's convention is to verify against
+        real `bzrk --json` output before writing a parser test. A test
+        with a docstring/comment explaining what regression it guards
+        against is preferred over one with no context.
+    - path: "evals/router_cases.jsonl"
+      instructions: >
+        Each new case should be paired with a matching branch in
+        evals/run_eval.py's call_mock() if the phrasing wouldn't already
+        route correctly through the existing keyword branches -- an
+        unmatched case can silently regress the CI gate's accuracy
+        threshold (this has happened twice: PR #70, #73).
+  tools:
+    semgrep:
+      enabled: false  # this repo already gates on its own semgrep step
+                       # in CI with custom rules under .semgrep/; avoid a
+                       # second, differently-configured semgrep pass.
+
+chat:
+  auto_reply: true
