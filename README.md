@@ -136,7 +136,18 @@ does not have:
 
 Berserk is a strong human-facing observability backend on its own. berserk-mcp
 does not replace any of it. berserk-mcp sits next to Berserk and adds the
-agent-facing surface:
+agent-facing surface.
+
+As of v1.1.0, Berserk also ships its own agent: a `Chat` tab in the web UI,
+with its own tool-calling loop, doc search, and model picker. It is a
+different kind of agent than berserk-mcp, not a smaller version of it. It
+authors its own free-form queries at chat time. berserk-mcp never does
+this — every question maps to a fixed, pre-verified query the model only
+selects. This matters in practice: we tested Berserk's native `Chat`
+against our own reference deployment and it could not complete a basic
+question. It never resolved a valid database context, so every
+`list_tables`/`query` call it made failed. Full detail is in [the issue we
+filed](https://github.com/berserkdb/helm-charts/issues/2).
 
 | Capability | Default Berserk | berserk-mcp |
 |---|---|---|
@@ -145,6 +156,7 @@ agent-facing surface:
 | Web UI + `bzrk` CLI for humans | ✅ core | reuses |
 | Token auth, profiles | ✅ core | reuses (`bzrk` holds the token) |
 | **MCP surface for LLMs / agents** | — | ✅ |
+| **General-purpose chat agent** (web UI `Chat` tab, v1.1.0) | ✅ — authors its own free-form queries at chat time; broken on our reference deployment as of v1.1.0 (see above) | not applicable — berserk-mcp never authors free-form KQL |
 | **Common questions answered without authoring KQL** | requires correct Kusto → small models fail | ✅ fixed verified tools |
 | **Role-aware tool filtering** (SRE / SOC / Claude / Ops lanes) | — | ✅ `BERSERK_MCP_ROLE` env var |
 | **Role primers** injected at `initialize` | — | ✅ KQL rules, thresholds, routing guidance per lane |
