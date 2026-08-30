@@ -293,14 +293,21 @@ flowchart LR
   User([User / agent · Claude Code, Claude Desktop, etc.]):::user
 
   subgraph M["berserk-mcp (stdio · zero-dep Python)"]
-    direction LR
+    direction TB
     Tools["Tools\nquery · discover · learn"]:::mcp
     Redact["Secret / PII filter\nruns on every response"]:::security
     Tools --> Redact
   end
 
-  Bzrk["bzrk CLI\nholds the bearer token"]:::berserk
-  Gw[("Your Berserk instance\nKQL engine + storage")]:::berserk
+  subgraph T["Token boundary"]
+    direction TB
+    Bzrk["bzrk CLI\nholds the bearer token"]:::berserk
+  end
+
+  subgraph B["Your Berserk instance"]
+    direction TB
+    Gw[("KQL engine + storage")]:::berserk
+  end
 
   User -- "ask a question" --> Tools
   Tools -. "argv, no shell" .-> Bzrk
