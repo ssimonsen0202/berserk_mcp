@@ -31,6 +31,15 @@ code, command, file-content, and user-email capture disabled or redacted. The
 FinOps reports consume aggregate usage and governed identifiers, not those
 payloads.
 
+A JSONL forwarder can also derive `code.repository.id` and `code.branch.id`
+automatically from each session's own `cwd`/`gitBranch` fields, with no
+per-session configuration — see
+[OpenTelemetry setup](otel-setup.md#automatic-repositorybranch-attribution-no-extra-flags)
+for the exact attribute mapping and a verification query. Pull-request
+attribution still needs an explicit step; see that doc's
+[Pull-request attribution](otel-setup.md#pull-request-attribution-not-automatic)
+section.
+
 ## Normalized attributes
 
 The normalizer accepts native OTel names and the legacy promoted attributes.

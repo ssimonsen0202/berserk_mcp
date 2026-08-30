@@ -691,7 +691,13 @@ prompts, code, or cleartext owner IDs.
 
 Full CLI reference (flags, business-data record shapes, export/dashboard
 format, privacy/permission details):
-[docs/cost-and-bi-reporting.md](docs/cost-and-bi-reporting.md).
+[docs/cost-and-bi-reporting.md](docs/cost-and-bi-reporting.md). If nothing
+is showing up in the `claude_*` tools yet, start with
+[docs/otel-setup.md](docs/otel-setup.md) — it covers which features need
+OTel-ingested Claude Code data at all, the two ways to get it in, and what
+each collection path does and doesn't attribute automatically (repository
+and branch land automatically; pull-request numbers currently need a
+manual correlation step).
 
 ---
 
