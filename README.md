@@ -331,6 +331,50 @@ learning-loop cache, the discovery worker, role filtering, and transport
 options are covered elsewhere in this README and in the tool descriptions
 themselves.
 
+### Optional: two-lane model split, OpenRouter-backed
+
+The diagram above shows one model talking to berserk-mcp. In practice most
+deployments split that into two lanes, and either lane can be pointed at
+OpenRouter instead of calling Anthropic/OpenAI directly.
+
+```mermaid
+flowchart TB
+  classDef cheap  fill:#0d3a1d,stroke:#3fb950,color:#c9d1d9
+  classDef deep   fill:#3a1d0d,stroke:#d29922,color:#c9d1d9
+  classDef mcp    fill:#161b22,stroke:#8b949e,color:#c9d1d9
+  classDef router fill:#1d1d3a,stroke:#a371f7,color:#c9d1d9
+
+  subgraph H["MCP host"]
+    direction TB
+    Cheap["⚡ default lane\npicks tools + time windows\ncheap/local model"]:::cheap
+    Deep["🧠 @deep lane\nauthors + verifies KQL\ngenerate_parser · discover-worker"]:::deep
+  end
+
+  Cheap -- "tools/call, role-filtered" --> M["berserk-mcp"]:::mcp
+  Deep -- "generate_parser / run_discovery_worker" --> M
+
+  subgraph OR["Optional: OpenRouter"]
+    direction TB
+    RouterNode["any model on OpenRouter's catalog"]:::router
+  end
+
+  M -. "BERSERK_LLM_HERMES_URL points here instead of\nAnthropic/OpenAI directly, first in BERSERK_LLM_LADDER" .-> OR
+```
+
+**How it actually works:** berserk-mcp's own LLM calls — used only by
+`generate_parser` and the discovery worker to author and verify KQL, never
+by the query path in the diagram above — go through a provider ladder
+(`BERSERK_LLM_LADDER`, default `hermes,openai,anthropic`) that tries each
+configured provider in order. `hermes` isn't a specific vendor; it's any
+OpenAI-compatible `/chat/completions` endpoint set via
+`BERSERK_LLM_HERMES_URL` — pointing it at
+`https://openrouter.ai/api/v1/chat/completions` with an OpenRouter API key
+routes that lane through whatever model you choose on OpenRouter instead of
+paying Anthropic or OpenAI directly. This is independent of the MCP host's
+own cheap/deep model choice, which is set by whatever client you're
+running berserk-mcp inside of (Claude Code, Claude Desktop, etc.), not by
+berserk-mcp itself.
+
 ### Example ingestion topology (not shown in the diagram)
 
 The diagram above covers the **query path**: how an agent asks questions.
