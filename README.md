@@ -185,8 +185,8 @@ air-gapped environments:
 
 - **Berserk** is self-hosted. Telemetry never leaves your network.
 - **berserk-mcp** is pure Python stdlib. It has no third-party packages, no
-  telemetry, and no phone-home. You can audit its five small files in an
-  afternoon.
+  telemetry, and it never contacts an external service on its own. You can
+  audit its five small files in an afternoon.
 - **The LLM layer can run locally too.** The parser factory's provider
   ladder speaks the OpenAI-compatible API. Any locally hosted open-weight
   model — through Ollama, llama.cpp, vLLM, or LM Studio — plugs in as the
@@ -643,7 +643,7 @@ smaller models.
 Distributed-trace analysis (v1.14.0; see
 [release notes](docs/releases/v1.14.0.md)), following this table's
 `<signal>_name` field convention (`metric_name` for metrics, `body` and
-`severity_text` for logs). This feature was ported from a separate
+`severity_text` for logs). We ported this feature from a separate
 TypeScript MCP prototype that explored the same problem space.
 These tools are verified against a real Berserk cluster whose own internal
 services are self-instrumented — `service=query`, `service=gateway`, and
@@ -764,7 +764,7 @@ and never post to Discord — this avoids duplicate, noisy notifications.
 The intended division of labour is cost-efficient:
 
 - **A capable model does the rare, hard part.** It discovers the new shape, authors and verifies the query, and calls `save_query`. Trigger it two ways: on a **schedule** (a daily job that checks the discovery queue), or **on demand** ("I just added HAProxy to Berserk — add support").
-- **The cheap model reaps the result.** Every saved query is reusable for free, deterministically, via `run_saved`. Authoring KQL is the one thing small models handle badly, so this step is gated behind the stronger model. `save_query` verifies the query runs before persisting it, as a guardrail.
+- **The cheap model uses the result.** Every saved query is reusable for free, deterministically, via `run_saved`. Authoring KQL is the one thing small models handle badly, so this step is gated behind the stronger model. `save_query` verifies the query runs before persisting it, as a guardrail.
 
 This design scales because **learned queries live behind
 `list_saved`/`run_saved`**, not as first-class tools. You can learn dozens of
@@ -1153,7 +1153,7 @@ GPU over a smaller one.
   Gemini **Flash** give strong tool use at a fraction of frontier cost.
   Good for latency-sensitive ChatOps replies.
 - **Frontier models** are rarely necessary. Save them for open-ended
-  investigations that lean on `search` and `save_query`, or as an
+  investigations that use `search` and `save_query`, or as an
   escalation tier for cases a cheaper model's own routing confidence flags
   as uncertain (see `evals/escalation_policy.py`).
 
