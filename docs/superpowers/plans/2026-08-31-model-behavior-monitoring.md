@@ -845,11 +845,78 @@ TITLES["model_drift_check"] = "Model Drift Check"
 TITLES["model_drift_history"] = "Model Drift History"
 ```
 
-- [ ] **Step 4: Add dispatcher branches**
+- [ ] **Step 4: Add a model-ID validator — do not reuse `_valid_interpolated_name`**
 
-Follow the `forecast_capacity` branch at `berserk_mcp.py:2892` as the template: build KQL via `model_drift.series_kql`, run through the existing `bzrk` path, classify, and return a human summary plus the structured JSON envelope other analytical tools already return.
+**This is a trap.** `_valid_interpolated_name()` validates against `_SERVICE_RE = re.compile(r"[A-Za-z0-9._-]+")` (`berserk_mcp.py:1069`), which has **no slash**. Every real model ID is `vendor/model` — `deepseek/deepseek-v4-flash`. Reusing that validator rejects every legitimate input, and a test written with a slash-free fake model name would still pass, shipping a tool that fails on first real use.
 
-- [ ] **Step 5: Add the CLI flags**
+Add a dedicated validator alongside it, and a test that locks the slash case:
+
+```python
+# berserk_mcp.py -- near _valid_interpolated_name (line ~1077)
+
+_MODEL_ID_RE = re.compile(r"[A-Za-z0-9._/-]+")
+
+
+def _valid_model_id(value, max_chars=MAX_INTERPOLATED_NAME_CHARS):
+    """Model IDs are vendor/model (deepseek/deepseek-v4-flash), so they need
+    the slash that _SERVICE_RE deliberately excludes. Everything else stays
+    as strict: no quotes, spaces, backslashes, or KQL metacharacters, so the
+    value remains safe to interpolate into a query string."""
+    text = str(value or "")
+    return len(text) <= max_chars and bool(_MODEL_ID_RE.fullmatch(text))
+```
+
+```python
+# tests/test_berserk_mcp.py
+
+class ModelIdValidatorTest(unittest.TestCase):
+    def test_accepts_a_real_vendor_slash_model_id(self):
+        self.assertTrue(bm._valid_model_id("deepseek/deepseek-v4-flash"))
+
+    def test_rejects_quotes_and_spaces(self):
+        for bad in ("a'b", 'a"b', "a b", "a\\b", "a|b"):
+            self.assertFalse(bm._valid_model_id(bad), bad)
+
+    def test_service_validator_still_rejects_slashes(self):
+        """The existing validator keeps its narrower contract."""
+        self.assertFalse(bm._valid_interpolated_name("deepseek/deepseek-v4-flash"))
+```
+
+- [ ] **Step 5: Add the dispatcher branches**
+
+Mirror `forecast_capacity` (`berserk_mcp.py:2892`) for structure — argument validation, `bzrk_search_json`, `(no rows)` handling, and the `(text, is_error)` return — but use the new validator, and fence model names read back from Berserk.
+
+```python
+# berserk_mcp.py -- dispatcher, near the other claude-lane branches
+
+    if name == "model_drift_check":
+        model = str(arguments.get("model") or "").strip()
+        if model and not _valid_model_id(model):
+            return "invalid model id (allowed: letters, digits, '.', '_', '-', '/')", True
+        since = arguments.get("since") or "30d ago"
+        out, err = bzrk_search_json(model_drift.series_kql(model or None), since)
+        if err:
+            return _fence_untrusted(out), True
+        if not out or out.strip() == "(no rows)":
+            return (f"No canary results in {since}. Is --canary-run scheduled "
+                    f"and BERSERK_MCP_CANARY_MODELS set?"), False
+        lines = []
+        for model_name, series in model_drift.group_by_model(out).items():
+            verdict = model_drift.classify(series)
+            # The model name arrives from stored telemetry, so it is
+            # attacker-influenceable in the same way host names are in
+            # forecast_capacity -- fence it before returning it to a model.
+            fenced = _fence_untrusted(model_name, inline=True)
+            lines.append(f"{fenced}: {verdict['verdict']} "
+                         f"({verdict['confidence']}) — {verdict['reason']}")
+        return f"Model drift (window {since}):\n" + "\n".join(lines), False
+```
+
+`model_drift_history` follows the same shape, but requires `model`, returns the per-run series rather than a single verdict, and states the routing-only boundary in its output header.
+
+Task 4 must therefore also export `group_by_model(bzrk_json_text) -> dict[str, list[dict]]`. Add it to that task's Interfaces block when implementing.
+
+- [ ] **Step 6: Add the CLI flags**
 
 Alongside `--worker` and `--agent-report` (near `berserk_mcp.py:4923`):
 
@@ -862,12 +929,12 @@ Alongside `--worker` and `--agent-report` (near `berserk_mcp.py:4923`):
 
 `--drift-report` exits non-zero when any verdict is `degrading` or `step-change`, so cron and systemd can pipe it to an alert transport — matching `--agent-report`'s established contract. Discord posting reuses the existing bridge and stays off unless `BERSERK_DISCORD_ALERT_SECRET` is set; a run with nothing noteworthy posts nothing.
 
-- [ ] **Step 6: Run the full suite**
+- [ ] **Step 7: Run the full suite**
 
 Run: `python -m pytest tests/ -q`
 Expected: PASS, including `tests/test_roles.py` (lane isolation) and `tests/test_tool_discovery.py` (every shipped tool reachable via `find_tool`).
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add berserk_mcp.py tests/test_berserk_mcp.py tests/test_roles.py
