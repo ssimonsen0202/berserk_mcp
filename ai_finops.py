@@ -1097,15 +1097,28 @@ def _merge_latest(existing, incoming, key_fields):
     return [merged[key] for key in sorted(merged)]
 
 
-def _otlp_attributes(record):
-    allowed = {
-        "feature_id", "work_item_id", "project_id", "portfolio_id", "team_id",
-        "cost_center", "status", "planned_start", "planned_end",
-        "planned_hours", "planned_ai_budget_usd", "completion_pct", "repositories",
-        "branches", "pull_requests", "source_system", "source_record_id",
-        "source_updated_at", "worklog_id", "work_date", "hours", "actual_hours",
-        "recommendation_id", "decision", "owner_hash", "rationale_hash", "ts",
-    }
+_FINOPS_ATTRIBUTE_ALLOWLIST = frozenset({
+    "feature_id", "work_item_id", "project_id", "portfolio_id", "team_id",
+    "cost_center", "status", "planned_start", "planned_end",
+    "planned_hours", "planned_ai_budget_usd", "completion_pct", "repositories",
+    "branches", "pull_requests", "source_system", "source_record_id",
+    "source_updated_at", "worklog_id", "work_date", "hours", "actual_hours",
+    "recommendation_id", "decision", "owner_hash", "rationale_hash", "ts",
+})
+
+
+def _otlp_attributes(record, allowed=None):
+    """Build OTLP attributes for one record.
+
+    ``allowed`` is an allowlist, not a convenience filter: it stops a caller
+    leaking arbitrary record fields into telemetry. It defaults to the FinOps
+    set so existing callers are unaffected. A caller emitting a different
+    attribute family (the eval canary, for example) passes its own set --
+    without one, its attributes are silently dropped and the POST still
+    returns 200.
+    """
+    if allowed is None:
+        allowed = _FINOPS_ATTRIBUTE_ALLOWLIST
     attrs = []
     for key in sorted(record):
         if key not in allowed:
@@ -1129,7 +1142,8 @@ def _parse_headers(raw):
     return _http.parse_header_items(raw, force_json=True)
 
 
-def emit_otlp_records(records, service_name):
+def emit_otlp_records(records, service_name, *, scope_name="berserk-mcp.ai-finops",
+                      timestamp_ns=None, allowed_keys=None):
     if not _otlp_endpoint or not records:
         return False
     try:
@@ -1139,19 +1153,22 @@ def emit_otlp_records(records, service_name):
     except _http.UrlPolicyError as exc:
         raise ValueError(str(exc)) from None
     logs = []
-    now_ns = str(int(datetime.now(timezone.utc).timestamp() * 1_000_000_000))
+    if timestamp_ns is None:
+        stamp = str(int(datetime.now(timezone.utc).timestamp() * 1_000_000_000))
+    else:
+        stamp = str(int(timestamp_ns))
     for record in records:
         logs.append({
-            "timeUnixNano": now_ns,
+            "timeUnixNano": stamp,
             "body": {"stringValue": service_name},
-            "attributes": _otlp_attributes(record),
+            "attributes": _otlp_attributes(record, allowed=allowed_keys),
         })
     payload = {
         "resourceLogs": [{
             "resource": {"attributes": [{
                 "key": "service.name", "value": {"stringValue": service_name}
             }]},
-            "scopeLogs": [{"scope": {"name": "berserk-mcp.ai-finops"},
+            "scopeLogs": [{"scope": {"name": scope_name},
                            "logRecords": logs}],
         }]
     }

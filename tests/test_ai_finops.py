@@ -990,5 +990,42 @@ class AssetTest(unittest.TestCase):
         self.assertIn("Top expensive agents and operations", text)
 
 
+class EmitOtlpRecordsOptionsTest(unittest.TestCase):
+    def test_default_allowlist_unchanged(self):
+        """Existing callers keep the FinOps allowlist and its filtering."""
+        attrs = af._otlp_attributes({"feature_id": "OBS-1", "eval.model": "x"})
+        keys = [a["key"] for a in attrs]
+        self.assertIn("feature_id", keys)
+        self.assertNotIn("eval.model", keys)
+
+    def test_custom_allowlist_admits_only_its_own_keys(self):
+        attrs = af._otlp_attributes(
+            {"feature_id": "OBS-1", "eval.model": "x"},
+            allowed={"eval.model"},
+        )
+        keys = [a["key"] for a in attrs]
+        self.assertEqual(keys, ["eval.model"])
+
+    def test_explicit_timestamp_is_used_verbatim(self):
+        captured = {}
+
+        def fake_post(url, headers, body, **kwargs):
+            captured["body"] = json.loads(body.decode("utf-8"))
+            return 200
+
+        with mock.patch.object(af, "_otlp_endpoint", "https://example.invalid/v1/logs"), \
+             mock.patch.object(af._http, "post_bytes_status", fake_post):
+            ok = af.emit_otlp_records(
+                [{"eval.model": "m"}], "berserk-mcp-eval",
+                scope_name="berserk-mcp.canary",
+                timestamp_ns=1234567890000000000,
+                allowed_keys={"eval.model"},
+            )
+        self.assertTrue(ok)
+        logs = captured["body"]["resourceLogs"][0]["scopeLogs"][0]
+        self.assertEqual(logs["scope"]["name"], "berserk-mcp.canary")
+        self.assertEqual(logs["logRecords"][0]["timeUnixNano"], "1234567890000000000")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
