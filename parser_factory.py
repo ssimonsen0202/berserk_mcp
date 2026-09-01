@@ -404,6 +404,26 @@ def _reset_hermes_model_cache():
     _hermes_model_cache.clear()
 
 
+def hermes_models_url(url):
+    """Derive the OpenAI-compatible /models discovery endpoint from a
+    configured chat-completions URL. Suffix-based, not positional: strips
+    a trailing '/chat/completions' and appends '/models'. A purely
+    positional derivation (rsplit('/', 3)[0]) happened to work for the
+    hardcoded localhost default (http://localhost:3000/api/chat/completions
+    -> .../api/models) but produced a doubled, wrong URL for a real
+    provider with a different path depth -- confirmed live 2026-08-29:
+    https://openrouter.ai/api/v1/chat/completions derived to
+    https://openrouter.ai/api/api/models (HTTP 404) instead of the real
+    https://openrouter.ai/api/v1/models. Suffix-stripping is depth-agnostic
+    and gets both right. Returns None if the URL doesn't end with the
+    expected suffix, matching the original behavior for a URL shape this
+    can't handle."""
+    suffix = "/chat/completions"
+    if not url.endswith(suffix):
+        return None
+    return url[: -len(suffix)] + "/models"
+
+
 def _hermes_model():
     configured = os.environ.get("BERSERK_LLM_HERMES_MODEL")
     if configured:
@@ -412,9 +432,9 @@ def _hermes_model():
     cached = _hermes_model_cache.get(url)
     if cached is not None and cached[1] > time.monotonic():
         return cached[0], None
-    models_url = url.rsplit("/", 3)[0] + "/api/models" if "/api/" in url else None
+    models_url = hermes_models_url(url)
     if not models_url:
-        return None, "hermes: cannot derive /api/models from configured URL"
+        return None, "hermes: cannot derive /models from configured URL"
     key = os.environ.get("HERMES_API_KEY", "")
     headers = {"Authorization": f"Bearer {key}"} if key else {}
     out, err = _http_get_json(models_url, headers)
