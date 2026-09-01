@@ -48,6 +48,9 @@ All configuration is via environment variables. All are optional:
 | `BERSERK_MCP_HTTP_MAX_CONCURRENT_REQUESTS` | `8` | Maximum concurrent HTTP requests admitted to MCP dispatch. Excess requests return HTTP 429. |
 | `BERSERK_MCP_HTTP_USE_FORWARDED_FOR` | unset | Trust `X-Forwarded-For` only when the socket peer is in `BERSERK_MCP_HTTP_TRUSTED_PROXY_CIDRS`. Disabled by default. |
 | `BERSERK_MCP_HTTP_TRUSTED_PROXY_CIDRS` | unset | CIDRs for reverse proxies whose forwarded client IP should be trusted. Required when forwarded-header mode is enabled. |
+| `BERSERK_MCP_CANARY_MODELS` | unset | Model-behavior monitoring is entirely off unless this is set. Comma-separated list of model IDs to canary (example: `claude-3-5-sonnet-20241022,gpt-4o`). Each canary run scores the model against a frozen case set and emits results to Berserk via OTLP. |
+| `BERSERK_MCP_CANARY_REPEATS` | `3` | How many times to run each case during a canary run. Each repeat costs real money (~$0.002 per full run for `deepseek-v4-flash` as of 2026-08-29). |
+| `BERSERK_MCP_CANARY_CASES` | `evals/canary_cases.jsonl` | Path to the frozen canary case set. The version is the hash of its contents, so the version auto-updates if the file is edited. |
 
 Parser-factory (LLM parser generation) has its own env vars — see
 [Parser factory](parser-factory.md).

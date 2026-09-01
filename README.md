@@ -168,6 +168,7 @@ filed](https://github.com/berserkdb/helm-charts/issues/2).
 | **Two-lane cost model** (cheap default · on-demand `@deep`) | — | ✅ tool descriptions + annotations make this safe |
 | **KQL-injection guards** on free-text inputs | n/a (humans) | ✅ service-name allowlist · `claude_search` reject-list |
 | **Trace/span analysis** — find slow/failed traces, reconstruct a span tree with correlated logs | — | ✅ `trace_find_slow` · `trace_find_errors` · `trace_analyze` (v1.14.0; see [Trace tools](#trace-tools-all-lanes)) |
+| **Model-behavior monitoring** — detect provider changes and routing-quality regressions via scored canary and fingerprints | — | ✅ `model_drift_check` · `model_drift_history` (v1.28.0; see [Model-behavior monitoring tools](#model-behavior-monitoring-tools)) |
 | **Knowledge-artifact lifecycle pipeline** (source URL → validated skill artifact) | — | ✅ `canonloom_run_pipeline` · `canonloom_list_artifacts` · `canonloom_get_artifact` · `canonloom_freshness_report` · `canonloom_run_history`, bridged to a separate `canonloom-server` (see [CanonLoom bridge](#canonloom-knowledge-artifact-lifecycle-bridge)) |
 
 ### Why this complements Berserk's native MCP (not competes with it)
@@ -683,6 +684,24 @@ inventing a ceiling date.
 feature. On clusters where that feature is unavailable, the tool does not
 fail open or pretend exact matching is semantic — it explains the
 limitation and directs the caller to `search` with an exact `has` term.
+
+### Model-behavior monitoring tools (all lanes)
+
+Monitor whether a canaried model still performs as well as when it was chosen. Set `BERSERK_MCP_CANARY_MODELS` (a comma-separated list of model IDs) to enable the feature. The canary runs daily (via `--canary-run`), scores models against a frozen case set, and computes a behavioral fingerprint to catch provider changes.
+
+| Tool | What it answers |
+|---|---|
+| `model_drift_check` | Check whether any canaried model has drifted. Returns stable, degrading, step-change, or insufficient-data per model, with provider fingerprint status. Measures tool-routing quality only, not prose or reasoning quality. |
+| `model_drift_history` | Score and fingerprint history for one canaried model over time. Use after `model_drift_check` flags a drift verdict to investigate. |
+
+**Design notes:**
+
+- **Frozen case set.** The canary reads `BERSERK_MCP_CANARY_CASES` (default: `evals/canary_cases.jsonl`), a separate, immutable test set. The main router cases (`evals/router_cases.jsonl`) grow over time; a frozen set prevents score drops from conflating "we added harder cases" with "the model got worse".
+- **Version is self-maintaining.** The case-set version is a hash of its contents. Editing the file automatically changes the version, stopping cross-version comparison. No discipline required.
+- **Behavioral fingerprints.** Two independent signals catch provider changes: a metadata fingerprint (hashes the provider's declared model entry — context length, pricing, version) and a behavioral fingerprint (hashes temperature-0 completions for a fixed prompt set). A changed fingerprint is a signal to investigate, never proof the provider swapped the model — hardware nondeterminism and batching can change output without a model change.
+- **Noise band is provisional.** The `0.05` (5-point) noise band is marked provisional — it has not yet been calibrated against real measured variance. This value will be replaced with measured data once a calibration sweep completes.
+- **Failed runs are not zeros.** A failed canary run is recorded as a failure, never scored as zero. This prevents a provider outage from looking like a catastrophic quality drop.
+- **Cost reminder.** Canary runs cost real money. Measured cost is ~$0.002/run for `deepseek-v4-flash` as of 2026-08-29. Set repeats via `BERSERK_MCP_CANARY_REPEATS` (default 3) to tune spend.
 
 ---
 

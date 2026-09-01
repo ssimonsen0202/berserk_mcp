@@ -17,6 +17,7 @@ at all — only to use the `claude_*` lane and the enterprise cost/BI tools.
 | `claude_cost_report`, `claude_token_burn`, `claude_workflow_insights`, `claude_session_deep_dive`, `claude_loop_check`, `claude_model_fit` | Yes — same as above. |
 | `claude_spend_overview` grouped by `repository`/`branch`/`pull_request` | Yes, plus the `code.repository.id`/`code.branch.id`/`vcs.pull_request.id` attributes described below. Without them, this data reports as unattributed. |
 | `claude_feature_cost`, `claude_project_economics` | Yes, plus [governed work context](claude-code.md#governed-work-context) — these need a `feature_id`/`project_id`, which nothing derives automatically. |
+| `model_drift_check`, `model_drift_history` | No — these query eval records ingested from `BERSERK_MCP_CANARY_MODELS` (`--canary-run`), which flow directly into Berserk via OTLP. Set `BERSERK_MCP_OTLP_LOGS_ENDPOINT` to control where canary results land. |
 
 ## Two ways to get Claude Code data into Berserk
 
