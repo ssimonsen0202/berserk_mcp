@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Daily scored canary for model-behavior monitoring (issue #89).
+
+Runs the existing router eval harness against a FROZEN case set and emits
+the scores into Berserk, so a later verdict pass can tell whether a model
+still behaves the way it did when it was chosen.
+
+Why a separate frozen case set: evals/router_cases.jsonl is expected to grow
+(issue #13 Phase 2 adds targeted phrasings). If the canary read that file, a
+score drop would conflate "we added harder cases" with "the model got worse"
+and the signal would be uninterpretable. canary_cases.jsonl is frozen, and
+its version is the hash of its own contents -- editing it automatically
+changes the version, which automatically stops cross-version comparison.
+
+This module runs run_eval.py as a subprocess and reads its saved JSON rather
+than importing it, mirroring evals/ci_gate.py deliberately: run_eval.py is
+the actively-growing harness, and this consumer should not be entangled with
+its internals.
+"""
+import hashlib
+import json
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+REPO_ROOT = HERE.parent
+DEFAULT_CASES = HERE / "canary_cases.jsonl"
+RESULTS_DIR = HERE / "results"
+
+EVAL_SERVICE_NAME = "berserk-mcp-eval"
+EVAL_SCOPE_NAME = "berserk-mcp.canary"
+
+EVAL_ATTRIBUTE_ALLOWLIST = frozenset({
+    "eval.model", "eval.backend", "eval.case_set_version",
+    "eval.tool_accuracy", "eval.arg_accuracy", "eval.repeats",
+    "eval.total_cost_usd", "eval.run_id", "eval.status", "eval.error",
+    "eval.behavioral_fingerprint", "eval.provider_metadata_fingerprint",
+})
+
+
+def _hash_bytes(raw):
+    return hashlib.sha256(raw).hexdigest()[:12]
+
+
+def case_set_version(path=DEFAULT_CASES):
+    """Version is the content hash, so it can never be forgotten on edit."""
+    return _hash_bytes(Path(path).read_bytes())
+
+
+def build_eval_record(report, version, run_id, started_ns):
+    record = {
+        "eval.model": report.get("model", ""),
+        "eval.backend": report.get("backend", ""),
+        "eval.case_set_version": version,
+        "eval.tool_accuracy": float(report["tool_accuracy"]),
+        "eval.arg_accuracy": float(report["arg_accuracy"]),
+        "eval.repeats": int(report.get("repeats", 1)),
+        "eval.run_id": run_id,
+        "eval.status": "ok",
+    }
+    cost = report.get("total_cost_usd")
+    if isinstance(cost, (int, float)):
+        record["eval.total_cost_usd"] = float(cost)
+    return record
+
+
+def build_failure_record(model, backend, version, run_id, started_ns, error):
+    """A failed run is recorded as a failure, never as a score of zero --
+    otherwise a provider outage looks like a catastrophic quality drop."""
+    return {
+        "eval.model": model,
+        "eval.backend": backend,
+        "eval.case_set_version": version,
+        "eval.run_id": run_id,
+        "eval.status": "failed",
+        "eval.error": str(error)[:500],
+    }
+
+
+def _run_harness(model, backend, cases_path, repeats, timeout=900):
+    """Invoke run_eval.py and return its saved report. Mirrors ci_gate.py."""
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    before = set(RESULTS_DIR.glob("*.json"))
+    proc = subprocess.run(
+        [sys.executable, str(HERE / "run_eval.py"),
+         "--backend", backend, "--model", model,
+         "--repeats", str(repeats), str(cases_path)],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"run_eval.py exited {proc.returncode}: {proc.stderr[:500]}")
+    new_files = set(RESULTS_DIR.glob("*.json")) - before
+    if not new_files:
+        raise RuntimeError("run_eval.py produced no new results file")
+    newest = max(new_files, key=lambda p: p.stat().st_mtime)
+    return json.loads(newest.read_text(encoding="utf-8"))
+
+
+def run_canary(model, backend="openai", cases_path=DEFAULT_CASES, repeats=3):
+    version = case_set_version(cases_path)
+    run_id = uuid.uuid4().hex[:16]
+    started_ns = int(time.time() * 1_000_000_000)
+    try:
+        report = _run_harness(model, backend, cases_path, repeats)
+    except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
+        return build_failure_record(model, backend, version, run_id, started_ns, exc)
+    return build_eval_record(report, version, run_id, started_ns)
+
+
+def emit(records, started_ns):
+    """Emit via ai_finops's OTLP path, passing our own allowlist -- without it
+    every eval.* attribute is silently dropped (see Task 1)."""
+    sys.path.insert(0, str(REPO_ROOT))
+    import ai_finops
+    return ai_finops.emit_otlp_records(
+        records, EVAL_SERVICE_NAME,
+        scope_name=EVAL_SCOPE_NAME,
+        timestamp_ns=started_ns,
+        allowed_keys=EVAL_ATTRIBUTE_ALLOWLIST,
+    )

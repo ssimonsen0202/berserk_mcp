@@ -1,0 +1,48 @@
+{"id": "containers_metrics", "prompt": "Which containers are currently sending metrics?", "expect_tool": "list_containers"}
+{"id": "top_cpu_container", "prompt": "Which container is using the most CPU right now?", "expect_tool": "top_cpu"}
+{"id": "top_mem_container", "prompt": "Show me the containers using the most memory.", "expect_tool": "top_memory"}
+{"id": "errors_1h", "prompt": "Have there been any errors in the last hour, and from which services?", "expect_tool": "errors_by_service"}
+{"id": "errors_24h", "prompt": "Which service produced the most errors over the past 24 hours?", "expect_tool": "errors_by_service", "expect_since_any": ["24", "1d", "day"]}
+{"id": "services", "prompt": "What services or sources are currently sending data into Berserk?", "expect_tool": "list_services"}
+{"id": "hosts", "prompt": "Which hosts are reporting telemetry?", "expect_tool": "list_hosts"}
+{"id": "host_cpu", "prompt": "What is the CPU load on each host over the last half hour?", "expect_tool": "host_cpu"}
+{"id": "host_mem", "prompt": "How much memory is each machine using?", "expect_tool": "host_memory"}
+{"id": "logs_postgres", "prompt": "Show me the most recent log lines for the postgres service.", "expect_tool": "logs_for_service", "expect_args": {"service": "postgres"}}
+{"id": "logs_nginx", "prompt": "What has nginx been logging lately?", "expect_tool": "logs_for_service", "expect_args": {"service": "nginx"}}
+{"id": "schema", "prompt": "What tables and columns are available to query?", "expect_tool": "schema"}
+{"id": "raw_kql", "prompt": "Run this KQL for me: default | summarize n=count() by severity_text", "expect_tool": "search"}
+{"id": "cc_recent", "prompt": "What has Claude Code been doing in the last hour?", "expect_tool": "claude_recent"}
+{"id": "cc_sessions", "prompt": "Give me a rollup of Claude Code sessions today.", "expect_tool": "claude_sessions"}
+{"id": "cc_tools", "prompt": "Which tools has Claude Code used the most?", "expect_tool": "claude_tools"}
+{"id": "cc_errors", "prompt": "Were there any failed tool calls in Claude Code recently?", "expect_tool": "claude_errors"}
+{"id": "cc_search", "prompt": "Search the Claude Code logs for the word timeout.", "expect_tool": "claude_search", "expect_args": {"term": "timeout"}}
+{"id": "cc_agent_codex", "prompt": "What has Codex CLI been doing in the last hour?", "expect_tool": "claude_recent", "expect_args": {"agent": "codex"}}
+{"id": "cc_agent_codex_search", "prompt": "Search Codex CLI's logs for the word timeout.", "expect_tool": "claude_search", "expect_args": {"term": "timeout", "agent": "codex"}}
+{"id": "investigate_error_root_cause_2", "prompt": "auth-service's errors jumped this morning — dig in and tell me what's actually causing it.", "expect_tool": "investigate_error_rate"}
+{"id": "sre_service_health_guardrail", "prompt": "Is api-gateway healthy right now?", "expect_tool": "sre_service_health", "expect_args": {"service": "api-gateway"}}
+{"id": "sre_error_rate_guardrail", "prompt": "Is the error rate for checkout climbing right now?", "expect_tool": "sre_error_rate"}
+{"id": "cc_agent_codex_search_2", "prompt": "Find the word panic in Codex CLI's tool output.", "expect_tool": "claude_search", "expect_args": {"term": "panic", "agent": "codex"}}
+{"id": "ambiguous_load", "prompt": "Which of my VMs is the most overloaded on CPU?", "expect_tool": "host_cpu"}
+{"id": "ambiguous_hot_container", "prompt": "Find the single hottest container by processor usage.", "expect_tool": "top_cpu"}
+{"id": "list_saved", "prompt": "What custom queries have I saved so far?", "expect_tool": "list_saved"}
+{"id": "save_query", "prompt": "Save this as a query named daily_errors: default | where severity_text=='ERROR' | count", "expect_tool": "save_query"}
+{"id": "detect_anomalies_volume", "prompt": "Is anything behaving abnormally in service volume over the last six hours?", "expect_tool": "detect_anomalies"}
+{"id": "detect_anomalies_service", "prompt": "Statistically check whether the checkout service has an event-volume anomaly.", "expect_tool": "detect_anomalies", "expect_args": {"service": "checkout"}}
+{"id": "detect_anomalies_nearmiss", "prompt": "Show the exact log lines from the abnormal checkout service.", "expect_tool": "logs_for_service", "expect_args": {"service": "checkout"}}
+{"id": "forecast_capacity_memory", "prompt": "At the current trend, when will host memory reach its ceiling?", "expect_tool": "forecast_capacity", "expect_args": {"metric": "system.memory.usage"}}
+{"id": "forecast_capacity_host", "prompt": "Forecast when system.memory.usage on host nuc-1 will fill up.", "expect_tool": "forecast_capacity", "expect_args": {"metric": "system.memory.usage", "host": "nuc-1"}}
+{"id": "forecast_capacity_nearmiss", "prompt": "What is the current memory usage on each host?", "expect_tool": "host_memory"}
+{"id": "find_similar_timeout", "prompt": "Find logs by meaning for database connection timeouts.", "expect_tool": "find_similar", "expect_args": {"description": "database connection timeouts"}}
+{"id": "find_similar_service", "prompt": "Find authentication failure messages by meaning in the api service.", "expect_tool": "find_similar", "expect_args": {"description": "authentication failure", "service": "api"}}
+{"id": "find_similar_nearmiss", "prompt": "Search the logs for the exact phrase database timeout.", "expect_tool": "search"}
+{"id": "jcost_basic", "prompt": "Give me a multi-day cost report for Claude Code usage.", "expect_tool": "claude_cost_report", "tier": "small"}
+{"id": "jcost_by_project", "prompt": "Break down Claude Code token cost by project over the last week.", "expect_tool": "claude_cost_report", "expect_args": {"group_by": "project"}, "tier": "small"}
+{"id": "jcost_by_model", "prompt": "Show me the daily token cost breakdown by model for the past 5 days.", "expect_tool": "claude_cost_report", "expect_args": {"group_by": "model"}, "tier": "small"}
+{"id": "jcost_trend", "prompt": "Is our Claude Code spend trending up or down this week?", "expect_tool": "claude_cost_report", "tier": "small"}
+{"id": "jdive_by_id", "prompt": "Give me a detailed timeline for Claude Code session abc123.", "expect_tool": "claude_session_deep_dive", "expect_args": {"session_id": "abc123"}, "tier": "small"}
+{"id": "jdive_gaps", "prompt": "Walk through session abc123 and flag any long gaps in activity.", "expect_tool": "claude_session_deep_dive", "expect_args": {"session_id": "abc123"}, "tier": "small"}
+{"id": "jdive_loop", "prompt": "Did Claude Code session xyz789 get stuck in a loop?", "expect_tool": "claude_session_deep_dive", "expect_args": {"session_id": "xyz789"}, "tier": "small"}
+{"id": "jworkflow_sequences", "prompt": "What tool sequences does Claude Code use most often?", "expect_tool": "claude_workflow_insights", "tier": "small"}
+{"id": "jworkflow_hotspots", "prompt": "Where are the error hotspots across Claude Code sessions?", "expect_tool": "claude_workflow_insights", "tier": "small"}
+{"id": "jworkflow_burn", "prompt": "Which sessions are burning the most tokens relative to their targets?", "expect_tool": "claude_workflow_insights", "tier": "small"}
+{"id": "investigate_error_spike", "prompt": "why is checkout-service's error rate elevated? I want the root cause, not just the count.", "expect_tool": "investigate_error_rate"}
