@@ -1067,6 +1067,7 @@ MAX_INTERPOLATED_NAME_CHARS = 128
 MAX_TRACE_ID_CHARS = 64
 MAX_SEARCH_TERM_CHARS = 500
 _SERVICE_RE = re.compile(r"[A-Za-z0-9._-]+")
+_MODEL_ID_RE = re.compile(r"[A-Za-z0-9._/-]+")
 _TRACE_ID_RE = re.compile(r"[A-Za-z0-9]+")
 _TEXT_GUARD_RE = re.compile(r"['\"|\\`\x00-\x1f\x7f]")
 _FORECAST_METRICS = frozenset({
@@ -1077,6 +1078,15 @@ _FORECAST_METRICS = frozenset({
 def _valid_interpolated_name(value, max_chars=MAX_INTERPOLATED_NAME_CHARS):
     text = str(value or "")
     return len(text) <= max_chars and bool(_SERVICE_RE.fullmatch(text))
+
+
+def _valid_model_id(value, max_chars=MAX_INTERPOLATED_NAME_CHARS):
+    """Model IDs are vendor/model (deepseek/deepseek-v4-flash), so they need
+    the slash that _SERVICE_RE deliberately excludes. Everything else stays
+    as strict: no quotes, spaces, backslashes, or KQL metacharacters, so the
+    value remains safe to interpolate into a query string."""
+    text = str(value or "")
+    return len(text) <= max_chars and bool(_MODEL_ID_RE.fullmatch(text))
 
 
 def q_detect_anomalies(service=None):
@@ -2337,6 +2347,8 @@ TOOLS = [
     {"name": "claude_optimization_impact", "roles": ["claude"], "description": "Compare matched pre/post harness cohorts and return keep, no-material-change, rollback, or insufficient-data using cost, error, and success signals.", "inputSchema": {"type": "object", "properties": {"agent_profile": {"type": "string"}, "before_harness": {"type": "string"}, "after_harness": {"type": "string"}, "project": {"type": "string"}, "since": _since()["since"]}, "required": ["agent_profile", "before_harness", "after_harness"]}},
     {"name": "claude_management_report", "roles": ["claude"], "description": "Management-ready portfolio, team, project, or feature report with readable text and a schema-versioned JSON envelope.", "inputSchema": {"type": "object", "properties": {"scope": {"type": "string", "enum": ["portfolio", "team", "project", "feature"], "default": "portfolio"}, "identifier": {"type": "string"}, "since": _since()["since"]}}},
     {"name": "claude_generate_dashboard", "roles": ["claude"], "description": "Generate a privacy-safe Markdown or self-contained HTML dashboard beneath BERSERK_MCP_REPORT_DIR for use from Claude Code. This is an explicit local write.", "inputSchema": {"type": "object", "properties": {"dashboard": {"type": "string", "enum": ["portfolio", "project", "feature", "agent_efficiency", "data_quality"], "default": "portfolio"}, "identifier": {"type": "string"}, "since": _since()["since"], "format": {"type": "string", "enum": ["markdown", "html"], "default": "markdown"}, "filename": {"type": "string", "maxLength": 128}}}},
+    {"name": "model_drift_check", "roles": ["claude"], "description": "Check whether a canaried model still routes as well as it did. Returns stable, degrading, step-change, or insufficient-data per model, with the provider fingerprint status. Measures tool-routing quality only -- not prose, reasoning, or code quality. Use for 'has the model got worse' or 'did the provider change the model'.", "inputSchema": {"type": "object", "properties": dict({"model": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "optional single model to check"}}, **_since())}},
+    {"name": "model_drift_history", "roles": ["claude"], "description": "Score and fingerprint history for one canaried model over time, for investigating a flagged drift verdict. Measures tool-routing quality only. Use after model_drift_check reports degrading or step-change.", "inputSchema": {"type": "object", "properties": dict({"model": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS}}, **_since()), "required": ["model"]}},
     {"name": "scan_secrets", "roles": ["soc"], "description": "Audit recent log bodies for potential credentials and optionally selected PII categories. Returns only aggregate service/type counts and first-seen timestamps; secret values are never returned. Default 1h.", "inputSchema": {"type": "object", "properties": {"since": _since()["since"], "include_entropy": {"type": "boolean", "description": "Enable false-positive-prone high-entropy token detection."}, "include_pii": {"type": "array", "items": {"type": "string", "enum": ["email", "ipv4", "ipv6", "credit_card"]}, "description": "Optional PII categories to include."}}}},
     {"name": "suggest_ingestion", "description": "Recommend concrete telemetry sources for a role/use case. With check_gap=true, compares service and metric hints against live Berserk inventory and marks each source present or missing. Catalog-backed and read-only.", "inputSchema": {"type": "object", "properties": {"role_or_usecase": {"type": "string", "description": "Catalog key such as sre/onprem-ad-health, soc/endpoint-identity, change-management/ansible, or scom."}, "check_gap": {"type": "boolean", "description": "Compare recommendations with live service and metric inventory."}, "since": _since()["since"]}, "required": ["role_or_usecase"]}},
     # ── CanonLoom knowledge-pipeline tools ────────────────────────────────────
@@ -2466,6 +2478,8 @@ TITLES = {
     "claude_optimization_impact": "Claude Code: Optimization Impact",
     "claude_management_report": "Claude Code: Management Report",
     "claude_generate_dashboard": "Claude Code: Generate Dashboard",
+    "model_drift_check": "Model Drift Check",
+    "model_drift_history": "Model Drift History",
     "scan_secrets": "SOC: Secret Scan",
     "suggest_ingestion": "Suggest Telemetry Ingestion",
     "list_saved": "List Saved Queries",
@@ -2929,6 +2943,51 @@ def _handle_call_uncached(name, arguments):
             "R² and slope; unable to parse coefficients from this renderer, so no "
             "forecast date is inferred:\n" + _fence_untrusted(out)
         ), False
+
+    if name == "model_drift_check":
+        import model_drift
+        model = str(arguments.get("model") or "").strip()
+        if model and not _valid_model_id(model):
+            return "invalid model id (allowed: letters, digits, '.', '_', '-', '/')", True
+        since = arguments.get("since") or "30d ago"
+        out, err = bzrk_search_json(model_drift.series_kql(model or None), since)
+        if err:
+            return _fence_untrusted(out), True
+        if not out or out.strip() == "(no rows)":
+            return (f"No canary results in {since}. Is --canary-run scheduled "
+                    f"and BERSERK_MCP_CANARY_MODELS set?"), False
+        lines = []
+        for model_name, series in model_drift.group_by_model(out).items():
+            verdict = model_drift.classify(series)
+            # The model name arrives from stored telemetry, so it is
+            # attacker-influenceable in the same way host names are in
+            # forecast_capacity -- fence it before returning it to a model.
+            fenced = _fence_untrusted(model_name, inline=True)
+            lines.append(f"{fenced}: {verdict['verdict']} "
+                         f"({verdict['confidence']}) — {verdict['reason']}")
+        return f"Model drift (window {since}):\n" + "\n".join(lines), False
+
+    if name == "model_drift_history":
+        import model_drift
+        model = str(arguments.get("model") or "").strip()
+        if not model or not _valid_model_id(model):
+            return "model is required (allowed: letters, digits, '.', '_', '-', '/')", True
+        since = arguments.get("since") or "30d ago"
+        out, err = bzrk_search_json(model_drift.series_kql(model), since)
+        if err:
+            return _fence_untrusted(out), True
+        if not out or out.strip() == "(no rows)":
+            return f"No canary results for {model} in {since}.", False
+        series_data = model_drift.group_by_model(out).get(model, [])
+        if not series_data:
+            return f"No data for model {model}.", False
+        lines = [f"Model quality history for {_fence_untrusted(model, inline=True)} (tool-routing only, window {since}):"]
+        for row in series_data:
+            ts = row.get("timestamp", "?")
+            acc = row.get("tool_accuracy", "?")
+            status = row.get("status", "?")
+            lines.append(f"  {ts}: accuracy={acc}, status={status}")
+        return "\n".join(lines), False
 
     if name == "find_similar":
         description = str(arguments.get("description") or "").strip()
@@ -4913,6 +4972,40 @@ def run_doctor(json_output=False):
     return code
 
 
+def _attach_fingerprints(record, model):
+    """Fingerprints are additive and best-effort: a fetch failure must not
+    discard a real, already-scored canary result, so every failure here is
+    caught and logged, never raised past this function."""
+    import parser_factory
+    _sys = sys  # noqa: F841 - used in exec context below
+    try:
+        url = parser_factory._hermes_url()
+        key = os.environ.get("HERMES_API_KEY", "")
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        completions = []
+        for prompt in fingerprint.FINGERPRINT_PROMPTS:
+            out, err = parser_factory._http_post_json(url, headers, {
+                "model": model, "temperature": 0,
+                "messages": [{"role": "user", "content": prompt}],
+            })
+            if err:
+                raise RuntimeError(err)
+            completions.append(out["choices"][0]["message"]["content"])
+        record["eval.behavioral_fingerprint"] = fingerprint.behavioral_fingerprint(completions)
+
+        # parser_factory has _http_post_json but no GET-JSON helper --
+        # confirmed by reading the module while writing this plan.
+        # Use Task 3's fetch_models() for the metadata half instead.
+        payload, err = fingerprint.fetch_models(url, key)
+        if err:
+            raise RuntimeError(err)
+        meta_fp = fingerprint.metadata_fingerprint(payload, model)
+        if meta_fp:
+            record["eval.provider_metadata_fingerprint"] = meta_fp
+    except Exception as exc:  # noqa: BLE001
+        print(f"fingerprint skipped for {model}: {exc}", file=sys.stderr)
+
+
 def main():
     import argparse
     cli = argparse.ArgumentParser(
@@ -4928,6 +5021,10 @@ def main():
                      default="operational", help="agent report depth")
     cli.add_argument("--agent-report-json", action="store_true",
                      help="emit a machine-readable agent report envelope")
+    cli.add_argument("--canary-run", action="store_true",
+                     help="run the model canary for BERSERK_MCP_CANARY_MODELS and ingest results")
+    cli.add_argument("--drift-report", action="store_true",
+                     help="evaluate stored canary history; exit non-zero if any model is degrading")
     cli.add_argument("--auto-queue", action="store_true",
                      help="(worker) queue newly detected sources")
     cli.add_argument("--max-jobs", type=int, default=3,
@@ -5018,6 +5115,54 @@ def main():
             since=ns.since, mode=ns.agent_report_mode,
             output_json=ns.agent_report_json,
         ))
+    if ns.canary_run:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parent / "evals"))
+        import canary, fingerprint  # noqa: E402
+
+        models = [m.strip() for m in os.environ.get("BERSERK_MCP_CANARY_MODELS", "").split(",") if m.strip()]
+        if not models:
+            print("BERSERK_MCP_CANARY_MODELS is unset; nothing to do.")
+            return
+        repeats = int(os.environ.get("BERSERK_MCP_CANARY_REPEATS", "3"))
+        cases_path = os.environ.get("BERSERK_MCP_CANARY_CASES", str(Path(__file__).resolve().parent / "evals" / "canary_cases.jsonl"))
+
+        for model in models:
+            record = canary.run_canary(model, cases_path=cases_path, repeats=repeats)
+            if record.get("eval.status") == "ok":
+                _attach_fingerprints(record, model)
+            canary.emit([record], int(time.time() * 1_000_000_000))
+            print(f"{model}: {record.get('eval.status')} "
+                 f"tool_accuracy={record.get('eval.tool_accuracy')}")
+    if ns.drift_report:
+        # Evaluate stored canary history; exit non-zero if any model is degrading
+        import model_drift
+        out, err = bzrk_search_json(model_drift.series_kql(None), "30d ago")
+        if err:
+            print(f"Drift report failed: {out}", file=sys.stderr)
+            sys.exit(2)
+        if not out or out.strip() == "(no rows)":
+            print("No canary results found.")
+            sys.exit(0)
+
+        degraded_models = []
+        for model_name, series in model_drift.group_by_model(out).items():
+            verdict = model_drift.classify(series)
+            if verdict["verdict"] in ("degrading", "step-change"):
+                degraded_models.append((model_name, verdict))
+
+        if degraded_models:
+            lines = ["Models with degraded or changed behavior:"]
+            for model_name, verdict in degraded_models:
+                fenced = _fence_untrusted(model_name, inline=True)
+                lines.append(f"  {fenced}: {verdict['verdict']} ({verdict['confidence']}) — {verdict['reason']}")
+            text = "\n".join(lines)
+            print(text, file=sys.stderr)
+            _post_discord_alert(text)
+            sys.exit(1)
+        else:
+            print("All models stable (tool-routing quality).")
+            sys.exit(0)
     if ns.http or HTTP_ENABLE:
         try:
             _serve_http()

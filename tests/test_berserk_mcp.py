@@ -6365,5 +6365,40 @@ class InvestigateErrorRateTest(unittest.TestCase):
         )
 
 
+class ModelIdValidatorTest(unittest.TestCase):
+    def test_accepts_a_real_vendor_slash_model_id(self):
+        self.assertTrue(bm._valid_model_id("deepseek/deepseek-v4-flash"))
+
+    def test_rejects_quotes_and_spaces(self):
+        for bad in ("a'b", 'a"b', "a b", "a\\b", "a|b"):
+            self.assertFalse(bm._valid_model_id(bad), bad)
+
+    def test_service_validator_still_rejects_slashes(self):
+        """The existing validator keeps its narrower contract."""
+        self.assertFalse(bm._valid_interpolated_name("deepseek/deepseek-v4-flash"))
+
+
+class ModelDriftToolsTest(unittest.TestCase):
+    def test_both_tools_are_registered(self):
+        names = {t["name"] for t in bm.TOOLS}
+        self.assertIn("model_drift_check", names)
+        self.assertIn("model_drift_history", names)
+
+    def test_tools_are_on_the_claude_lane(self):
+        for t in bm.TOOLS:
+            if t["name"].startswith("model_drift"):
+                self.assertIn("claude", t["roles"])
+
+    def test_descriptions_state_the_routing_only_boundary(self):
+        """A monitoring tool that overstates its coverage is worse than none."""
+        for t in bm.TOOLS:
+            if t["name"].startswith("model_drift"):
+                self.assertIn("tool-routing", t["description"])
+
+    def test_both_tools_have_titles(self):
+        self.assertIn("model_drift_check", bm.TITLES)
+        self.assertIn("model_drift_history", bm.TITLES)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
