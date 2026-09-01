@@ -631,7 +631,12 @@ git commit -m "feat: provider metadata and behavioral fingerprints (#90)"
 
 **Interfaces:**
 - Consumes: records produced by `evals.canary.build_eval_record` (Task 2), read back from Berserk; fingerprint values from Task 3.
-- Produces: `model_drift.classify(series, noise_band, fingerprint_changed) -> dict` with keys `verdict`, `reason`, `confidence`. Task 5's tools render this.
+- Produces:
+  - `model_drift.classify(series, noise_band, fingerprint_changed) -> dict` with keys `verdict`, `reason`, `confidence`.
+  - `model_drift.series_kql(model, since) -> str` — KQL selecting `eval.*` attributes from `service.name="berserk-mcp-eval"`, aliasing the `eval.` prefix away in its projection (e.g. `tool_accuracy=toreal(attributes['eval.tool_accuracy'])`) so the column names it returns match `classify()`'s expected keys directly.
+  - `model_drift.group_by_model(bzrk_json_text) -> dict[str, list[dict]]` — parses `bzrk_search_json`'s output and buckets rows by `model`, in the shape `classify()` consumes per model. Task 5's dispatcher calls this before calling `classify()` once per model.
+
+  All three are owned by this task together — `series_kql`'s column names and `group_by_model`'s parsing must agree with each other and with what `classify()` expects, since nothing outside this file constrains that shape.
 
 **Reuse, do not reimplement.** `agent_analytics._trend_fit(text)` already parses `series_fit_line`'s `[R², slope, ...]` output and handles both the JSON and TSV renderers. The established "trend is unreliable" floor is `r2 < 0.6` (`berserk_mcp.py:2913`). Match both rather than inventing new ones.
 
@@ -639,7 +644,7 @@ git commit -m "feat: provider metadata and behavioral fingerprints (#90)"
 
 ```python
 # tests/test_model_drift.py
-import sys, unittest
+import json, sys, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import model_drift
@@ -692,6 +697,28 @@ class VerdictTest(unittest.TestCase):
             model_drift.CONFIDENCE_RANK[with_fp["confidence"]],
             model_drift.CONFIDENCE_RANK[without["confidence"]],
         )
+
+
+class GroupByModelTest(unittest.TestCase):
+    def test_groups_rows_by_model_column(self):
+        payload = json.dumps({"Tables": [{
+            "schema": {"columns": [{"name": "model"}, {"name": "tool_accuracy"}]},
+            "rows": [["m1", 0.9], ["m2", 0.5], ["m1", 0.85]],
+        }]})
+        grouped = model_drift.group_by_model(payload)
+        self.assertEqual(len(grouped["m1"]), 2)
+        self.assertEqual(len(grouped["m2"]), 1)
+
+    def test_empty_text_returns_empty_dict(self):
+        self.assertEqual(model_drift.group_by_model(""), {})
+
+
+class SeriesKqlTest(unittest.TestCase):
+    def test_projects_columns_without_eval_prefix(self):
+        kql = model_drift.series_kql("deepseek/deepseek-v4-flash")
+        self.assertIn("tool_accuracy=toreal(attributes['eval.tool_accuracy'])", kql)
+        self.assertIn("model=tostring(attributes['eval.model'])", kql)
+        self.assertNotIn("project eval.tool_accuracy", kql)
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -769,9 +796,51 @@ def classify(series, noise_band=DEFAULT_NOISE_BAND, fingerprint_changed=False):
 Run: `python -m pytest tests/test_model_drift.py -v`
 Expected: PASS.
 
-- [ ] **Step 5: Add the series-read KQL**
+- [ ] **Step 5: Add the series-read KQL and the grouping function**
 
-Add `series_kql(model, since)` returning KQL that filters `resource['service.name'] == 'berserk-mcp-eval'`, projects the `eval.*` attributes, and orders by timestamp. Reuse `agent_analytics._trend_fit` for any `series_fit_line` parsing rather than writing a second reader.
+```python
+# model_drift.py
+
+def series_kql(model=None, since="30d ago"):
+    """KQL for the canary's own OTLP records, column names pre-aliased to
+    match what classify() expects (no 'eval.' prefix in the output)."""
+    filt = f" | where attributes['eval.model'] == '{model}'" if model else ""
+    return (
+        "default | where resource['service.name'] == 'berserk-mcp-eval'"
+        f"{filt}"
+        " | project timestamp,"
+        " model=tostring(attributes['eval.model']),"
+        " status=tostring(attributes['eval.status']),"
+        " case_set_version=tostring(attributes['eval.case_set_version']),"
+        " tool_accuracy=toreal(attributes['eval.tool_accuracy']),"
+        " arg_accuracy=toreal(attributes['eval.arg_accuracy'])"
+        " | order by timestamp asc"
+    )
+
+
+def group_by_model(bzrk_json_text):
+    """Bucket bzrk_search_json's rows by model, in the shape classify()
+    consumes. model is required in series_kql's projection precisely so
+    this grouping is possible from one query covering every model.
+
+    Reuses agent_analytics._json_records -- NOT a function of this name in
+    berserk_mcp.py, which has none; three other modules each carry their own
+    copy (agent_analytics.py, ai_finops.py, secret_scan.py). Import from
+    agent_analytics.py specifically, since model_drift.py already follows
+    its precedent as a runtime analytics module. That function takes
+    PARSED JSON (a dict/list), not raw text, and returns None -- never an
+    exception -- for a shape it doesn't recognize; both must be handled."""
+    from agent_analytics import _json_records
+    if not bzrk_json_text.strip():
+        return {}
+    records = _json_records(json.loads(bzrk_json_text)) or []
+    grouped = {}
+    for row in records:
+        grouped.setdefault(row.get("model", ""), []).append(row)
+    return grouped
+```
+
+Reuse `agent_analytics._trend_fit` for any further `series_fit_line` parsing rather than writing a second reader — `series_kql`/`group_by_model` above cover reading the canary's own stored scores; `_trend_fit` remains the tool for reading a `series_fit_line` result specifically, if the step-vs-drift separation needs it beyond the noise-band rule already in `classify()`.
 
 - [ ] **Step 6: Replace the provisional noise band**
 
@@ -916,7 +985,7 @@ Mirror `forecast_capacity` (`berserk_mcp.py:2892`) for structure — argument va
 
 Task 4 must therefore also export `group_by_model(bzrk_json_text) -> dict[str, list[dict]]`. Add it to that task's Interfaces block when implementing.
 
-- [ ] **Step 6: Add the CLI flags**
+- [ ] **Step 6: Add the CLI flags, and wire the fingerprints into the emitted record**
 
 Alongside `--worker` and `--agent-report` (near `berserk_mcp.py:4923`):
 
@@ -926,6 +995,70 @@ Alongside `--worker` and `--agent-report` (near `berserk_mcp.py:4923`):
     cli.add_argument("--drift-report", action="store_true",
                      help="evaluate stored canary history; exit non-zero if any model is degrading")
 ```
+
+**This is the integration point the plan's task split otherwise misses.** Task 2 defines `eval.behavioral_fingerprint` and `eval.provider_metadata_fingerprint` in `EVAL_ATTRIBUTE_ALLOWLIST`, and Task 3 builds the functions that compute them — but neither task's own code calls the other. Without this step, both fields are permanently absent from every emitted record, and nothing would catch it: it fails silently, the same shape of bug Task 1 already found once in `_otlp_attributes()`. The `--canary-run` handler is the natural place to close this, since it already has to call both `canary.run_canary()` and, separately, would otherwise need its own fingerprint call:
+
+```python
+# berserk_mcp.py -- inside the --canary-run handler
+
+    if args.canary_run:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parent / "evals"))
+        import canary, fingerprint  # noqa: E402
+
+        models = [m.strip() for m in os.environ.get("BERSERK_MCP_CANARY_MODELS", "").split(",") if m.strip()]
+        if not models:
+            print("BERSERK_MCP_CANARY_MODELS is unset; nothing to do.")
+            return
+        repeats = int(os.environ.get("BERSERK_MCP_CANARY_REPEATS", "3"))
+        cases_path = os.environ.get("BERSERK_MCP_CANARY_CASES", str(Path(__file__).resolve().parent / "evals" / "canary_cases.jsonl"))
+
+        for model in models:
+            record = canary.run_canary(model, cases_path=cases_path, repeats=repeats)
+            if record.get("eval.status") == "ok":
+                _attach_fingerprints(record, model)  # see next block
+            canary.emit([record], int(time.time() * 1_000_000_000))
+            print(f"{model}: {record.get('eval.status')} "
+                 f"tool_accuracy={record.get('eval.tool_accuracy')}")
+```
+
+**Behavioral fingerprinting cannot reuse `parser_factory.llm_complete()` as-is.** That function's `"hermes"` branch calls `_hermes_model()` internally, which always resolves whatever model `BERSERK_LLM_HERMES_MODEL`/auto-discovery picks for the ladder — it has no parameter to target one specific model, and fingerprinting `deepseek/deepseek-v4-flash` specifically requires exactly that. Go one level lower, reusing only the endpoint/key resolution `llm_complete`'s own hermes branch uses inline (`parser_factory.py:484-486`), with an explicit `model`. Define this as its own function — `_attach_fingerprints(record, model)`, called from the loop above — rather than inline, so the try/except scope is unambiguous:
+
+```python
+# berserk_mcp.py -- module level, called from the --canary-run loop above
+
+def _attach_fingerprints(record, model):
+    """Fingerprints are additive and best-effort: a fetch failure must not
+    discard a real, already-scored canary result, so every failure here is
+    caught and logged, never raised past this function."""
+    import parser_factory
+    try:
+        url = parser_factory._hermes_url()
+        key = os.environ.get("HERMES_API_KEY", "")
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        completions = []
+        for prompt in fingerprint.FINGERPRINT_PROMPTS:
+            out, err = parser_factory._http_post_json(url, headers, {
+                "model": model, "temperature": 0,
+                "messages": [{"role": "user", "content": prompt}],
+            })
+            if err:
+                raise RuntimeError(err)
+            completions.append(out["choices"][0]["message"]["content"])
+        record["eval.behavioral_fingerprint"] = fingerprint.behavioral_fingerprint(completions)
+
+        # parser_factory has _http_post_json but no GET-JSON helper --
+        # confirmed by reading the module while writing this plan.
+        # Use Task 3's fetch_models() for the metadata half instead.
+        payload = fingerprint.fetch_models(url, key)
+        meta_fp = fingerprint.metadata_fingerprint(payload, model)
+        if meta_fp:
+            record["eval.provider_metadata_fingerprint"] = meta_fp
+    except Exception as exc:  # noqa: BLE001
+        print(f"fingerprint skipped for {model}: {exc}", file=sys.stderr)
+```
+
+`parser_factory._http_post_json` and `parser_factory._hermes_url` are confirmed to exist by direct inspection (2026-08-31), and are the same functions `llm_complete`'s own `"hermes"` branch calls inline — this is that same code path, minus the model auto-selection this caller cannot use.
 
 `--drift-report` exits non-zero when any verdict is `degrading` or `step-change`, so cron and systemd can pipe it to an alert transport — matching `--agent-report`'s established contract. Discord posting reuses the existing bridge and stays off unless `BERSERK_DISCORD_ALERT_SECRET` is set; a run with nothing noteworthy posts nothing.
 
