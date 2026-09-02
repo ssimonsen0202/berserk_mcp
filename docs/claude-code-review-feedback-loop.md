@@ -133,6 +133,38 @@ false report.
 **Do:** run `gh pr checks <n>` before you write that CI passes. State what you
 ran, not what you expect.
 
+### 10. A review that verified by reading, not running
+
+The model-behavior monitoring branch (issues #89-#92) went through 6
+independent task reviews plus a final whole-branch review, all clean. Codex
+found `_attach_fingerprints()` — the function wiring the canary and the
+fingerprint module together for the first time — raised `NameError` on
+every real call. It referenced a module-global `fingerprint` that only
+existed as a name local to a different function's scope.
+
+Every review read the function and reported it correct. The final review's
+own report said "`_attach_fingerprints()` exists, is actually called from
+`--canary-run`" as a checked, verified line. None of that was false as
+stated — the function does exist, and `--canary-run` does call it. What no
+review did was execute it. `grep` across the whole test suite for the
+function's name returned nothing, despite the task's own brief explicitly
+asking for a mocked test. A NameError fires on the first call regardless of
+how carefully the surrounding code was read; only running it surfaces that.
+
+The same review pass, done independently by Codex after the branch merged,
+also found a new CLI branch with no `return`/`sys.exit()` at its end —
+execution fell through into a blocking server start, turning a one-shot
+cron command into a hang. Reading the new hunk in isolation cannot catch
+this; it only shows up tracing the whole containing function to its end.
+
+**Do:** for any function whose job is to connect two modules for the first
+time, grep the test suite for its name before approving the task. If
+nothing calls it, that is the finding. Then invoke it yourself — a bare
+`python3 -c "import x; x.fn(...)"` catches `NameError`/`ImportError` in one
+line, no mocking required for that class of bug. For any new branch in an
+existing dispatch/control-flow function, trace execution to the end of the
+function it was inserted into, not just to the end of the diff hunk.
+
 ## What the loop does not do
 
 Codex reads the diff and the code around it. It does not know what the change
