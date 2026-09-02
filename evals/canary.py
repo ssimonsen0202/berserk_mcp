@@ -19,6 +19,7 @@ its internals.
 """
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -38,6 +39,7 @@ EVAL_ATTRIBUTE_ALLOWLIST = frozenset({
     "eval.tool_accuracy", "eval.arg_accuracy", "eval.repeats",
     "eval.total_cost_usd", "eval.run_id", "eval.status", "eval.error",
     "eval.behavioral_fingerprint", "eval.provider_metadata_fingerprint",
+    "eval.role", "eval.discovery_mode",
 })
 
 
@@ -50,11 +52,32 @@ def case_set_version(path=DEFAULT_CASES):
     return _hash_bytes(Path(path).read_bytes())
 
 
+def _current_environment():
+    """BERSERK_MCP_ROLE and BERSERK_MCP_DISCOVERY, read the same way
+    berserk_mcp.py itself reads them (berserk_mcp.py:144, :2408-2410).
+
+    run_eval.py spawns berserk_mcp.py as a subprocess with no env=
+    override, so it inherits whatever role/discovery mode the calling
+    shell has set -- the same tool schema restriction a real deployment
+    applies. A canary run under BERSERK_MCP_ROLE=claude sees only the
+    claude-lane tools; canary_cases.jsonl was written against the full
+    unrestricted schema. Without recording this, a role or discovery-mode
+    change looks identical to a model regression under the same
+    case_set_version (found by Codex review, 2026-09-02)."""
+    role = os.environ.get("BERSERK_MCP_ROLE", "all").strip().lower() or "all"
+    discovery = os.environ.get("BERSERK_MCP_DISCOVERY", "").strip().lower() in \
+        {"1", "true", "yes", "on"}
+    return role, ("1" if discovery else "0")
+
+
 def build_eval_record(report, version, run_id, started_ns):
+    role, discovery_mode = _current_environment()
     record = {
         "eval.model": report.get("model", ""),
         "eval.backend": report.get("backend", ""),
         "eval.case_set_version": version,
+        "eval.role": role,
+        "eval.discovery_mode": discovery_mode,
         "eval.tool_accuracy": float(report["tool_accuracy"]),
         "eval.arg_accuracy": float(report["arg_accuracy"]),
         "eval.repeats": int(report.get("repeats", 1)),
@@ -70,10 +93,13 @@ def build_eval_record(report, version, run_id, started_ns):
 def build_failure_record(model, backend, version, run_id, started_ns, error):
     """A failed run is recorded as a failure, never as a score of zero --
     otherwise a provider outage looks like a catastrophic quality drop."""
+    role, discovery_mode = _current_environment()
     return {
         "eval.model": model,
         "eval.backend": backend,
         "eval.case_set_version": version,
+        "eval.role": role,
+        "eval.discovery_mode": discovery_mode,
         "eval.run_id": run_id,
         "eval.status": "failed",
         "eval.error": str(error)[:500],

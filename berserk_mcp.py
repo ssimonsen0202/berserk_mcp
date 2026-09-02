@@ -2985,7 +2985,15 @@ def _handle_call_uncached(name, arguments):
         for row in series_data:
             ts = row.get("timestamp", "?")
             acc = row.get("tool_accuracy", "?")
-            status = row.get("status", "?")
+            # status arrives from stored telemetry (attributes['eval.status']),
+            # the same untrusted-data boundary as the model name above, which
+            # is already fenced -- status was not, so a forged
+            # berserk-mcp-eval record could inject unfenced text into this
+            # response (found by Codex review, 2026-09-02). timestamp and
+            # accuracy are safe: timestamp is Berserk's own native column,
+            # not an attribute value, and accuracy is cast through toreal()
+            # in series_kql, so it can only ever be numeric or null.
+            status = _fence_untrusted(row.get("status", "?"), inline=True)
             lines.append(f"  {ts}: accuracy={acc}, status={status}")
         return "\n".join(lines), False
 
@@ -4975,9 +4983,22 @@ def run_doctor(json_output=False):
 def _attach_fingerprints(record, model):
     """Fingerprints are additive and best-effort: a fetch failure must not
     discard a real, already-scored canary result, so every failure here is
-    caught and logged, never raised past this function."""
+    caught and logged, never raised past this function.
+
+    Imports fingerprint locally rather than relying on a caller having
+    already imported it as a module global -- that reliance was itself a
+    bug. `fingerprint` was never a module global anywhere in this file,
+    only a name local to main()'s own --canary-run branch, so every real
+    call to this function raised NameError, silently (caught and logged
+    below, never propagated) -- found by an independent Codex review
+    (2026-09-02) after this shipped through 6 clean task reviews and a
+    clean final whole-branch review, none of which had actually invoked
+    this function; confirmed live via
+    `PYTHONPATH=. python3 -c "import berserk_mcp as b; r={}; b._attach_fingerprints(r,'x'); print(r)"`.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "evals"))
+    import fingerprint
     import parser_factory
-    _sys = sys  # noqa: F841 - used in exec context below
     try:
         url = parser_factory._hermes_url()
         key = os.environ.get("HERMES_API_KEY", "")
@@ -5000,8 +5021,13 @@ def _attach_fingerprints(record, model):
         if err:
             raise RuntimeError(err)
         meta_fp = fingerprint.metadata_fingerprint(payload, model)
-        if meta_fp:
-            record["eval.provider_metadata_fingerprint"] = meta_fp
+        # metadata_fingerprint() returning None (fetch succeeded, no error)
+        # means the model is no longer listed by the provider -- a real
+        # signal, not nothing. Record it distinctly rather than silently
+        # omitting the attribute, so a model vanishing from the catalog
+        # shows up as a fingerprint change (found by Codex review,
+        # 2026-09-02).
+        record["eval.provider_metadata_fingerprint"] = meta_fp or "absent"
     except Exception as exc:  # noqa: BLE001
         print(f"fingerprint skipped for {model}: {exc}", file=sys.stderr)
 
@@ -5116,24 +5142,13 @@ def main():
             output_json=ns.agent_report_json,
         ))
     if ns.canary_run:
-        import sys as _sys
-        _sys.path.insert(0, str(Path(__file__).resolve().parent / "evals"))
-        import canary, fingerprint  # noqa: E402
-
         models = [m.strip() for m in os.environ.get("BERSERK_MCP_CANARY_MODELS", "").split(",") if m.strip()]
         if not models:
             print("BERSERK_MCP_CANARY_MODELS is unset; nothing to do.")
-            return
+            sys.exit(0)
         repeats = int(os.environ.get("BERSERK_MCP_CANARY_REPEATS", "3"))
         cases_path = os.environ.get("BERSERK_MCP_CANARY_CASES", str(Path(__file__).resolve().parent / "evals" / "canary_cases.jsonl"))
-
-        for model in models:
-            record = canary.run_canary(model, cases_path=cases_path, repeats=repeats)
-            if record.get("eval.status") == "ok":
-                _attach_fingerprints(record, model)
-            canary.emit([record], int(time.time() * 1_000_000_000))
-            print(f"{model}: {record.get('eval.status')} "
-                 f"tool_accuracy={record.get('eval.tool_accuracy')}")
+        sys.exit(run_canary_pass(models, cases_path, repeats))
     if ns.drift_report:
         # Evaluate stored canary history; exit non-zero if any model is degrading
         import model_drift
@@ -5335,6 +5350,45 @@ def run_agent_report(since="6h ago", mode="operational", output_json=False):
         if spend_text:
             print("\n" + spend_text)
     return 1 if should_alert or spend_error else 0
+
+
+def run_canary_pass(models, cases_path, repeats):
+    """One headless canary pass for cron: score each configured model
+    against the frozen case set, attach fingerprints for successful runs,
+    and persist every result via OTLP. Returns an exit code: 1 if any
+    result failed to persist (even a successfully-scored one -- see
+    canary.emit()'s return value), else 0.
+
+    A standalone function returning an exit code, not inline code in
+    main(), matching run_worker_pass/run_agent_report's own convention --
+    deliberately, not incidentally. An earlier inline version had no
+    return/exit after its loop, so execution fell through into whatever
+    CLI branch happened to follow it (the HTTP/MCP server start) on every
+    real invocation, turning a one-shot cron command into a hang (found by
+    Codex review, 2026-09-02). Structuring this as sys.exit(run_canary_pass(...))
+    at the call site makes that class of bug structurally impossible here:
+    there is no code path through this function that does not return.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "evals"))
+    import canary
+
+    any_emit_failed = False
+    for model in models:
+        record = canary.run_canary(model, cases_path=cases_path, repeats=repeats)
+        if record.get("eval.status") == "ok":
+            _attach_fingerprints(record, model)
+        # canary.emit() -> ai_finops.emit_otlp_records() returns False when
+        # BERSERK_MCP_OTLP_LOGS_ENDPOINT is unset or the POST fails --
+        # previously discarded, so a run could spend money, score a model,
+        # print "ok", and store nothing, with cron seeing exit 0 throughout
+        # (found by Codex review, 2026-09-02).
+        emitted = canary.emit([record], int(time.time() * 1_000_000_000))
+        if not emitted:
+            any_emit_failed = True
+        print(f"{model}: {record.get('eval.status')} "
+             f"tool_accuracy={record.get('eval.tool_accuracy')} "
+             f"stored={emitted}")
+    return 1 if any_emit_failed else 0
 
 
 if __name__ == "__main__":

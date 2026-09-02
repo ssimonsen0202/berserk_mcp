@@ -1,4 +1,4 @@
-import json, sys, unittest
+import json, os, sys, unittest
 from pathlib import Path
 from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -122,3 +122,53 @@ class EmitTest(unittest.TestCase):
         # emit() should not crash even when there's no provider configured.
         # ai_finops.emit_otlp_records returns False when _otlp_endpoint is not set.
         self.assertFalse(result)
+
+
+class EnvironmentAttributionTest(unittest.TestCase):
+    """run_eval.py spawns berserk_mcp.py as a subprocess with no env=
+    override, so it inherits whatever BERSERK_MCP_ROLE / BERSERK_MCP_DISCOVERY
+    the calling shell has set -- the same tool-schema restriction a real
+    deployment applies. Without recording this, a role or discovery-mode
+    change looks identical to a model regression under the same
+    case_set_version. Found by Codex review, 2026-09-02."""
+
+    REPORT = BuildEvalRecordTest.REPORT
+
+    def test_default_role_and_discovery_when_unset(self):
+        for k in ("BERSERK_MCP_ROLE", "BERSERK_MCP_DISCOVERY"):
+            os.environ.pop(k, None)
+        rec = canary.build_eval_record(self.REPORT, "v", "r", 1)
+        self.assertEqual(rec["eval.role"], "all")
+        self.assertEqual(rec["eval.discovery_mode"], "0")
+
+    def test_captures_configured_role_and_discovery(self):
+        old_role = os.environ.get("BERSERK_MCP_ROLE")
+        old_disc = os.environ.get("BERSERK_MCP_DISCOVERY")
+        os.environ["BERSERK_MCP_ROLE"] = "claude"
+        os.environ["BERSERK_MCP_DISCOVERY"] = "1"
+        try:
+            rec = canary.build_eval_record(self.REPORT, "v", "r", 1)
+            self.assertEqual(rec["eval.role"], "claude")
+            self.assertEqual(rec["eval.discovery_mode"], "1")
+        finally:
+            if old_role is None:
+                os.environ.pop("BERSERK_MCP_ROLE", None)
+            else:
+                os.environ["BERSERK_MCP_ROLE"] = old_role
+            if old_disc is None:
+                os.environ.pop("BERSERK_MCP_DISCOVERY", None)
+            else:
+                os.environ["BERSERK_MCP_DISCOVERY"] = old_disc
+
+    def test_failure_record_also_captures_environment(self):
+        os.environ["BERSERK_MCP_ROLE"] = "sre"
+        try:
+            rec = canary.build_failure_record("m", "openai", "v", "r", 1, "boom")
+            self.assertEqual(rec["eval.role"], "sre")
+            self.assertIn("eval.discovery_mode", rec)
+        finally:
+            os.environ.pop("BERSERK_MCP_ROLE", None)
+
+    def test_role_and_discovery_keys_are_in_the_allowlist(self):
+        self.assertIn("eval.role", canary.EVAL_ATTRIBUTE_ALLOWLIST)
+        self.assertIn("eval.discovery_mode", canary.EVAL_ATTRIBUTE_ALLOWLIST)
