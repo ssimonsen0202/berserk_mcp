@@ -73,3 +73,31 @@ class SeriesKqlTest(unittest.TestCase):
         self.assertIn("tool_accuracy=toreal(attributes['eval.tool_accuracy'])", kql)
         self.assertIn("model=tostring(attributes['eval.model'])", kql)
         self.assertNotIn("project eval.tool_accuracy", kql)
+
+
+class NoiseBandCalibrationTest(unittest.TestCase):
+    """Locks the real, measured calibration (2026-09-01) against the noise
+    it was actually calibrated from -- not a hypothetical. If this ever
+    fails, either the calibration data changed (re-baseline deliberately)
+    or DEFAULT_NOISE_BAND was edited without re-measuring (a regression)."""
+
+    MEASURED_SCORES = [0.9513888888888888, 0.9583333333333334,
+                       0.9513888888888888, 0.9513888888888888, 0.9444444444444444]
+
+    def test_default_noise_band_is_the_measured_value(self):
+        self.assertEqual(model_drift.DEFAULT_NOISE_BAND, 0.02)
+
+    def test_default_noise_band_clears_the_real_measured_spread(self):
+        """The band must exceed the actual observed run-to-run spread,
+        or the 5 calibration runs themselves would have false-positived
+        against each other."""
+        mean = sum(self.MEASURED_SCORES) / len(self.MEASURED_SCORES)
+        max_deviation = max(abs(s - mean) for s in self.MEASURED_SCORES)
+        self.assertGreater(model_drift.DEFAULT_NOISE_BAND, max_deviation)
+
+    def test_real_calibration_series_classifies_as_stable(self):
+        """The 5 live runs used to derive the band must themselves read as
+        stable under that band -- otherwise the calibration disagrees with
+        the classifier it calibrated."""
+        out = model_drift.classify(series(*self.MEASURED_SCORES))
+        self.assertEqual(out["verdict"], "stable")

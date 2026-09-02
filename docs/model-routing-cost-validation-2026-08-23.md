@@ -315,3 +315,58 @@ python3 evals/run_eval.py evals/router_cases.jsonl --backend openai \
   --base-url https://openrouter.ai/api/v1 --key-env OPENROUTER_API_KEY \
   --model <model> --tool-choice auto --with-foreign-tools
 ```
+
+## Addendum, 2026-09-01: model-behavior monitoring's noise-band calibration
+
+The model-behavior monitoring feature (issues #89-#92) needed a real
+measurement of the canary's own run-to-run variance before
+`model_drift.DEFAULT_NOISE_BAND` could be set to anything but a guess. That
+measurement also surfaced a real bug in the feature itself, worth recording
+alongside the data.
+
+**The bug, found before any live run could succeed:** `canary.run_canary()`
+defaulted to `backend="openai"` with no `base_url`/`key_env`, which
+`run_eval.py` itself resolves to `https://api.openai.com/v1` +
+`OPENAI_API_KEY` when neither is given. That endpoint has no
+`vendor/model`-style IDs and needs a different key entirely, so every
+canary run -- including the `--canary-run` CLI path -- would have failed
+immediately once actually exercised. This was in the original implementation
+plan's own text, so it passed every task review and the final whole-branch
+review; nothing in that process could run it live to notice. Fixed by
+defaulting `base_url`/`key_env` to this project's own already-configured
+Hermes provider (`parser_factory._hermes_url()` / `HERMES_API_KEY`) when
+neither is given explicitly, and by defaulting `tool_choice` to `"auto"`
+instead of `run_eval.py`'s own `"required"` default -- `"required"` is the
+same DeepSeek prompt-caching killer documented in Finding 2 above.
+
+**The calibration itself:** 5 consecutive live canary runs against
+`deepseek/deepseek-v4-flash` (`repeats=3`, the full 48-case
+`evals/canary_cases.jsonl`, `case_set_version 61a845d75929`), run
+sequentially -- `_run_harness()` identifies its own output by "newest file
+in `evals/results/`", so concurrent runs would race and grab each other's
+results.
+
+| Run | tool_accuracy | arg_accuracy | cost (USD) | wall time |
+|---|---|---|---|---|
+| 1 | 0.9514 | 0.9444 | $0.0837 | 460.6s |
+| 2 | 0.9583 | 0.9444 | $0.0774 | 482.6s |
+| 3 | 0.9514 | 0.9514 | $0.0764 | 509.5s |
+| 4 | 0.9514 | 0.9444 | $0.0824 | 479.9s |
+| 5 | 0.9444 | 0.9375 | $0.0788 | 440.5s |
+
+All 5 runs succeeded (`eval.status: "ok"`) at the same `case_set_version`.
+tool_accuracy: mean 0.9514, stdev 0.0049, range 0.0139 (min 0.9444, max
+0.9583) -- max single-run deviation from the mean was 0.0069, symmetric on
+both sides. Total cost across the 5 runs: $0.3987. Total wall time: ~40
+minutes (a single run over the full case set at `repeats=3` takes roughly
+7.5-8.5 minutes sequentially against a live provider -- plan around that,
+this is not a quick check).
+
+`DEFAULT_NOISE_BAND` is set to `0.02` -- roughly 3x the maximum observed
+single-run deviation, rounded to a clean number. It comfortably clears the
+measured noise (confirmed: the 5 calibration runs classify as `stable`
+against each other under this band) while remaining tight enough to catch
+a regression that would actually matter. This is a starting point from one
+model's one calibration run, not a permanent constant -- re-baseline if the
+case set changes size materially, or once enough real production history
+accumulates to compare against.

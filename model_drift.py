@@ -10,9 +10,18 @@ that alerts on that gets ignored within a week, which is worse than no
 canary. Hence: a drop must exceed a measured noise band AND persist across
 two consecutive runs before anything fires.
 
-The noise band is measured, not guessed -- see the baselining step in the
-implementation plan. DEFAULT_NOISE_BAND below is provisional until that
-measurement lands.
+The noise band is measured, not guessed. Calibrated 2026-09-01 against 5
+consecutive live canary runs of deepseek/deepseek-v4-flash (repeats=3,
+case_set_version 61a845d75929, cost $0.3987 total):
+  scores: [0.9514, 0.9583, 0.9514, 0.9514, 0.9444]
+  mean 0.9514, stdev 0.0049, range 0.0139 (max single-run deviation from
+  the mean was 0.0069, symmetric on both sides). DEFAULT_NOISE_BAND is set
+  to ~3x that maximum observed deviation, rounded to a clean number --
+  comfortably clears real run-to-run noise while still catching a
+  regression that matters. See docs/model-routing-cost-validation-2026-08-23.md
+  for the full run-by-run data. This one calibration is a starting point,
+  not a permanent constant -- re-baseline if the case set changes size
+  materially or after enough production history accumulates to compare.
 """
 
 import json
@@ -20,7 +29,7 @@ import json
 MIN_HISTORY = 4          # runs at one case_set_version before any verdict
 CONSECUTIVE_REQUIRED = 2  # degraded runs in a row before firing
 MIN_TREND_R2 = 0.6        # matches berserk_mcp.py:2913's forecastability floor
-DEFAULT_NOISE_BAND = 0.05  # PROVISIONAL -- replace with measured variance
+DEFAULT_NOISE_BAND = 0.02  # measured 2026-09-01, see module docstring
 
 CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 
