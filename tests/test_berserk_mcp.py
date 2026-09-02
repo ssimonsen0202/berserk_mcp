@@ -6557,5 +6557,116 @@ class RunCanaryPassTest(unittest.TestCase):
             bm._attach_fingerprints = orig_attach
 
 
+class RunDriftReportTest(unittest.TestCase):
+    """run_drift_report() extracted from inline --drift-report logic, the
+    same way run_canary_pass() was -- and specifically fixes a regression
+    introduced by the FIRST fix pass: catching group_by_model's JSON parse
+    failure and silently returning {} made a parse failure read exactly
+    like "no canary results", so this function printed "All models
+    stable" and returned 0 on a totally broken read path. Found by an
+    independent Codex backtest of that first fix, 2026-09-02 -- proof the
+    "verify by running it" discipline has to apply to fixes, not just the
+    original code."""
+
+    def test_parse_failure_is_reported_as_a_failure_not_stable(self):
+        aligned_table_text = "model    accuracy\nvendor/x    0.95\n"
+        orig = bm.bzrk_search_json
+        bm.bzrk_search_json = lambda kql, since: (aligned_table_text, False)
+        try:
+            code = bm.run_drift_report()
+            self.assertEqual(code, 2)
+        finally:
+            bm.bzrk_search_json = orig
+
+    def test_genuinely_no_rows_still_reports_zero(self):
+        """The fix for the parse-failure case must not turn a real "no
+        results yet" case into a false failure."""
+        orig = bm.bzrk_search_json
+        bm.bzrk_search_json = lambda kql, since: ("(no rows)", False)
+        try:
+            code = bm.run_drift_report()
+            self.assertEqual(code, 0)
+        finally:
+            bm.bzrk_search_json = orig
+
+    def test_query_error_returns_two(self):
+        orig = bm.bzrk_search_json
+        bm.bzrk_search_json = lambda kql, since: ("boom", True)
+        try:
+            code = bm.run_drift_report()
+            self.assertEqual(code, 2)
+        finally:
+            bm.bzrk_search_json = orig
+
+
+class ModelDriftDispatcherFingerprintTest(unittest.TestCase):
+    """Both model_drift_check and model_drift_history's own tool
+    descriptions promise reporting fingerprint status; neither dispatcher
+    branch rendered it in the first fix pass, even though classify() (as
+    of that same pass) already computed it. Found by Codex backtest,
+    2026-09-02."""
+
+    ROW_COLUMNS = ["timestamp", "model", "status", "case_set_version", "role",
+                   "discovery_mode", "tier", "tool_accuracy", "arg_accuracy",
+                   "repeats", "behavioral_fingerprint", "provider_metadata_fingerprint"]
+
+    def _fake_bzrk_json(self, rows):
+        payload = {"Tables": [{
+            "schema": {"columns": [{"name": c} for c in self.ROW_COLUMNS]},
+            "rows": rows,
+        }]}
+        return json.dumps(payload)
+
+    def test_model_drift_check_renders_fingerprint_status_on_stable_verdict(self):
+        rows = [
+            [f"2026-09-0{i}T00:00:00Z", "vendor/model", "ok", "v1", "all", "0", "",
+             0.9, 0.9, 3, "fpB", "fpB"]
+            for i in range(1, 5)
+        ]
+        fake_json = self._fake_bzrk_json(rows)
+        orig = bm.bzrk_search_json
+        bm.bzrk_search_json = lambda kql, since: (fake_json, False)
+        try:
+            text, err = bm.handle_call("model_drift_check", {})
+            self.assertFalse(err)
+            self.assertIn("stable", text)
+            self.assertIn("fingerprint", text.lower())
+            self.assertIn("fpB", text)
+        finally:
+            bm.bzrk_search_json = orig
+
+    def test_model_drift_check_reports_parse_failure_as_an_error(self):
+        orig = bm.bzrk_search_json
+        bm.bzrk_search_json = lambda kql, since: ("model    accuracy\nvendor/x    0.95\n", False)
+        try:
+            text, err = bm.handle_call("model_drift_check", {})
+            self.assertTrue(err)
+        finally:
+            bm.bzrk_search_json = orig
+
+    def test_model_drift_history_renders_fingerprint_history(self):
+        rows = [["2026-09-02T00:00:00Z", "vendor/model", "ok", "v1", "all", "0", "",
+                  0.9, 0.9, 3, "behavioral123", "metadata456"]]
+        fake_json = self._fake_bzrk_json(rows)
+        orig = bm.bzrk_search_json
+        bm.bzrk_search_json = lambda kql, since: (fake_json, False)
+        try:
+            text, err = bm.handle_call("model_drift_history", {"model": "vendor/model"})
+            self.assertFalse(err)
+            self.assertIn("behavioral123", text)
+            self.assertIn("metadata456", text)
+        finally:
+            bm.bzrk_search_json = orig
+
+    def test_model_drift_history_reports_parse_failure_as_an_error(self):
+        orig = bm.bzrk_search_json
+        bm.bzrk_search_json = lambda kql, since: ("model    accuracy\nvendor/x    0.95\n", False)
+        try:
+            text, err = bm.handle_call("model_drift_history", {"model": "vendor/model"})
+            self.assertTrue(err)
+        finally:
+            bm.bzrk_search_json = orig
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

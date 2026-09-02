@@ -46,7 +46,6 @@ documented text fallback for older bzrk builds. All fixed below.
 
 import json
 import os
-import sys
 
 MIN_HISTORY = 4           # runs at one case-set/role/discovery combination before any verdict
 CONSECUTIVE_REQUIRED = 2  # degraded runs in a row before firing
@@ -84,24 +83,46 @@ def _current_environment_rows(rows):
     if not rows:
         return []
     latest = rows[-1]
-    key = (latest.get("case_set_version"), latest.get("role"), latest.get("discovery_mode"))
-    return [r for r in rows
-            if (r.get("case_set_version"), r.get("role"), r.get("discovery_mode")) == key]
+    fields = ("case_set_version", "role", "discovery_mode", "tier")
+    key = tuple(latest.get(f) for f in fields)
+    return [r for r in rows if tuple(r.get(f) for f in fields) == key]
 
 
-def _fingerprint_changed(rows):
-    """True if either fingerprint differs between the two most recent
-    usable rows (already filtered to one case-set/role/discovery
-    combination by the caller). A missing or empty fingerprint on either
-    side never counts as a change -- a run that skipped fingerprinting
+def _fingerprint_values(rows):
+    """The set of non-empty fingerprint values present across a window of
+    rows, per fingerprint kind. A window can legitimately span more than
+    one value (e.g. two fetch attempts against a rotating value) -- the
+    comparison in _fingerprint_changed is set-based for that reason."""
+    out = {"behavioral_fingerprint": set(), "provider_metadata_fingerprint": set()}
+    for row in rows:
+        for key in out:
+            val = row.get(key)
+            if val:
+                out[key].add(val)
+    return out
+
+
+def _fingerprint_changed(baseline_rows, recent_rows):
+    """True if either fingerprint's value-set in the recent window
+    disagrees with its value-set in the baseline window.
+
+    Takes the baseline/recent SPLIT, not the raw series -- comparing only
+    the two most recent rows (an earlier version) misses a transition
+    that lands exactly at the baseline/recent boundary. Concretely:
+    baseline=[(0.9,A),(0.9,A)], recent=[(0.6,B),(0.6,B)] -- the real A->B
+    change is between baseline's last row and recent's first row; the two
+    most recent rows are both already B, so a last-two-rows comparison
+    reports no change at all. Found by Codex backtest, 2026-09-02.
+
+    A fingerprint with no observed value on either side is not compared
+    (an empty set never "disagrees") -- a run that skipped fingerprinting
     (fetch failure, see berserk_mcp._attach_fingerprints) must not create
     a false "the provider changed" signal."""
-    if len(rows) < 2:
-        return False
-    a, b = rows[-2], rows[-1]
-    for key in ("behavioral_fingerprint", "provider_metadata_fingerprint"):
-        va, vb = a.get(key), b.get(key)
-        if va and vb and va != vb:
+    baseline_vals = _fingerprint_values(baseline_rows)
+    recent_vals = _fingerprint_values(recent_rows)
+    for key in baseline_vals:
+        b, r = baseline_vals[key], recent_vals[key]
+        if b and r and b != r:
             return True
     return False
 
@@ -116,26 +137,46 @@ def classify(series, noise_band=DEFAULT_NOISE_BAND, fingerprint_changed=None):
     classify(series) with nothing else) correct without every caller
     having to remember to compute it. Found by Codex review (2026-09-02):
     neither caller passed it, so fingerprint_changed was always False in
-    practice regardless of what the fingerprints actually showed."""
+    practice regardless of what the fingerprints actually showed.
+
+    The return dict always includes "fingerprint_changed" and
+    "fingerprint_values" (the recent window's own fingerprint set), even
+    when the verdict is "stable" -- a fingerprint-only change with
+    unchanged accuracy correctly stays "stable" (this function's job is
+    accuracy-trend classification, not provider-change detection; that is
+    mechanism 2 in the design spec, deliberately kept separate so a
+    single verdict cannot conflate "the score moved" with "the provider
+    changed"). But the two MCP tools' own descriptions promise reporting
+    "provider fingerprint status" regardless of verdict, and nothing
+    previously surfaced it when the verdict stayed stable -- found by
+    Codex backtest, 2026-09-02. Callers render these fields directly so
+    that promise holds even when no accuracy verdict fires."""
     rows = _current_environment_rows(_usable(series))
     if len(rows) < MIN_HISTORY:
         return {"verdict": "insufficient-data",
                 "reason": "not enough runs at the current case-set version, "
                           "role, and discovery-mode combination",
-                "confidence": "low"}
+                "confidence": "low", "fingerprint_changed": False,
+                "fingerprint_values": {}}
 
+    baseline_rows = rows[:-CONSECUTIVE_REQUIRED]
+    recent_rows = rows[-CONSECUTIVE_REQUIRED:]
     if fingerprint_changed is None:
-        fingerprint_changed = _fingerprint_changed(rows)
+        fingerprint_changed = _fingerprint_changed(baseline_rows, recent_rows)
+    fingerprint_values = {
+        k: sorted(v) for k, v in _fingerprint_values(recent_rows).items() if v
+    }
 
-    scores = [float(r["tool_accuracy"]) for r in rows]
-    baseline = sum(scores[:-CONSECUTIVE_REQUIRED]) / len(scores[:-CONSECUTIVE_REQUIRED])
-    recent = scores[-CONSECUTIVE_REQUIRED:]
+    scores = [float(r["tool_accuracy"]) for r in baseline_rows]
+    baseline = sum(scores) / len(scores)
+    recent = [float(r["tool_accuracy"]) for r in recent_rows]
 
     degraded = [s for s in recent if baseline - s > noise_band]
     if len(degraded) < CONSECUTIVE_REQUIRED:
         return {"verdict": "stable",
                 "reason": "no sustained drop beyond the noise band",
-                "confidence": "medium"}
+                "confidence": "medium", "fingerprint_changed": fingerprint_changed,
+                "fingerprint_values": fingerprint_values}
 
     drop = baseline - min(recent)
     sharp = drop > 2 * noise_band
@@ -158,7 +199,9 @@ def classify(series, noise_band=DEFAULT_NOISE_BAND, fingerprint_changed=None):
         reason += (f"; repeats={min(repeats_values)} is below the noise band's "
                    f"own calibration ({MIN_RELIABLE_REPEATS}), so this verdict "
                    "is less reliable than the band alone suggests")
-    return {"verdict": verdict, "reason": reason, "confidence": confidence}
+    return {"verdict": verdict, "reason": reason, "confidence": confidence,
+            "fingerprint_changed": fingerprint_changed,
+            "fingerprint_values": fingerprint_values}
 
 
 def series_kql(model=None, since="30d ago"):
@@ -175,6 +218,7 @@ def series_kql(model=None, since="30d ago"):
         " case_set_version=tostring(attributes['eval.case_set_version']),"
         " role=tostring(attributes['eval.role']),"
         " discovery_mode=tostring(attributes['eval.discovery_mode']),"
+        " tier=tostring(attributes['eval.tier']),"
         " tool_accuracy=toreal(attributes['eval.tool_accuracy']),"
         " arg_accuracy=toreal(attributes['eval.arg_accuracy']),"
         " repeats=toint(attributes['eval.repeats']),"
@@ -182,6 +226,25 @@ def series_kql(model=None, since="30d ago"):
         " provider_metadata_fingerprint=tostring(attributes['eval.provider_metadata_fingerprint'])"
         " | order by timestamp asc"
     )
+
+
+class BzrkResultParseError(Exception):
+    """bzrk_search_json returned output group_by_model could not parse as
+    JSON -- most likely an older bzrk build without --json support,
+    returning bzrk_search_json's documented plain aligned-table text
+    fallback instead (berserk_mcp.py:1536-1546).
+
+    This must never be silently treated the same as a genuinely empty
+    result. An earlier version of group_by_model caught the parse failure
+    internally and returned {} to avoid an uncaught JSONDecodeError -- but
+    that made a parse failure indistinguishable from "no canary results",
+    so --drift-report printed "All models stable" and exited 0 on a
+    totally broken read path (found by Codex backtest, 2026-09-02). This
+    is the same class of bug as fault #4 in
+    docs/claude-code-review-feedback-loop.md: a required check that
+    cannot tell "healthy" from "no evidence" reports health for both.
+    Callers must catch this distinctly and report it as a failure, not
+    swallow it into an empty/stable result."""
 
 
 def group_by_model(bzrk_json_text):
@@ -197,23 +260,20 @@ def group_by_model(bzrk_json_text):
     PARSED JSON (a dict/list), not raw text, and returns None -- never an
     exception -- for a shape it doesn't recognize; both must be handled.
 
-    bzrk_search_json() itself documents a text fallback for bzrk builds
-    that reject --json (berserk_mcp.py:1536-1546) -- that response is not
-    JSON at all. An earlier version of this function called json.loads()
-    unconditionally, which raised JSONDecodeError on that fallback text
-    instead of failing distinctly from "genuinely no rows" (found by Codex
-    review, 2026-09-02)."""
+    Raises BzrkResultParseError (not json.JSONDecodeError directly, and
+    not swallowed into {}) when the input isn't valid JSON -- see that
+    exception's docstring for why this must be loud, not silent. Callers
+    are responsible for catching it and reporting a failure."""
     from agent_analytics import _json_records
     if not bzrk_json_text.strip():
         return {}
     try:
         parsed = json.loads(bzrk_json_text)
-    except json.JSONDecodeError:
-        print("model_drift.group_by_model: bzrk output was not JSON -- "
-              "an older bzrk build without --json support? Treating as no "
-              "data, but this is a parse failure, not confirmation of an "
-              "empty result.", file=sys.stderr)
-        return {}
+    except json.JSONDecodeError as exc:
+        raise BzrkResultParseError(
+            "bzrk output was not JSON -- an older bzrk build without "
+            "--json support?"
+        ) from exc
     records = _json_records(parsed) or []
     grouped = {}
     for row in records:

@@ -127,38 +127,40 @@ class EmitTest(unittest.TestCase):
 class EnvironmentAttributionTest(unittest.TestCase):
     """run_eval.py spawns berserk_mcp.py as a subprocess with no env=
     override, so it inherits whatever BERSERK_MCP_ROLE / BERSERK_MCP_DISCOVERY
-    the calling shell has set -- the same tool-schema restriction a real
-    deployment applies. Without recording this, a role or discovery-mode
-    change looks identical to a model regression under the same
-    case_set_version. Found by Codex review, 2026-09-02."""
+    / BERSERK_MCP_TIER the calling shell has set -- the same tool-schema
+    restriction a real deployment applies. Without recording this, an
+    environment change looks identical to a model regression under the
+    same case_set_version. Role/discovery found by Codex review,
+    2026-09-02; tier -- an identically-shaped gap -- found by Codex's
+    backtest of that same fix, same day."""
 
     REPORT = BuildEvalRecordTest.REPORT
+    ENV_KEYS = ("BERSERK_MCP_ROLE", "BERSERK_MCP_DISCOVERY", "BERSERK_MCP_TIER")
 
-    def test_default_role_and_discovery_when_unset(self):
-        for k in ("BERSERK_MCP_ROLE", "BERSERK_MCP_DISCOVERY"):
+    def test_default_environment_when_unset(self):
+        for k in self.ENV_KEYS:
             os.environ.pop(k, None)
         rec = canary.build_eval_record(self.REPORT, "v", "r", 1)
         self.assertEqual(rec["eval.role"], "all")
         self.assertEqual(rec["eval.discovery_mode"], "0")
+        self.assertEqual(rec["eval.tier"], "")
 
-    def test_captures_configured_role_and_discovery(self):
-        old_role = os.environ.get("BERSERK_MCP_ROLE")
-        old_disc = os.environ.get("BERSERK_MCP_DISCOVERY")
+    def test_captures_configured_environment(self):
+        old = {k: os.environ.get(k) for k in self.ENV_KEYS}
         os.environ["BERSERK_MCP_ROLE"] = "claude"
         os.environ["BERSERK_MCP_DISCOVERY"] = "1"
+        os.environ["BERSERK_MCP_TIER"] = "deep"
         try:
             rec = canary.build_eval_record(self.REPORT, "v", "r", 1)
             self.assertEqual(rec["eval.role"], "claude")
             self.assertEqual(rec["eval.discovery_mode"], "1")
+            self.assertEqual(rec["eval.tier"], "deep")
         finally:
-            if old_role is None:
-                os.environ.pop("BERSERK_MCP_ROLE", None)
-            else:
-                os.environ["BERSERK_MCP_ROLE"] = old_role
-            if old_disc is None:
-                os.environ.pop("BERSERK_MCP_DISCOVERY", None)
-            else:
-                os.environ["BERSERK_MCP_DISCOVERY"] = old_disc
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
     def test_failure_record_also_captures_environment(self):
         os.environ["BERSERK_MCP_ROLE"] = "sre"
@@ -166,9 +168,11 @@ class EnvironmentAttributionTest(unittest.TestCase):
             rec = canary.build_failure_record("m", "openai", "v", "r", 1, "boom")
             self.assertEqual(rec["eval.role"], "sre")
             self.assertIn("eval.discovery_mode", rec)
+            self.assertIn("eval.tier", rec)
         finally:
             os.environ.pop("BERSERK_MCP_ROLE", None)
 
-    def test_role_and_discovery_keys_are_in_the_allowlist(self):
+    def test_environment_keys_are_in_the_allowlist(self):
         self.assertIn("eval.role", canary.EVAL_ATTRIBUTE_ALLOWLIST)
         self.assertIn("eval.discovery_mode", canary.EVAL_ATTRIBUTE_ALLOWLIST)
+        self.assertIn("eval.tier", canary.EVAL_ATTRIBUTE_ALLOWLIST)

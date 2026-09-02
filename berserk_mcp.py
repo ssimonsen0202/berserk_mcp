@@ -2956,15 +2956,38 @@ def _handle_call_uncached(name, arguments):
         if not out or out.strip() == "(no rows)":
             return (f"No canary results in {since}. Is --canary-run scheduled "
                     f"and BERSERK_MCP_CANARY_MODELS set?"), False
+        try:
+            grouped = model_drift.group_by_model(out)
+        except model_drift.BzrkResultParseError as exc:
+            # A parse failure is not "no data" -- reporting it as an error
+            # rather than silently returning "no canary results" is the
+            # same fix as --drift-report's below (see run_canary_pass's
+            # neighbor branch); found by Codex backtest, 2026-09-02.
+            return _fence_untrusted(f"could not read canary results: {exc}"), True
         lines = []
-        for model_name, series in model_drift.group_by_model(out).items():
+        for model_name, series in grouped.items():
             verdict = model_drift.classify(series)
             # The model name arrives from stored telemetry, so it is
             # attacker-influenceable in the same way host names are in
             # forecast_capacity -- fence it before returning it to a model.
             fenced = _fence_untrusted(model_name, inline=True)
-            lines.append(f"{fenced}: {verdict['verdict']} "
-                         f"({verdict['confidence']}) — {verdict['reason']}")
+            line = (f"{fenced}: {verdict['verdict']} "
+                    f"({verdict['confidence']}) — {verdict['reason']}")
+            # The tool's own description promises "provider fingerprint
+            # status" regardless of verdict -- classify() correctly keeps
+            # the verdict "stable" when only the fingerprint moved (that's
+            # mechanism 2 vs mechanism 3 staying separate, by design), but
+            # nothing previously surfaced the fingerprint status itself in
+            # that case. Fingerprint values are stored telemetry too, so
+            # fence them the same as status/model (found by Codex
+            # backtest, 2026-09-02).
+            if verdict["fingerprint_values"]:
+                fp_text = ", ".join(
+                    f"{k}={_fence_untrusted(v[-1], inline=True)}"
+                    for k, v in sorted(verdict["fingerprint_values"].items())
+                )
+                line += f" [fingerprint: {fp_text}]"
+            lines.append(line)
         return f"Model drift (window {since}):\n" + "\n".join(lines), False
 
     if name == "model_drift_history":
@@ -2978,23 +3001,34 @@ def _handle_call_uncached(name, arguments):
             return _fence_untrusted(out), True
         if not out or out.strip() == "(no rows)":
             return f"No canary results for {model} in {since}.", False
-        series_data = model_drift.group_by_model(out).get(model, [])
+        try:
+            grouped = model_drift.group_by_model(out)
+        except model_drift.BzrkResultParseError as exc:
+            return _fence_untrusted(f"could not read canary results: {exc}"), True
+        series_data = grouped.get(model, [])
         if not series_data:
             return f"No data for model {model}.", False
         lines = [f"Model quality history for {_fence_untrusted(model, inline=True)} (tool-routing only, window {since}):"]
         for row in series_data:
             ts = row.get("timestamp", "?")
             acc = row.get("tool_accuracy", "?")
-            # status arrives from stored telemetry (attributes['eval.status']),
-            # the same untrusted-data boundary as the model name above, which
-            # is already fenced -- status was not, so a forged
-            # berserk-mcp-eval record could inject unfenced text into this
-            # response (found by Codex review, 2026-09-02). timestamp and
-            # accuracy are safe: timestamp is Berserk's own native column,
-            # not an attribute value, and accuracy is cast through toreal()
-            # in series_kql, so it can only ever be numeric or null.
+            # status and the fingerprint fields all arrive from stored
+            # telemetry, the same untrusted-data boundary as the model
+            # name above, which is already fenced -- status was not
+            # (found by Codex review, 2026-09-02), and the fingerprint
+            # history the tool's own description promises was not
+            # rendered at all (found by Codex backtest, 2026-09-02).
+            # timestamp and accuracy are safe: timestamp is Berserk's own
+            # native column, not an attribute value, and accuracy is cast
+            # through toreal() in series_kql, so it can only ever be
+            # numeric or null.
             status = _fence_untrusted(row.get("status", "?"), inline=True)
-            lines.append(f"  {ts}: accuracy={acc}, status={status}")
+            line = f"  {ts}: accuracy={acc}, status={status}"
+            for key in ("behavioral_fingerprint", "provider_metadata_fingerprint"):
+                val = row.get(key)
+                if val:
+                    line += f", {key}={_fence_untrusted(val, inline=True)}"
+            lines.append(line)
         return "\n".join(lines), False
 
     if name == "find_similar":
@@ -5150,34 +5184,7 @@ def main():
         cases_path = os.environ.get("BERSERK_MCP_CANARY_CASES", str(Path(__file__).resolve().parent / "evals" / "canary_cases.jsonl"))
         sys.exit(run_canary_pass(models, cases_path, repeats))
     if ns.drift_report:
-        # Evaluate stored canary history; exit non-zero if any model is degrading
-        import model_drift
-        out, err = bzrk_search_json(model_drift.series_kql(None), "30d ago")
-        if err:
-            print(f"Drift report failed: {out}", file=sys.stderr)
-            sys.exit(2)
-        if not out or out.strip() == "(no rows)":
-            print("No canary results found.")
-            sys.exit(0)
-
-        degraded_models = []
-        for model_name, series in model_drift.group_by_model(out).items():
-            verdict = model_drift.classify(series)
-            if verdict["verdict"] in ("degrading", "step-change"):
-                degraded_models.append((model_name, verdict))
-
-        if degraded_models:
-            lines = ["Models with degraded or changed behavior:"]
-            for model_name, verdict in degraded_models:
-                fenced = _fence_untrusted(model_name, inline=True)
-                lines.append(f"  {fenced}: {verdict['verdict']} ({verdict['confidence']}) — {verdict['reason']}")
-            text = "\n".join(lines)
-            print(text, file=sys.stderr)
-            _post_discord_alert(text)
-            sys.exit(1)
-        else:
-            print("All models stable (tool-routing quality).")
-            sys.exit(0)
+        sys.exit(run_drift_report())
     if ns.http or HTTP_ENABLE:
         try:
             _serve_http()
@@ -5350,6 +5357,53 @@ def run_agent_report(since="6h ago", mode="operational", output_json=False):
         if spend_text:
             print("\n" + spend_text)
     return 1 if should_alert or spend_error else 0
+
+
+def run_drift_report(since="30d ago"):
+    """Evaluate stored canary history and return an exit code: 2 if the
+    query itself failed, 1 if any model is degrading/step-change, else 0.
+    A standalone function, not inline in main(), for the same reason as
+    run_canary_pass -- testable in isolation, and every path already
+    returns explicitly so there is nothing to accidentally fall through.
+
+    group_by_model() raising BzrkResultParseError (an older bzrk build's
+    non-JSON output) must be caught and reported as a failure here, not
+    left to propagate as an uncaught exception or -- the actual bug this
+    fixes -- silently treated as "no data", which made this function
+    print "All models stable" and return 0 on a totally broken read path
+    (found by Codex backtest, 2026-09-02)."""
+    import model_drift
+    out, err = bzrk_search_json(model_drift.series_kql(None), since)
+    if err:
+        print(f"Drift report failed: {out}", file=sys.stderr)
+        return 2
+    if not out or out.strip() == "(no rows)":
+        print("No canary results found.")
+        return 0
+
+    try:
+        grouped = model_drift.group_by_model(out)
+    except model_drift.BzrkResultParseError as exc:
+        print(f"Drift report failed: could not read canary results: {exc}", file=sys.stderr)
+        return 2
+
+    degraded_models = []
+    for model_name, series in grouped.items():
+        verdict = model_drift.classify(series)
+        if verdict["verdict"] in ("degrading", "step-change"):
+            degraded_models.append((model_name, verdict))
+
+    if degraded_models:
+        lines = ["Models with degraded or changed behavior:"]
+        for model_name, verdict in degraded_models:
+            fenced = _fence_untrusted(model_name, inline=True)
+            lines.append(f"  {fenced}: {verdict['verdict']} ({verdict['confidence']}) — {verdict['reason']}")
+        text = "\n".join(lines)
+        print(text, file=sys.stderr)
+        _post_discord_alert(text)
+        return 1
+    print("All models stable (tool-routing quality).")
+    return 0
 
 
 def run_canary_pass(models, cases_path, repeats):

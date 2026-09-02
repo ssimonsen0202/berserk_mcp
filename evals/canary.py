@@ -39,7 +39,7 @@ EVAL_ATTRIBUTE_ALLOWLIST = frozenset({
     "eval.tool_accuracy", "eval.arg_accuracy", "eval.repeats",
     "eval.total_cost_usd", "eval.run_id", "eval.status", "eval.error",
     "eval.behavioral_fingerprint", "eval.provider_metadata_fingerprint",
-    "eval.role", "eval.discovery_mode",
+    "eval.role", "eval.discovery_mode", "eval.tier",
 })
 
 
@@ -53,31 +53,44 @@ def case_set_version(path=DEFAULT_CASES):
 
 
 def _current_environment():
-    """BERSERK_MCP_ROLE and BERSERK_MCP_DISCOVERY, read the same way
-    berserk_mcp.py itself reads them (berserk_mcp.py:144, :2408-2410).
+    """BERSERK_MCP_ROLE, BERSERK_MCP_DISCOVERY, and BERSERK_MCP_TIER, read
+    the same way berserk_mcp.py itself reads them (berserk_mcp.py:144,
+    :2408-2410, :621).
 
     run_eval.py spawns berserk_mcp.py as a subprocess with no env=
-    override, so it inherits whatever role/discovery mode the calling
+    override, so it inherits whatever role/discovery/tier the calling
     shell has set -- the same tool schema restriction a real deployment
     applies. A canary run under BERSERK_MCP_ROLE=claude sees only the
     claude-lane tools; canary_cases.jsonl was written against the full
-    unrestricted schema. Without recording this, a role or discovery-mode
-    change looks identical to a model regression under the same
-    case_set_version (found by Codex review, 2026-09-02)."""
+    unrestricted schema. Without recording this, a role, discovery-mode,
+    or tier change looks identical to a model regression under the same
+    case_set_version (role/discovery found by Codex review, 2026-09-02;
+    tier -- an identically-shaped gap -- found by Codex backtest of that
+    same fix, same day: BERSERK_MCP_TIER also hides tools, per
+    berserk_mcp.py's own `HIDDEN_ON_SMALL_TIER`-style filtering).
+
+    Records the RAW BERSERK_MCP_TIER value, not berserk_mcp.py's resolved
+    ACTIVE_TIER_RESOLVED (which additionally depends on role when tier is
+    unset) -- computing that resolution here would duplicate
+    _resolve_tier()'s logic in a module that deliberately stays decoupled
+    from berserk_mcp.py's internals (see this module's own docstring).
+    The raw value is enough to detect "the environment changed"."""
     role = os.environ.get("BERSERK_MCP_ROLE", "all").strip().lower() or "all"
     discovery = os.environ.get("BERSERK_MCP_DISCOVERY", "").strip().lower() in \
         {"1", "true", "yes", "on"}
-    return role, ("1" if discovery else "0")
+    tier = os.environ.get("BERSERK_MCP_TIER", "").strip().lower()
+    return role, ("1" if discovery else "0"), tier
 
 
 def build_eval_record(report, version, run_id, started_ns):
-    role, discovery_mode = _current_environment()
+    role, discovery_mode, tier = _current_environment()
     record = {
         "eval.model": report.get("model", ""),
         "eval.backend": report.get("backend", ""),
         "eval.case_set_version": version,
         "eval.role": role,
         "eval.discovery_mode": discovery_mode,
+        "eval.tier": tier,
         "eval.tool_accuracy": float(report["tool_accuracy"]),
         "eval.arg_accuracy": float(report["arg_accuracy"]),
         "eval.repeats": int(report.get("repeats", 1)),
@@ -93,13 +106,14 @@ def build_eval_record(report, version, run_id, started_ns):
 def build_failure_record(model, backend, version, run_id, started_ns, error):
     """A failed run is recorded as a failure, never as a score of zero --
     otherwise a provider outage looks like a catastrophic quality drop."""
-    role, discovery_mode = _current_environment()
+    role, discovery_mode, tier = _current_environment()
     return {
         "eval.model": model,
         "eval.backend": backend,
         "eval.case_set_version": version,
         "eval.role": role,
         "eval.discovery_mode": discovery_mode,
+        "eval.tier": tier,
         "eval.run_id": run_id,
         "eval.status": "failed",
         "eval.error": str(error)[:500],

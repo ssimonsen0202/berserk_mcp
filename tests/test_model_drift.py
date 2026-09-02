@@ -4,9 +4,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import model_drift
 
 
-def series(*scores, version="v1", role="all", discovery_mode="0", repeats=3):
+def series(*scores, version="v1", role="all", discovery_mode="0", tier="", repeats=3):
     return [{"tool_accuracy": s, "case_set_version": version, "status": "ok",
-             "role": role, "discovery_mode": discovery_mode, "repeats": repeats}
+             "role": role, "discovery_mode": discovery_mode, "tier": tier,
+             "repeats": repeats}
             for s in scores]
 
 
@@ -139,6 +140,16 @@ class RoleAndDiscoveryModeGateClassificationTest(unittest.TestCase):
         # the role="all" baseline.
         self.assertEqual(out["verdict"], "stable")
 
+    def test_tier_change_is_not_compared_across(self):
+        """BERSERK_MCP_TIER hides tools the same way role/discovery mode
+        do -- an identically-shaped gap to the role/discovery one above,
+        missed in the first fix and found by Codex's backtest of that
+        same fix, same day."""
+        mixed = (series(0.88, 0.88, tier="small")
+                + series(0.60, 0.60, 0.60, 0.60, tier="deep"))
+        out = model_drift.classify(mixed, noise_band=0.05)
+        self.assertEqual(out["verdict"], "stable")
+
 
 class RepeatsConfidenceTest(unittest.TestCase):
     """The noise band was calibrated at repeats=3. At repeats=1, a single
@@ -188,15 +199,38 @@ class SeriesKqlTableTest(unittest.TestCase):
 
 class GroupByModelJsonFallbackTest(unittest.TestCase):
     """bzrk_search_json() documents a plain aligned-table text fallback for
-    bzrk builds that reject --json (berserk_mcp.py:1536-1546). A prior
-    version called json.loads() unconditionally, raising JSONDecodeError
-    on that fallback text instead of failing distinctly from "genuinely no
-    rows". Found by Codex review, 2026-09-02."""
+    bzrk builds that reject --json (berserk_mcp.py:1536-1546).
 
-    def test_non_json_text_does_not_raise(self):
+    This went through two contract changes:
+    - Originally: json.loads() unconditionally, raising a bare
+      JSONDecodeError on that fallback text. Found by Codex review,
+      2026-09-02.
+    - First fix: caught the JSONDecodeError and returned {} -- but that
+      made a parse failure indistinguishable from a genuinely empty
+      result, so --drift-report printed "All models stable" and exited 0
+      on a totally broken read path. Found by Codex backtest of that same
+      fix, same day -- the fix introduced a new failure mode instead of
+      fixing the original one.
+    - Current: raises BzrkResultParseError distinctly, so callers can
+      (and must) tell "couldn't read this" apart from "read it, no rows".
+      See RunDriftReportTest and the dispatcher tests in
+      tests/test_berserk_mcp.py for the caller side of this contract."""
+
+    def test_non_json_text_raises_a_distinct_typed_error(self):
         aligned_table_text = "model    accuracy\nvendor/x    0.95\n"
-        result = model_drift.group_by_model(aligned_table_text)  # must not raise
-        self.assertEqual(result, {})
+        with self.assertRaises(model_drift.BzrkResultParseError):
+            model_drift.group_by_model(aligned_table_text)
+
+    def test_error_is_not_a_bare_json_decode_error(self):
+        """Callers must be able to catch this without importing json
+        themselves, and must not accidentally catch it via a bare
+        `except Exception` that also swallows real bugs."""
+        try:
+            model_drift.group_by_model("not json")
+        except model_drift.BzrkResultParseError as exc:
+            self.assertNotIsInstance(exc, json.JSONDecodeError)
+        else:
+            self.fail("expected BzrkResultParseError")
 
 
 class FingerprintChangedAutoDerivationTest(unittest.TestCase):
@@ -209,7 +243,7 @@ class FingerprintChangedAutoDerivationTest(unittest.TestCase):
 
     def _row(self, score, fp):
         return {"tool_accuracy": score, "case_set_version": "v1", "status": "ok",
-                "role": "all", "discovery_mode": "0", "repeats": 3,
+                "role": "all", "discovery_mode": "0", "tier": "", "repeats": 3,
                 "behavioral_fingerprint": fp, "provider_metadata_fingerprint": fp}
 
     def test_fingerprint_change_on_the_last_transition_raises_confidence(self):
@@ -223,8 +257,41 @@ class FingerprintChangedAutoDerivationTest(unittest.TestCase):
             model_drift.CONFIDENCE_RANK[without["confidence"]],
         )
 
+    def test_fingerprint_change_at_the_baseline_recent_boundary_is_still_detected(self):
+        """The regression test for the actual bug: comparing only the two
+        most recent rows (an earlier version) misses a transition that
+        lands exactly at the baseline/recent boundary. Here the
+        fingerprint and the score both change between row[1] and row[2],
+        so the two most recent rows (row[2], row[3]) are already both
+        "b" -- a last-two-rows comparison finds no change at all. Found
+        by Codex backtest, 2026-09-02."""
+        rows = [self._row(0.9, "a"), self._row(0.9, "a"),
+                self._row(0.6, "b"), self._row(0.6, "b")]
+        self.assertFalse(
+            rows[-2]["behavioral_fingerprint"] != rows[-1]["behavioral_fingerprint"],
+            "test setup sanity check: the last two rows must share a fingerprint "
+            "for this to actually exercise the boundary case",
+        )
+        auto = model_drift.classify(rows, noise_band=0.05)
+        self.assertTrue(auto["fingerprint_changed"])
+        self.assertIn("fingerprint", auto["reason"])
+
     def test_no_fingerprint_change_does_not_raise_confidence(self):
         rows = [self._row(0.9, "a"), self._row(0.9, "a"),
                 self._row(0.6, "a"), self._row(0.6, "a")]
         auto = model_drift.classify(rows, noise_band=0.05)
         self.assertNotIn("fingerprint", auto["reason"])
+
+    def test_stable_verdict_still_reports_fingerprint_values(self):
+        """classify()'s job is accuracy-trend classification, not
+        provider-change detection (that's mechanism 2 in the design spec,
+        kept deliberately separate) -- a fingerprint-only change with
+        unchanged accuracy correctly stays "stable". But the two MCP
+        tools' own descriptions promise reporting fingerprint status
+        regardless of verdict, and nothing previously surfaced it when
+        the verdict stayed stable. Found by Codex backtest, 2026-09-02."""
+        rows = [self._row(0.9, "a"), self._row(0.9, "a"),
+                self._row(0.9, "b"), self._row(0.9, "b")]
+        out = model_drift.classify(rows, noise_band=0.05)
+        self.assertEqual(out["verdict"], "stable")
+        self.assertEqual(out["fingerprint_values"]["behavioral_fingerprint"], ["b"])
