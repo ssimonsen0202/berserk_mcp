@@ -80,16 +80,21 @@ def build_failure_record(model, backend, version, run_id, started_ns, error):
     }
 
 
-def _run_harness(model, backend, cases_path, repeats, timeout=900):
+def _run_harness(model, backend, cases_path, repeats, base_url=None, key_env=None,
+                 tool_choice=None, timeout=900):
     """Invoke run_eval.py and return its saved report. Mirrors ci_gate.py."""
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     before = set(RESULTS_DIR.glob("*.json"))
-    proc = subprocess.run(
-        [sys.executable, str(HERE / "run_eval.py"),
-         "--backend", backend, "--model", model,
-         "--repeats", str(repeats), str(cases_path)],
-        capture_output=True, text=True, timeout=timeout,
-    )
+    cmd = [sys.executable, str(HERE / "run_eval.py"),
+           "--backend", backend, "--model", model, "--repeats", str(repeats)]
+    if base_url:
+        cmd += ["--base-url", base_url]
+    if key_env:
+        cmd += ["--key-env", key_env]
+    if tool_choice:
+        cmd += ["--tool-choice", tool_choice]
+    cmd.append(str(cases_path))
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
         raise RuntimeError(f"run_eval.py exited {proc.returncode}: {proc.stderr[:500]}")
     new_files = set(RESULTS_DIR.glob("*.json")) - before
@@ -99,12 +104,40 @@ def _run_harness(model, backend, cases_path, repeats, timeout=900):
     return json.loads(newest.read_text(encoding="utf-8"))
 
 
-def run_canary(model, backend="openai", cases_path=DEFAULT_CASES, repeats=3):
+def run_canary(model, backend="openai", cases_path=DEFAULT_CASES, repeats=3,
+               base_url=None, key_env=None, tool_choice=None):
+    """base_url/key_env default to this project's own configured Hermes
+    provider (BERSERK_LLM_HERMES_URL / HERMES_API_KEY) when the backend is
+    "openai" and neither is given explicitly -- the same provider
+    parser_factory's generate_parser already uses. Without this,
+    run_eval.py's own default ("openai" backend -> api.openai.com,
+    OPENAI_API_KEY) would silently target the wrong provider with the
+    wrong key for any non-OpenAI model ID like "vendor/model" (found while
+    running the first real calibration against this code, 2026-09-01).
+
+    tool_choice defaults to "auto" for the same reason: run_eval.py itself
+    defaults "openai" backend to tool_choice="required", which silently
+    disables DeepSeek's prompt caching -- the entire reason
+    deepseek-v4-flash costs what it does. "auto" matches how models are
+    actually used in production (see README's Choosing a model section)."""
+    if backend == "openai":
+        if base_url is None:
+            sys.path.insert(0, str(REPO_ROOT))
+            import parser_factory
+            hermes_url = parser_factory._hermes_url()
+            suffix = "/chat/completions"
+            if hermes_url and hermes_url.endswith(suffix):
+                base_url = hermes_url[: -len(suffix)]
+        if key_env is None:
+            key_env = "HERMES_API_KEY"
+        if tool_choice is None:
+            tool_choice = "auto"
     version = case_set_version(cases_path)
     run_id = uuid.uuid4().hex[:16]
     started_ns = int(time.time() * 1_000_000_000)
     try:
-        report = _run_harness(model, backend, cases_path, repeats)
+        report = _run_harness(model, backend, cases_path, repeats,
+                              base_url=base_url, key_env=key_env, tool_choice=tool_choice)
     except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
         return build_failure_record(model, backend, version, run_id, started_ns, exc)
     return build_eval_record(report, version, run_id, started_ns)

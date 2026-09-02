@@ -1,7 +1,13 @@
 import json, sys, unittest
 from pathlib import Path
+from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import canary  # noqa: E402
+# parser_factory lives at the repo root, not in evals/. canary.py only adds
+# the repo root to sys.path lazily, inside run_canary() itself -- add it
+# here too so mock.patch("parser_factory...") can resolve the module before
+# run_canary() ever executes.
+sys.path.insert(0, str(canary.REPO_ROOT))
 
 
 class CaseSetVersionTest(unittest.TestCase):
@@ -51,6 +57,61 @@ class BuildEvalRecordTest(unittest.TestCase):
         self.assertEqual(rec["eval.status"], "failed")
         self.assertNotIn("eval.tool_accuracy", rec)
         self.assertNotIn("eval.arg_accuracy", rec)
+
+
+class RunCanaryProviderRoutingTest(unittest.TestCase):
+    """run_canary must not silently fall through to run_eval.py's own
+    OpenAI-proper default (api.openai.com + OPENAI_API_KEY) -- that default
+    cannot serve a non-OpenAI model ID and was never noticed until the
+    first real calibration run against this code, 2026-09-01."""
+
+    def test_default_routes_through_configured_hermes_provider(self):
+        captured = {}
+
+        def fake_run_harness(model, backend, cases_path, repeats, **kwargs):
+            captured.update(kwargs)
+            return {"backend": backend, "model": model, "repeats": repeats,
+                    "tool_accuracy": 1.0, "arg_accuracy": 1.0, "rows": []}
+
+        with mock.patch.object(canary, "_run_harness", fake_run_harness), \
+             mock.patch("parser_factory._hermes_url",
+                        return_value="https://openrouter.ai/api/v1/chat/completions"):
+            canary.run_canary("deepseek/deepseek-v4-flash")
+
+        self.assertEqual(captured["base_url"], "https://openrouter.ai/api/v1")
+        self.assertEqual(captured["key_env"], "HERMES_API_KEY")
+        self.assertEqual(captured["tool_choice"], "auto")
+
+    def test_explicit_arguments_are_never_overridden(self):
+        captured = {}
+
+        def fake_run_harness(model, backend, cases_path, repeats, **kwargs):
+            captured.update(kwargs)
+            return {"backend": backend, "model": model, "repeats": repeats,
+                    "tool_accuracy": 1.0, "arg_accuracy": 1.0, "rows": []}
+
+        with mock.patch.object(canary, "_run_harness", fake_run_harness):
+            canary.run_canary("m", base_url="https://x.example/v1",
+                              key_env="MY_KEY", tool_choice="required")
+
+        self.assertEqual(captured["base_url"], "https://x.example/v1")
+        self.assertEqual(captured["key_env"], "MY_KEY")
+        self.assertEqual(captured["tool_choice"], "required")
+
+    def test_non_openai_backend_is_not_routed_through_hermes(self):
+        captured = {}
+
+        def fake_run_harness(model, backend, cases_path, repeats, **kwargs):
+            captured.update(kwargs)
+            return {"backend": backend, "model": model, "repeats": repeats,
+                    "tool_accuracy": 1.0, "arg_accuracy": 1.0, "rows": []}
+
+        with mock.patch.object(canary, "_run_harness", fake_run_harness):
+            canary.run_canary("claude-opus-4-8", backend="anthropic")
+
+        self.assertIsNone(captured["base_url"])
+        self.assertIsNone(captured["key_env"])
+        self.assertIsNone(captured["tool_choice"])
 
 
 class EmitTest(unittest.TestCase):
