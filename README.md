@@ -42,10 +42,16 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.27.0**. This is a bullet-point overview, most recent
+Current version: **1.28.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.28.0** (2026-09-03) — Model-behavior monitoring: `model_drift_check`
+  and `model_drift_history` classify a canaried model's tool-routing
+  accuracy over time against a calibrated noise band, plus a `--drift-report`
+  CLI that alerts on sustained degradation. Two rounds of independent Codex
+  review, both fully re-verified by direct execution before and after each
+  fix. See [details](docs/releases/v1.28.0.md).
 - **v1.27.0** (2026-08-28) — Five security fixes from an independent Codex
   review: KQL validator bypasses, unfenced telemetry attributes, a gap in
   the injection delimiter, an OAuth-header redirect leak, and a bug that
