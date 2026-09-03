@@ -419,19 +419,35 @@ set, real models:
 | `deepseek/deepseek-v4-flash` | 46/51 (90.2%) | 48/51 (94.1%) | `jworkflow_burn`, `jworkflow_hotspots_2` | none |
 | `mistralai/mistral-saba` | 44/51 (86.3%) | 47/51 (92.2%) | `cc_recent`, `jworkflow_burn_2`, `jworkflow_hotspots` | none |
 
-**`deepseek/deepseek-chat` could not be re-baselined.** Five attempts over
-45+ minutes all failed partway through the same ~51-case run, always
-around case 12-13, with either a malformed (non-`choices`) response or an
-explicit `HTTP 429`. A direct, isolated single-call test of the exact case
-the run kept dying near (`raw_kql`) succeeded cleanly against the same
-model and endpoint -- so the failure is not this fix, not the prompt
-content, and not a client-side bug. It points to an intermittent issue
-with OpenRouter's `StreamLake` route for `deepseek-chat` specifically under
-this server's full ~51-tool, ~30K-token schema (`deepseek-chat` never
-caches, so every call resends the full schema at full price -- see Finding
-2 above). Left as a known gap: re-check `deepseek-chat` against this fix
-once that route is stable again, rather than keep retrying against a live
-external flake.
+**`deepseek/deepseek-chat` could not be re-baselined -- confirmed root
+cause, not a guess.** Six attempts over roughly an hour all failed, most
+partway through the ~51-case run. Added retry-with-backoff and an optional
+inter-call throttle to `evals/run_eval.py` (issue tracked in this same
+session) on the assumption it was a request-volume rate limit; that did
+not fix it. A direct raw HTTP call with the exact full 74-tool schema
+returned OpenRouter's real error body:
+
+```
+"deepseek/deepseek-chat is temporarily rate-limited upstream...
+provider_name: StreamLake, limit_source: upstream_provider_shared_pool
+previous_errors: [{provider_name: DeepInfra, same rate-limit error}]"
+```
+
+Both providers OpenRouter routes this model through (StreamLake, then its
+own DeepInfra fallback) are exhausted on their **shared free-tier pool** --
+contention from every OpenRouter user of this model, not from our own
+request volume or schema size. This is why a minimal single-tool call
+sometimes succeeds (lucky timing) while the full harness run consistently
+doesn't, and why neither retry-with-backoff nor throttling reliably fixes
+it -- retry-with-backoff is still the *correct* mechanism for this failure
+shape (a shared pool that clears intermittently), it just isn't guaranteed
+to win within a short window. The two real fixes, per OpenRouter's own
+error message: add a dedicated (BYOK) key for this model so it stops
+sharing the free pool, or add explicit provider routing/fallback ordering
+to the harness. Neither is implemented yet. Left as a known, now
+precisely-diagnosed gap: re-check `deepseek-chat` once one of those lands,
+rather than keep spending API calls against a pool this project doesn't
+control.
 
 A few misses remain open on both measured models after round 2 --
 `investigate_error_root_cause_2` and `jdive_loop` on `mistral-saba` (both
