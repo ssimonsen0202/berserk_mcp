@@ -479,3 +479,92 @@ if uneven, improvement rather than a clean full fix. Per this document's
 own established discipline, these are left as known limits rather than
 chased with further description tweaks that risk overfitting to these
 specific prompts.
+
+## Addendum, 2026-09-03: the `claude`-lane cluster fix (Task 1 of the brief)
+
+Phase 0 of `docs/mistral-small-optimization-plan-2026-09-03.md` found
+`mistral-small-3.2-24b-instruct` at 89.5% (34/38) in the `claude` lane, with 4
+misses forming a cluster, not independent pairs:
+`claude_workflow_insights` losing to `claude_token_burn`,
+`claude_efficiency_insights`, or `claude_errors`, and
+`claude_session_deep_dive` losing to `claude_loop_check`.
+`docs/task-brief-collision-clusters-2026-09-03.md` (Task 1) capped the fix
+attempt at 3 iterations with an explicit rule: compare miss sets between
+ledger records, not percentages -- a lesson from the 2026-09-02/03 fix
+rounds above, where flat aggregate accuracy once hid a real fix exactly
+offset by unrelated noise.
+
+**Iteration 1** added a disambiguator to `claude_efficiency_insights` (which
+had none) and `claude_errors` (broadened wording), plus a directive line to
+`claude_loop_check` pointing to `claude_session_deep_dive` when a
+`session_id` is named. Result: `jworkflow_burn` fixed. `cc_agent_codex_search`
+(unrelated to any of this) flipped from pass to fail. The other 3 target
+misses persisted.
+
+**Iteration 2** strengthened the same three descriptions further --
+broadened `claude_workflow_insights`'s own `Use for` list again, moved
+`claude_efficiency_insights`'s disambiguator to the front. Result: **worse**.
+`jworkflow_burn` regressed back to a miss; nothing new was fixed. A clean
+negative result, per the miss-set rule -- the percentage alone (88% -> 85%)
+would have said the same thing, but only checking the actual rows confirms
+it wasn't noise: the exact case that iteration 1 fixed is what broke.
+
+**Iteration 3** reverted `claude_workflow_insights` and
+`claude_efficiency_insights` to iteration 1's wording (kept
+`claude_loop_check`'s stronger phrasing -- it caused no regression anywhere
+it was tested). Re-ran as a confirmation, not a new attempt: reproduced
+iteration 1 exactly (`jworkflow_burn` fixed, `cc_agent_codex_search` still
+flipped). This is the shipped state.
+
+**On `cc_agent_codex_search` -- investigated, not just noted.** It reproduced
+identically across 2 runs at `role=claude` (expected at `temperature=0` with
+identical input), which first looked like a stable regression. Checking
+against the very first Phase 0a full-schema baseline (before any of Task 1's
+edits) showed it was **already failing there too** -- `search` instead of
+`claude_search`, the same wrong answer. It happened to pass in the one
+Phase 0b `role=claude` run this plan cites as baseline, but was never a
+reliably-correct case across configurations. Task 1's edits cost it its
+lucky win in the `role=claude` config specifically; they did not break a
+previously-solid case. Downgraded from "regression" to "an already-fragile
+case, now consistently wrong instead of inconsistently right" -- worth
+knowing, not worth blocking on.
+
+**Full regression check, both models, both configurations (the "zero
+regressions" requirement):**
+
+| Model | Scope | Before | After | Fixed | Newly broken |
+|---|---|---|---|---|---|
+| `mistral-small-3.2-24b-instruct` | `role=claude` (41 cases) | 34/38 (shared) | 34/38 (shared) | `jworkflow_burn` | `cc_agent_codex_search` (see above) |
+| `mistral-small-3.2-24b-instruct` | `role=all` (54 cases) | -- | 45/54 = 83% | `cc_agent_codex`, `jdive_gaps` | none |
+| `deepseek/deepseek-v4-flash` | `role=claude` (41 cases) | -- | 40/41 = 98% | -- | none |
+| `deepseek/deepseek-v4-flash` | `role=all` (54 cases) | 48/51 (shared) | 50/51 (shared) | `jworkflow_burn_2`, `jtoken_burn_guardrail` | none |
+
+`deepseek-v4-flash` shows a clean win at both scopes: zero regressions, real
+fixes, only one pre-existing unrelated miss remaining
+(`detect_anomalies_nearmiss`). `mistral-small` is a genuine wash on the
+`claude` lane specifically (explained above) but a clean win at full schema.
+
+**Held-out and guardrail cases added:** `jworkflow_hotspots_3` (differently-
+phrased variant -- still fails on `mistral-small`, passes on
+`deepseek-v4-flash`, confirming the residual is model-specific, not a broken
+fix), `jefficiency_guardrail` and `jloop_guardrail` (confirm neither
+disambiguated tool lost its own territory -- both pass on both models).
+
+**Residual misses, left open per this document's own discipline against
+overfitting (3-iteration cap reached):**
+
+```
+jdive_loop            expect claude_session_deep_dive  got claude_loop_check   (mistral-small only)
+jworkflow_burn_2      expect claude_workflow_insights  got claude_efficiency_insights  (mistral-small only)
+jworkflow_hotspots_2  expect claude_workflow_insights  got claude_errors       (mistral-small only)
+jworkflow_hotspots_3  expect claude_workflow_insights  got claude_errors       (mistral-small only)
+```
+
+All four now pass on `deepseek-v4-flash`. On `mistral-small` specifically,
+two iterations of stronger and repositioned disambiguating text produced no
+improvement and one clear regression when pushed further -- consistent with
+a genuine model-capability limit for this specific model on these specific
+semantic distinctions, not a wording problem. Candidate for
+`evals/tool_collisions.py`'s next pass or issue #23's escalation-policy work
+(route `mistral-small` to a stronger tier for this narrow case shape) rather
+than a fourth description attempt.

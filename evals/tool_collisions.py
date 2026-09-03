@@ -31,16 +31,25 @@ collisions are a different *mechanism*:
 `self_query_scores()` covers the second; `name_token_edges()` covers the
 first. `find_clusters()` unions both into one graph.
 
-**One known limitation, not silently hidden.** `claude_session_deep_dive`
-and `claude_loop_check` are a real, eval-confirmed collision
-(evals/run_ledger.jsonl, 2026-09-03T19:48) that neither signal detects
-cleanly here: they share no name token, and their description-ratio (~0.25-
-0.30) is too weak to separate from noise without a threshold low enough to
-flood the report with unrelated pairs. Lowering the threshold to catch it
-was tried and rejected -- it cost far more false positives than the one true
-positive was worth. Left as a documented miss: this method finds most
-lexical collisions, not all of them, and a real eval remains the only
-ground truth that catches everything.
+**One known limitation, resolved as a side effect, not by design.**
+`claude_session_deep_dive` and `claude_loop_check` were a real,
+eval-confirmed collision (evals/run_ledger.jsonl, 2026-09-03T19:48) that
+neither signal detected cleanly when this module was first written: they
+shared no name token, and their description-ratio (~0.25-0.30) was too
+weak to separate from noise without a threshold low enough to flood the
+report with unrelated pairs. Lowering the threshold to catch it was tried
+and rejected -- it cost far more false positives than the one true positive
+was worth.
+
+Task 1's fix to `claude_loop_check`'s description (adding the disambiguating
+line "see claude_session_deep_dive instead") happened to give the two
+descriptions enough shared vocabulary that this method now finds the pair
+too (description ratio ~0.59) -- not because the detection method improved,
+but because the underlying fix textually referenced the other tool by name.
+Kept as a worked example: this method finds most lexical collisions, not
+all of them, and a real eval remains the only ground truth that catches
+everything -- including, sometimes, retroactively confirming a fix by
+making a collision newly visible to this same tool.
 
 Stdlib only, no API calls, no live model -- pure analysis of
 `tool_discovery`'s existing index.

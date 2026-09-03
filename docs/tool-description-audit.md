@@ -123,13 +123,19 @@ that treated as an intentional lane prefix (`claude` shared by 21 tools,
 
 1. `claude_workflow_insights` / `claude_token_burn` / `claude_errors` /
    `claude_efficiency_insights` all one cluster — **yes**.
-2. `claude_session_deep_dive` / `claude_loop_check` same cluster — **no,
-   documented miss.** They share no name token, and their description-ratio
-   (~0.25-0.30) is too weak to separate from noise without a threshold that
-   floods the report with unrelated pairs. Tried and rejected. This
-   collision is real (confirmed by eval data) but this method cannot find it
-   cleanly — a real eval remains the only ground truth that catches
-   everything.
+2. `claude_session_deep_dive` / `claude_loop_check` same cluster — **no when
+   this was first checked, documented as a miss** for the same reason as
+   above: no shared name token, description-ratio too weak (~0.25-0.30) to
+   separate from noise without flooding the report. **Since resolved as a
+   side effect of Task 1's fix**, not by improving this method: Task 1 added
+   "see claude_session_deep_dive instead" to `claude_loop_check`'s
+   description, which gave the two tools enough shared vocabulary that this
+   method now finds the pair too (`tests/test_tool_collisions.py`'s
+   `test_session_deep_dive_loop_check_now_found`). Kept as the worked
+   example in the module docstring — this method finds most lexical
+   collisions, not all, and a real eval remains the ground truth that
+   catches everything, including retroactively confirming a fix by making a
+   collision newly visible.
 3. `claude_search` / `search`, isolated as a clean 2-tool cluster with no
    other members — **yes**.
 

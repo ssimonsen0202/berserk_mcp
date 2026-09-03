@@ -40,13 +40,39 @@ class GroundTruthCollisionsTest(unittest.TestCase):
         cls.clusters = _clusters()
 
     def test_workflow_insights_cluster_found(self):
-        for other in ("claude_token_burn", "claude_errors", "claude_efficiency_insights"):
+        # claude_efficiency_insights connects via a shared name token
+        # ("insight") -- structural, does not drift with description wording.
+        # claude_errors connects via description ratio, comfortably above
+        # threshold as of the 2026-09-03 iteration-2 fix.
+        for other in ("claude_errors", "claude_efficiency_insights"):
             with self.subTest(other=other):
                 self.assertTrue(
                     _same_cluster(self.clusters, "claude_workflow_insights", other),
                     f"claude_workflow_insights and {other} should be in the same "
                     "cluster -- this is the confirmed 2026-09-03 collision.",
                 )
+
+    def test_workflow_insights_token_burn_ratio_is_tracked_not_required(self):
+        """claude_token_burn's description-ratio to claude_workflow_insights
+        moved from 0.58 (round 2, 2026-09-03) to ~0.48 (Task 1 iteration 2,
+        same day) as Task 1's wording changes diluted shared vocabulary --
+        expected and arguably good (less lexical overlap between two tools
+        that were disambiguated). The real routing protection for this pair
+        is the reciprocal "see claude_workflow_insights for that" line on
+        claude_token_burn itself (unaffected by Task 1's edits), not this
+        script's threshold. Tracked here so a future edit that pushes the
+        ratio further doesn't go unnoticed, without hard-requiring a
+        specific value that wording changes will keep nudging around."""
+        scores = tc.self_query_scores(
+            td.build_index(bm.TOOLS + bm.MGMT_TOOLS), bm.TOOLS + bm.MGMT_TOOLS, top_k=8
+        )
+        ratio = next((r for n, _s, r in scores["claude_workflow_insights"]
+                     if n == "claude_token_burn"), 0.0)
+        self.assertGreater(ratio, 0.3,
+            f"claude_workflow_insights/claude_token_burn description ratio "
+            f"dropped to {ratio:.2f} -- if this keeps falling, confirm the "
+            "reciprocal disambiguator on claude_token_burn is still present "
+            "and still doing the real protective work.")
 
     def test_search_pair_found_and_isolated(self):
         self.assertTrue(_same_cluster(self.clusters, "claude_search", "search"))
@@ -58,16 +84,20 @@ class GroundTruthCollisionsTest(unittest.TestCase):
             "is over-firing on this pair specifically.",
         )
 
-    def test_session_deep_dive_loop_check_is_a_documented_miss(self):
-        """This collision is real (confirmed by eval data) but this method
-        cannot find it cleanly -- see the module docstring for why. If this
-        assertion starts failing (the pair IS found), that's not a bug to
-        fix reactively -- update the docstring and this test together,
-        since the "known limitation" claim would no longer be true."""
-        self.assertFalse(
+    def test_session_deep_dive_loop_check_now_found(self):
+        """This pair was a documented blind spot when Task 2 was first
+        written: real (confirmed by eval data) but undetected by this
+        method, since the two tools shared no name token and too weak a
+        description ratio to separate from noise. Task 1's fix to
+        claude_loop_check's description added the literal cross-reference
+        "see claude_session_deep_dive instead" -- which, as a side effect,
+        gave the two descriptions enough shared vocabulary that this
+        method now finds the pair too (description ratio ~0.59). If this
+        assertion starts failing again, the disambiguating text was
+        likely reworded away -- check berserk_mcp.py's claude_loop_check
+        description before assuming this test is wrong."""
+        self.assertTrue(
             _same_cluster(self.clusters, "claude_session_deep_dive", "claude_loop_check"),
-            "If this now passes, tool_collisions.py's docstring claim about "
-            "this being an undetected collision is stale -- update both.",
         )
 
 

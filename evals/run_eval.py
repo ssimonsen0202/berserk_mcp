@@ -283,7 +283,17 @@ def call_mock(user, tools):
             return "search"
         if "schema" in p or "tables" in p or "columns" in p:
             return "schema"
+        if "cost per successful outcome" in p or "harness configuration" in p:
+            return "claude_efficiency_insights"
+        if "token burn" in p or "burn breakdown" in p:
+            return "claude_token_burn"
+        if ("breaks" in p and "tool" in p) or ("burning" in p and "token" in p):
+            return "claude_workflow_insights"
         cc_agent = "claude" in p or "codex" in p
+        if cc_agent and ("hotspot" in p or "efficiently" in p or ("keep" in p and "fail" in p)):
+            return "claude_workflow_insights"
+        if cc_agent and "loop" in p:
+            return "claude_session_deep_dive" if any(ch.isdigit() for ch in p) else "claude_loop_check"
         if cc_agent and "error" in p:
             return "claude_errors"
         if cc_agent and ("tool" in p and "use" in p):
