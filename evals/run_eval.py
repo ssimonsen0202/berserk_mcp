@@ -25,6 +25,7 @@ Examples:
   python run_eval.py --backend mock router_cases.jsonl
 """
 import argparse
+import hashlib
 import json
 import os
 import statistics
@@ -121,6 +122,56 @@ def _http_error_message(error):
     code = error.code
     error.close()
     return f"HTTP {code} from backend"
+
+
+LEDGER_PATH = HERE / "run_ledger.jsonl"
+
+
+def append_to_ledger(*, backend, model, cases_path, tool_count, rows,
+                     tool_accuracy, arg_accuracy, agg, lat, extra=None):
+    """Append one distilled, committed record per real-model eval run.
+
+    `evals/results/` is gitignored and rotates -- raw per-case JSONs from
+    the 2026-08-23 sweep were already gone by 2026-09-03, so the numbers
+    this project's decisions cite could not be re-derived from anything
+    in the repo. This ledger is the durable counterpart: small enough to
+    commit and diff, complete enough to re-read a decision's evidence
+    months later. Distilled, not raw -- the miss list is what decisions
+    actually turn on.
+
+    Skipped for the mock backend: `ci_gate.py` runs it on every CI pass
+    and would bury the real runs.
+    """
+    if backend == "mock":
+        return
+    cases_file = Path(cases_path)
+    try:
+        version = hashlib.sha256(cases_file.read_bytes()).hexdigest()[:12]
+    except OSError:
+        version = ""
+    record = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "backend": backend,
+        "model": model,
+        "cases_file": cases_file.name,
+        "case_set_version": version,
+        "case_count": len(rows),
+        "role": os.environ.get("BERSERK_MCP_ROLE", "all").strip().lower() or "all",
+        "tier": os.environ.get("BERSERK_MCP_TIER", "").strip().lower(),
+        "discovery": os.environ.get("BERSERK_MCP_DISCOVERY", "").strip().lower(),
+        "tool_count": tool_count,
+        "tool_accuracy": round(tool_accuracy, 4),
+        "arg_accuracy": round(arg_accuracy, 4),
+        "misses": [{"id": r["id"], "expect": r["expect"], "got": r["got"]}
+                   for r in rows if not r.get("tool_ok")],
+        "total_cost_usd": agg.get("total_cost_usd") if agg else None,
+        "latency_median_ms": round(statistics.median(lat) * 1000) if lat and any(lat) else None,
+    }
+    if extra:
+        record.update(extra)
+    with LEDGER_PATH.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+    print(f"ledger:  evals/{LEDGER_PATH.name} (+1 record)")
 
 
 def _call_with_retry(fn, max_retries=3, base_delay=2.0):
@@ -655,6 +706,12 @@ def main():
               **agg, "rows": rows}
     (outdir / f"{safe}-{stamp}.json").write_text(json.dumps(report, indent=2))
     print(f"\nsaved: evals/results/{safe}-{stamp}.json")
+    append_to_ledger(
+        backend=backend, model=args_ns.model, cases_path=args_ns.cases,
+        tool_count=len(tools), rows=rows,
+        tool_accuracy=tool_hits/total, arg_accuracy=arg_hits/total,
+        agg=agg, lat=lat,
+    )
 
 
 if __name__ == "__main__":

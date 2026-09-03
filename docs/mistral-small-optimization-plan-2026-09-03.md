@@ -2,6 +2,19 @@
 
 Date: 2026-09-03
 
+## Evidence for every number in this plan
+
+Every measurement cited here has a machine-readable record in
+[`evals/run_ledger.jsonl`](../evals/run_ledger.jsonl), appended automatically
+by `evals/run_eval.py` on each real-model run. Phase 0's runs are the records
+timestamped `2026-09-03T19:46` through `19:51`; the description-fix rounds that
+precede them are `18:38` through `19:22`. Each carries its full miss list, so
+any claim below can be checked against the cases that produced it.
+
+Claims here that are *not* backed by a ledger record are labelled as estimates
+(the per-lane token figures) or as unknowns (local hardware behaviour). Treat
+that distinction as load-bearing.
+
 ## What this optimizes for
 
 `mistralai/mistral-small-3.2-24b-instruct` is the only model this project has

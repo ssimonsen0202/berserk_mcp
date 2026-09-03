@@ -2,6 +2,25 @@
 
 Date: 2026-08-23
 
+> **Where the underlying data lives.** This document is the narrative record.
+> The machine-readable one is [`evals/run_ledger.jsonl`](../evals/run_ledger.jsonl),
+> which `evals/run_eval.py` appends to automatically on every real-model run
+> (mock runs are skipped). One line per run: model, backend, case file and its
+> content hash, case count, role/tier/discovery config, tool count, both
+> accuracies, **the full miss list**, cost, and median latency.
+>
+> This exists because `evals/results/` is gitignored and rotates. The raw
+> per-case JSONs behind this document's own 2026-08-23 headline table were
+> already gone by 2026-09-03 -- the numbers this project cites in its README
+> could not be re-derived from anything in the repo. The ledger is the durable
+> counterpart: small enough to commit and diff, complete enough to re-read a
+> decision's evidence months later.
+>
+> **When citing a number in a decision, cite a ledger record**, not a
+> remembered figure. Check `case_count` and `role` before quoting an accuracy
+> -- a `--limit` smoke run and a full role-scoped sweep both land in the same
+> file, and they are not comparable.
+
 ## Summary
 
 An earlier idea note (2026-07-31, sourced from a PromptCost article on
