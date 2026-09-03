@@ -105,7 +105,78 @@ stops being optional polish and becomes load-bearing.
 
 ## Plan
 
-### Phase 0 -- Re-baseline before optimizing anything
+### Phase 0 -- Re-baseline before optimizing anything -- **DONE 2026-09-03**
+
+Actual spend: $0.2378. Results below; the two corrections above are settled,
+one confirmed and one refuted.
+
+**Correction 1 (stale baseline): REFUTED.** Against the current 51-case set,
+full schema, current descriptions: **41/51 = 80.4%**, versus the recorded 78%.
+Flat. This model did *not* inherit `mistral-saba`'s ~9-point gain. Those fixes
+were driven by misses found on other models, and this model fails on different
+pairs. **Optimizing for `mistral-small` means finding its own misses, not
+inheriting fixes made for its siblings.**
+
+**Correction 2 (wrong configuration): CONFIRMED, more strongly than expected.**
+Same cases, full schema versus lane schema, isolating schema size from case mix:
+
+| Lane | Tools | Cases | Full schema | Lane schema | Delta |
+|---|---|---|---|---|---|
+| `ops` | 23 | 17 | 94% | **100%** | +5.9 |
+| `sre` | 32 | 27 | 96% | **96%** | 0 |
+| `soc` | 31 | 21 | 95% | **95%** | 0 |
+| `claude` | 46 | 38 | 74% | **89%** | **+15.8** |
+| `all` | 74 | 51 | **80.4%** | -- | -- |
+
+In every realistic deployment shape this model runs at **89-100%**, not 78%.
+The gap this plan was written to close mostly does not exist once a role lane
+is set.
+
+**The mechanism is not "fewer tools is better."** `sre` and `soc` scored 96%
+and 95% *at the full 74-tool schema* -- scoping gained them nothing. The entire
+penalty sits in the `claude` lane. The cases that flipped say why:
+
+| Case | Lost to, at full schema | Lane of the competitor |
+|---|---|---|
+| `cc_search` | `search` | core/SRE |
+| `cc_agent_codex_search` | `search` | core/SRE |
+| `detect_anomalies_nearmiss` | `errors_by_service` | SRE |
+| `jcost_by_project` | `claude_spend_overview` | claude |
+| `jcost_by_model` | `claude_spend_overview` | claude |
+| `cc_agent_codex` | `claude_sessions` | claude |
+
+Four of six were lost to a tool from a **different lane** that shared
+vocabulary. So the full-schema penalty is **cross-lane competitor
+contamination**, not raw tool count. Role lanes already fix it. That is the
+cheap, already-built version of the "focused servers rather than one monolith"
+recommendation -- no re-architecture required.
+
+**A finding that changes Phase 3:** the 4 remaining `claude`-lane failures show
+the 2026-09-03 reciprocal fix worked, but a *third* tool moved into the gap.
+`jworkflow_burn` and `jworkflow_burn_2` now lose to **`claude_efficiency_insights`**,
+not the `claude_token_burn` that fix addressed:
+
+```
+jdive_loop            expect claude_session_deep_dive  got claude_loop_check
+jworkflow_burn        expect claude_workflow_insights  got claude_efficiency_insights
+jworkflow_hotspots_2  expect claude_workflow_insights  got claude_errors
+jworkflow_burn_2      expect claude_workflow_insights  got claude_efficiency_insights
+```
+
+This is not a pair, it is a **cluster**: `claude_workflow_insights` /
+`claude_token_burn` / `claude_errors` / `claude_efficiency_insights` all
+compete for the same prompts. Fixing it pairwise is whack-a-mole -- knock down
+one competitor and the next one takes the call. Phase 3 must disambiguate the
+cluster as a set, and Phase 1's collision analysis should rank *clusters*, not
+just pairs.
+
+**Latency, measured:** median 931-1329 ms per lane, p95 under 2.4 s at full
+schema -- comfortably the fastest of the three models tested this session
+(`deepseek-v4-flash` runs ~4.6 s median). Cost is not meaningful for a
+self-hosted deployment; recorded only because the measurement ran via
+OpenRouter.
+
+#### Original Phase 0 definition (retained for reference)
 
 Cost: ~$0.05 in API spend. Effort: hours.
 
@@ -236,9 +307,34 @@ keep saying until this runs.
   routing-validation doc already ruled that further description tweaks aimed at
   single adversarial phrasings risk overfitting. That ruling stands.
 
-## Sequencing
+## Sequencing -- revised after Phase 0
 
-Phase 0 gates everything. It is cheap, fast, and may show the gap is far
-smaller than 78% suggests -- or that role scoping alone closes it. Phase 1 runs
-free and in parallel. Phase 2 needs both. Phase 3 is incremental and
-open-ended. Phase 4 is blocked on a hardware answer this repo does not have.
+Phase 0 is done, and it reorders what is left.
+
+**Phase 2 is now mostly answerable and should come next**, because the data
+exists and it costs nothing further: a sovereign deployment should run
+**role-scoped, never `all`**. At `ops`, `sre`, or `soc` this model needs no
+optimization work at all -- it measured 96-100% with the current descriptions.
+The recommendation and these numbers belong in the README's sovereign section,
+which today publishes 78% with no mention of configuration and is therefore
+misleading about the model it recommends.
+
+**Phase 3 narrows to one target: the `claude` lane**, and specifically the
+`claude_workflow_insights` / `claude_token_burn` / `claude_errors` /
+`claude_efficiency_insights` cluster plus `claude_session_deep_dive` /
+`claude_loop_check`. That is 4 of the lane's 38 cases; closing them would take
+the lane from 89% to ~97%. Every other lane is already past target.
+
+**Phase 1 remains worth doing but its brief changes** -- rank *clusters* of
+mutually-competing tools, not just pairs, since Phase 0 showed a pairwise fix
+just hands the call to the next competitor.
+
+**Phase 4 is unchanged and still blocked** on whether hardware exists. Note it
+is now the *only* phase standing between this model and a defensible
+self-hosting claim: accuracy is no longer the open question, local parity is.
+
+**The 8k context constraint is untouched by Phase 0.** `ops` at ~8.1K estimated
+schema tokens still consumes the whole window, and `sre` is ~1.5x over. Role
+scoping fixed accuracy; it did not fix the context budget. Discovery mode
+remains the only configuration that fits 8k, and therefore `find_tool`'s
+retrieval quality remains load-bearing for the sovereign target.

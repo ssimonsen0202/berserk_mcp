@@ -261,13 +261,34 @@ This table is what the claims below rest on:
 - **The measured reliability floor is the ~24B parameter class.**
   `mistral-small-3.2-24b-instruct` (Apache 2.0, on Hugging Face, about
   55GB of GPU RAM at bf16) is the only model in this test that is both
-  open-weight and genuinely self-hostable, and it clears the baseline: 78%
-  tool-selection accuracy. `mistral-saba` scores close behind it, but is
-  proprietary and API-only — not a self-hosting candidate despite the
-  similar accuracy. `mistral-small`'s number comes from the same
-  OpenRouter-hosted test as every other candidate, not from a real local
-  deployment. We have not yet checked its speed and behavior on that exact
-  hardware, on its own.
+  open-weight and genuinely self-hostable, and it clears the baseline.
+  `mistral-saba` scores close behind it, but is proprietary and API-only —
+  not a self-hosting candidate despite the similar accuracy.
+- **Run it role-scoped. The configuration matters more than the model.**
+  Re-measured on 2026-09-03 against the current 51-case set, the same model
+  scores very differently depending on which role lane it runs in:
+
+  | Lane | Tools | Tool-selection accuracy |
+  |---|---|---|
+  | `ops` | 23 | 100% |
+  | `sre` | 32 | 96% |
+  | `soc` | 31 | 95% |
+  | `claude` | 46 | 89% |
+  | `all` (no role set) | 74 | 80% |
+
+  The penalty at `all` is not raw tool count. It is cross-lane competitor
+  contamination: a `claude_*` prompt loses to a similarly-worded tool from
+  the SRE or core lane (for example `claude_search` losing to `search`).
+  Setting `BERSERK_MCP_ROLE` removes those competitors and recovers the
+  accuracy. Full data and method:
+  [docs/mistral-small-optimization-plan-2026-09-03.md](docs/mistral-small-optimization-plan-2026-09-03.md).
+- **Still unverified: local behavior.** Every number above comes from the
+  same OpenRouter-hosted test as the other candidates, not from a real
+  local deployment. Speed and behavior at the intended quantization, on
+  real hardware, have not been checked. Note also that the tool schema
+  alone is roughly 8K estimated tokens at `ops` and 12K at `sre`, so the
+  8k-context local target named in the dev brief does not fit any role
+  lane — see the plan document above.
 - `mistral-nemo`, one size class down at about 12B, scored *below* the
   keyword-match baseline. Do not assume a smaller model works well
   anywhere in this range.
