@@ -91,11 +91,75 @@ them shows up as a real miss in a future eval run.
   side of this; this doc is the audit methodology and findings, that one is
   the eval data of record.
 
+## Addendum, 2026-09-03: proactive cluster collision analysis (Task 2)
+
+Every fix above, and every fix in `docs/model-routing-cost-validation-2026-08-23.md`,
+was reactive — found only after a real eval miss exposed it. This addendum is
+the proactive counterpart: `evals/tool_collisions.py` ranks tools whose
+descriptions or names are lexically close enough that a model could plausibly
+confuse them, *before* a real miss happens. See the module docstring for full
+method; summary here.
+
+**Two independent collision mechanisms, not one.** An early version scored
+only description-vs-description similarity and missed two of three known
+ground-truth collisions. Both misses turned out to share the same cause: a
+**shared word in the tool's NAME** (`tool_discovery.search()` weights a
+name-token match 3x a description match), not the description text. Adding
+`name_token_edges()` — flag any content word shared by 2-3 tool names, above
+that treated as an intentional lane prefix (`claude` shared by 21 tools,
+`sre`/`soc`/`canonloom` by 5 each) — found both:
+
+- `claude_search` / `search`, sharing the name-token `search` — the exact
+  cross-lane pair behind `mistral-small-3.2-24b-instruct`'s
+  `role=all` → `role=claude` accuracy jump (80.4% → 89.5%,
+  `evals/run_ledger.jsonl` 2026-09-03T19:46/19:48).
+- `claude_workflow_insights` / `claude_efficiency_insights`, sharing
+  `insight` — the third competitor that moved into the gap after the
+  2026-09-03 reciprocal fix (`jworkflow_burn` now loses to
+  `claude_efficiency_insights`, not `claude_token_burn`).
+
+**Acceptance check against the three known ground-truth collisions**
+(`docs/task-brief-collision-clusters-2026-09-03.md`):
+
+1. `claude_workflow_insights` / `claude_token_burn` / `claude_errors` /
+   `claude_efficiency_insights` all one cluster — **yes**.
+2. `claude_session_deep_dive` / `claude_loop_check` same cluster — **no,
+   documented miss.** They share no name token, and their description-ratio
+   (~0.25-0.30) is too weak to separate from noise without a threshold that
+   floods the report with unrelated pairs. Tried and rejected. This
+   collision is real (confirmed by eval data) but this method cannot find it
+   cleanly — a real eval remains the only ground truth that catches
+   everything.
+3. `claude_search` / `search`, isolated as a clean 2-tool cluster with no
+   other members — **yes**.
+
+**Known over-firing on SRE/SOC.** The script includes a sanity guard: SRE and
+SOC measured 95-96% accuracy even at the full 74-tool schema
+(`evals/run_ledger.jsonl`), so a role-scoped report flagging many clusters
+there is the method over-firing, not finding real risk. It does: `--role sre`
+flags 7 clusters, `--role soc` flags 6, both past the guard's threshold of 3.
+**Do not act on SRE/SOC clusters from this tool without a real eval miss to
+confirm one first.**
+
+**Ranked output, unscoped and `role=claude`:** saved for reference at
+`/tmp/collisions_full.txt` and `/tmp/collisions_claude.txt` when this addendum
+was written (not committed — regenerate with `python3 evals/tool_collisions.py
+[--role claude]`, deterministic, no API calls). The `claude`-lane cluster
+above (`[4]` in that output) is the direct input to Task 1's fix.
+
+**Reminder from the module docstring, worth restating here too:** this is a
+candidate generator, not a verdict. A flagged cluster still needs a real eval
+case before a description gets touched — that discipline is what keeps this
+proactive pass from becoming the speculative churn the rest of this document
+already warns against.
+
 ## Follow-up
 
 The SOC, core, discovery, learning-loop, parser-factory, and CanonLoom
-lanes (~39 tools) are unaudited. Whoever picks this up next should use the
-same 6-axis rubric and the same discipline: only change a description with
-either a real eval miss to fix, or a clear rubric gap (like `validate_kql`'s
-missing Guidelines) worth testing proactively — and verify any change
-against real models before shipping it, not just by reading the text.
+lanes (~39 tools) are unaudited. Whoever picks this up next should order the
+work by `evals/tool_collisions.py`'s cluster ranking rather than lane by
+lane (noting the SOC over-firing caveat above), use the same 6-axis rubric
+and the same discipline: only change a description with either a real eval
+miss to fix, or a clear rubric gap (like `validate_kql`'s missing
+Guidelines) worth testing proactively — and verify any change against real
+models before shipping it, not just by reading the text.
