@@ -101,58 +101,59 @@ fail-safes, role profiles, and the initial release) are in
 
 ## Why this exists
 
-**Berserk** is a self-hosted, OTEL-native, schemaless observability engine. It
-handles petabyte scale. Berserk ingests logs, metrics, and traces over OTLP.
-You query this data with a Kusto-style language (KQL), through the `bzrk`
-CLI or the web UI. Berserk is [headless by design](https://www.bzrk.dev). It
-is built for agents that ask questions, not for dashboards. Berserk supplies
-the storage and the query engine. On its own, Berserk still assumes the
-asker — human or agent — already knows KQL.
+**Berserk** is a self-hosted observability engine. It uses the OTEL
+standard, and it needs no fixed schema. It handles data at petabyte scale.
+Berserk stores logs, metrics, and traces sent over OTLP. You query this
+data with a Kusto-style language (KQL), through the `bzrk` CLI or the web
+UI. Berserk is [headless by design](https://www.bzrk.dev) — built for
+agents that ask questions, not for dashboards. Berserk gives you the
+storage and the query engine. It still assumes the asker, human or agent,
+already knows KQL.
 
-**The gap.** LLMs handle raw query languages badly. If you point a model at
-`bzrk` directly, it invents table names, mistypes fields, and wastes tokens
-on retries. Two fixes seemed obvious at first: paste the schema into the
-prompt, or give the model few-shot KQL examples. Neither fix held — the
-model kept guessing. Hardcoding the queries did work.
+**The gap.** LLMs handle raw query languages badly. Point a model at
+`bzrk` directly, and it invents table names, mistypes fields, and wastes
+tokens on retries. Two fixes seemed obvious at first: paste the schema
+into the prompt, or give the model examples of KQL. Neither fix worked.
+The model kept guessing. Writing the queries by hand, in advance, did
+work.
 
-**What berserk-mcp adds.** berserk-mcp is a translation layer in front of
-Berserk. It exposes observability *intents* as MCP tools — for example
-`top_cpu`, `errors_by_service`, `sre_service_health`. Each tool wraps a
-query that berserk-mcp has already verified against the live schema. The
-model never authors KQL. It only picks an intent and a time window.
-berserk-mcp does **not** replace Berserk's storage, query engine, or UI. It
-makes them **agent-accessible and reliable on small, cheap, or local
-models**.
+**What berserk-mcp adds.** berserk-mcp sits in front of Berserk as a
+translation layer. It turns observability *intents* into MCP tools — for
+example `top_cpu`, `errors_by_service`, `sre_service_health`. Each tool
+runs one query. berserk-mcp has already checked that query against the
+live schema. The model never writes KQL. It only picks an intent and a
+time window. berserk-mcp does **not** replace Berserk's storage, query
+engine, or UI. It makes them **usable by an agent, and reliable even on
+small or cheap models**.
 
-Beyond the fixed tools, berserk-mcp adds three layers that default Berserk
-does not have:
+berserk-mcp also adds three layers that Berserk does not have on its own:
 
-1. **Role lanes** — tool visibility filtered by job function, so each agent sees only the tools it needs
-2. **Discovery queue and auto-KQL worker** — automated onboarding for new telemetry sources
+1. **Role lanes** — each agent sees only the tools its job needs
+2. **Discovery queue and auto-KQL worker** — new telemetry sources onboard with no manual query-writing
 3. **Amendments log** — every `save_query` write is tracked, so a worker can post changelogs and keep the query store auditable
 
 | Approach | Result |
 |---|---|
-| Berserk web UI / `bzrk` CLI | Good for a human who knows KQL. Not usable by an agent. |
-| Point an LLM at the raw CLI and schema docs | Unreliable. Models guess table and field names, and pay for retries. |
-| A generic "text-to-KQL" MCP | Still *authors* queries. Same guessing problem, one layer up. |
-| **berserk-mcp** | Fixed, verified queries. The model only picks a tool and a time window — no KQL authoring. See [Choosing a model](#choosing-a-model) for the measured reliability floor by model size. |
+| Berserk web UI / `bzrk` CLI | Good for a human who knows KQL. An agent cannot use it well. |
+| Point an LLM at the raw CLI and schema docs | Unreliable. The model guesses table and field names, and pays for retries. |
+| A generic "text-to-KQL" MCP | Still *writes* queries. Same guessing problem, one layer up. |
+| **berserk-mcp** | Fixed, checked queries. The model only picks a tool and a time window. It never writes KQL. See [Choosing a model](#choosing-a-model) for the measured reliability floor by model size. |
 
 ### What this adds vs. default Berserk
 
-Berserk is a strong human-facing observability backend on its own. berserk-mcp
-does not replace any of it. berserk-mcp sits next to Berserk and adds the
-agent-facing surface.
+Berserk is a strong observability backend for humans, on its own.
+berserk-mcp does not replace any part of it. berserk-mcp sits next to
+Berserk and adds a surface built for agents.
 
-As of v1.1.0, Berserk also ships its own agent: a `Chat` tab in the web UI,
-with its own tool-calling loop, doc search, and model picker. It is a
-different kind of agent than berserk-mcp, not a smaller version of it. It
-authors its own free-form queries at chat time. berserk-mcp never does
-this — every question maps to a fixed, pre-verified query the model only
-selects. This matters in practice: we tested Berserk's native `Chat`
-against our own reference deployment and it could not complete a basic
-question. It never resolved a valid database context, so every
-`list_tables`/`query` call it made failed. Full detail is in [the issue we
+As of v1.1.0, Berserk ships its own agent too: a `Chat` tab in the web UI,
+with its own tool-calling loop, doc search, and model picker. This is a
+different kind of agent from berserk-mcp, not a smaller version of it. It
+writes its own free-form queries at chat time. berserk-mcp never does
+this. Every question maps to one fixed, checked query. The model only
+selects it. This matters in practice. We tested Berserk's native `Chat`
+against our own deployment. It could not finish a basic question. It
+never picked a valid database, so every `list_tables`/`query` call it made
+failed. Full detail is in [the issue we
 filed](https://github.com/berserkdb/helm-charts/issues/2).
 
 | Capability | Default Berserk | berserk-mcp |
@@ -179,122 +180,124 @@ filed](https://github.com/berserkdb/helm-charts/issues/2).
 
 ### Why this complements Berserk's native MCP (not competes with it)
 
-Berserk ships its own MCP server, `bzrk mcp`. It is a raw query console:
-`query`/`start_query` sessions, table/database discovery, and `get_docs` for
-KQL reference. Its design assumes the agent writes the KQL itself. That
-console suits a skilled human KQL author well. It is the wrong everyday
-interface for most models — they guess table names, botch aggregations, and
-waste tokens on retries.
+Berserk ships its own MCP server, `bzrk mcp`. It is a raw query console. It
+runs `query`/`start_query` sessions. It offers table and database
+discovery, and `get_docs` for KQL reference. Its design assumes the agent
+writes its own KQL. This console suits a skilled human KQL author well. It
+is the wrong everyday tool for most models. They guess table names, get
+aggregations wrong, and waste tokens on retries.
 
-berserk-mcp is a **deterministic layer on top of the same backend**. The
-model picks a verified intent. berserk-mcp does the math. The answer comes
-back as a conclusion — a verdict, a baseline deviation, a cost trend — not a
-row dump.
+berserk-mcp is a **fixed layer on top of the same backend**. The model
+picks a checked intent. berserk-mcp does the math. The answer comes back
+as a conclusion — a verdict, a baseline change, a cost trend — not a row
+dump.
 
-Use the native MCP server when a skilled KQL author drives the session. Use
-berserk-mcp when you want *any* model, including small local ones, to answer
-reliably. Both servers run side by side in the same client without
-conflict.
+Use the native MCP server when a skilled KQL author drives the session.
+Use berserk-mcp when you want *any* model, including small local ones, to
+answer reliably. Both servers can run side by side in the same client,
+with no conflict.
 
 ### Sovereign and defense deployments (fully local stack)
 
-Every layer of this stack can run on hardware you own, with zero cloud
-egress. This makes it suitable for sovereignty-constrained and defense or
+Every layer of this stack can run on hardware you own. No data needs to
+leave your network. This suits sovereignty-constrained, defense, and
 air-gapped environments:
 
 - **Berserk** is self-hosted. Telemetry never leaves your network.
-- **berserk-mcp** is pure Python stdlib. It has no third-party packages, no
-  telemetry, and it never contacts an external service on its own. You can
-  audit its five small files in an afternoon.
+- **berserk-mcp** uses only the Python standard library. It has no
+  third-party packages and sends no telemetry of its own. It never
+  contacts an outside service on its own. You can read and check its five
+  small files in an afternoon.
 - **The LLM layer can run locally too.** The parser factory's provider
-  ladder speaks the OpenAI-compatible API. Any locally hosted open-weight
-  model — through Ollama, llama.cpp, vLLM, or LM Studio — plugs in as the
-  `hermes` endpoint. No frontier API is required. The fixed-query design
-  also lowers the skill the model needs: it only picks a tool and a time
-  window. It never authors KQL.
-- **Defense-in-depth on the egress path.** Even when an LLM endpoint is
-  configured, it receives only structural telemetry — key names, shapes,
-  redacted excerpts — never raw values. The endpoint URL is
-  scheme-allowlisted and operator-controlled.
+  ladder speaks the OpenAI-compatible API. Any local open-weight model
+  works as the `hermes` endpoint — through Ollama, llama.cpp, vLLM, or LM
+  Studio. You do not need a frontier API. The fixed-query design also
+  lowers the skill the model needs. It only picks a tool and a time
+  window. It never writes KQL.
+- **Defense-in-depth on the egress path.** Even when you configure an LLM
+  endpoint, it receives only structural telemetry — key names, shapes,
+  redacted excerpts. It never receives raw values. The endpoint URL must
+  match an allowed scheme, and only an operator can set it.
 
-**What we've actually verified about self-hosted model viability**, not just
-asserted (full methodology and data:
-[docs/model-routing-cost-validation-2026-08-23.md](docs/model-routing-cost-validation-2026-08-23.md)).
+**What we have actually checked about self-hosted model use** — not just
+claimed. Full method and data:
+[docs/model-routing-cost-validation-2026-08-23.md](docs/model-routing-cost-validation-2026-08-23.md).
 This corrects earlier guidance in this section. That guidance claimed
-"small local models route reliably." Measured against this server's real
-70-tool schema, that claim did not hold. A reader building a sovereign
-deployment needs the accurate number, not the hopeful one:
+"small local models route reliably." We measured this against this
+server's real 70-tool schema. The claim did not hold. A reader who builds
+a sovereign deployment needs the true number, not the hopeful one:
 
-- **7-8B local models are not viable.** Qwen2.5:7b and Llama3.1:8b, tested
-  locally via Ollama against the real schema, scored 5-7% tool-selection
-  accuracy — far below a simple keyword-matching baseline (66%). Public
-  tool-calling benchmarks (BFCL) rank these families well. But those
-  benchmarks measure a much smaller tool count. They do not predict
-  performance reliably at this schema size (see the now-superseded
-  shortlist in [`evals/model-eval-plan.md`](evals/model-eval-plan.md)).
-- **The measured reliability floor is the ~24B parameter class**, and one
-  real candidate at that tier is confirmed genuinely self-hostable under an
-  open license: `mistral-small-3.2-24b-instruct` (Apache 2.0, confirmed on
-  Hugging Face, ~55GB GPU RAM at bf16) reached 78% tool-selection accuracy
-  in the same eval. Its numbers come from the same OpenRouter-hosted eval as
-  every other candidate, not from an actual local deployment — self-hosted
-  latency and behavior on that specific hardware profile is not yet
-  independently verified.
-- One size class down (`mistral-nemo`, ~12B) scored *below* the
-  keyword-matching baseline — smaller is not a safe default assumption
+- **7-8B local models do not work well enough.** We tested Qwen2.5:7b and
+  Llama3.1:8b locally, through Ollama, against the real schema. They
+  scored 5-7% tool-selection accuracy — far below a simple keyword-match
+  baseline of 66%. Public tool-calling benchmarks (BFCL) rank these model
+  families well. But those benchmarks test a much smaller tool count. They
+  do not predict how a model performs at this schema size (see the
+  now-outdated shortlist in
+  [`evals/model-eval-plan.md`](evals/model-eval-plan.md)).
+- **The measured reliability floor is the ~24B parameter class.** One real
+  model at that size is confirmed open and self-hostable:
+  `mistral-small-3.2-24b-instruct` (Apache 2.0, on Hugging Face, about
+  55GB of GPU RAM at bf16). It reached 78% tool-selection accuracy in the
+  same test. This number comes from the same OpenRouter-hosted test as
+  every other candidate, not from a real local deployment. We have not yet
+  checked its speed and behavior on that exact hardware, on its own.
+- One size class down (`mistral-nemo`, about 12B) scored *below* the
+  keyword-match baseline. Do not assume a smaller model works well
   anywhere in this range.
-- **Bottom line for a sovereign deployment today:** budget for a ≥24B-class
-  open-weight model and a GPU, not a small one. A fully local setup with a
-  genuinely small (7-8B) first tier is not yet a validated configuration
-  against this server's tool count.
+- **Bottom line for a sovereign deployment today:** plan for a model of
+  24B parameters or more, on an open license, with a GPU — not a small
+  model. A fully local setup with a genuinely small (7-8B) first tier is
+  not yet a checked, working setup for this server's tool count.
 
 #### Bridging Berserk's two use cases: AI Ops without leaving the sovereign boundary
 
-Berserk's own positioning splits into two cases.
-[AI Ops](https://www.bzrk.dev/use-cases/ai-ops/) says "any MCP-aware agent can
-query your telemetry directly." [Defence](https://www.bzrk.dev/use-cases/defense/)
-says "nothing leaves the trust boundary you control." Taken separately,
-these two cases conflict. The AI Ops case assumes a capable model that
-authors KQL and reasons over raw results. But a frontier model is itself an
-egress dependency, and the Defence case rules that out. Berserk itself
-solves this for the *data*: self-hosted, WORM storage, no foreign
-jurisdiction. It does not solve this for the *reasoning layer* on top of
-the data.
+Berserk's own positioning covers two cases.
+[AI Ops](https://www.bzrk.dev/use-cases/ai-ops/) says any MCP-aware agent
+can query your telemetry directly.
+[Defence](https://www.bzrk.dev/use-cases/defense/) says nothing should
+leave the boundary you control. Taken on their own, these two cases
+conflict. The AI Ops case assumes a capable model that writes its own KQL
+and reasons over raw results. But a frontier model is itself an outside
+dependency, and the Defence case rules that out. Berserk solves this for
+the *data*: self-hosted, WORM storage, no foreign jurisdiction. It does
+not solve this for the *reasoning layer* on top of the data.
 
 berserk-mcp closes that gap. The model only ever picks a tool and a time
-window. It never authors KQL and never sees raw values. This means a small,
-locally hosted open-weight model can drive the whole interaction reliably.
-The result is the AI Ops experience — agents ask questions instead of humans
-reading dashboards — with the entire agent loop inside the sovereign
-boundary, not just the telemetry store.
+window. It never writes KQL and never sees raw values. So a small, local,
+open-weight model can drive the whole interaction reliably. The result is
+the AI Ops experience: agents ask questions instead of humans reading
+dashboards. The whole agent loop stays inside the sovereign boundary — not
+just the telemetry store.
 
-This is not hypothetical. One production-like deployment uses a
-Discord-facing local agent to answer on-call questions against Berserk. The
-agent logs every tool call and every full prompt/reply back into Berserk
-itself: model name, redacted arguments, redacted results, and session ID —
-all as structured, queryable records. Berserk's AI Ops page highlights this
-same durable, back-testable "what did the agent actually do" record in its
-Ethira governance case study. Here it runs end-to-end against berserk-mcp
-instead of a bespoke integration. The `claude_*` tool family
-(`claude_cost_report`, `claude_token_burn`, `claude_workflow_insights`, and
-others) delivers the same token-usage/BI story from that page. These tools
-are already implemented and already answering real queries.
+This is not a hypothetical case. One real deployment uses a Discord-facing
+local agent to answer on-call questions against Berserk. The agent logs
+every tool call. It logs every full prompt and reply too. It sends all of
+this back into Berserk itself, as structured, queryable records: model
+name, redacted arguments, redacted results, and session ID. Berserk's AI
+Ops page describes this same idea in its Ethira governance case study: a
+durable, checkable record of what the agent actually did. Here, it runs
+end-to-end against berserk-mcp, not a custom-built integration. The
+`claude_*` tool family (`claude_cost_report`, `claude_token_burn`,
+`claude_workflow_insights`, and others) gives the same token-use and BI
+story that page describes. These tools already work, and already answer
+real queries.
 
-The target operating model is **two-tier local**. A locally hosted
-open-weight model at the measured reliability floor (~24B class — see
-above) handles the everyday calls; the goal is ≥ 80% of interactions. The
-model escalates to a larger, locally hosted open-weight model only for
-`@deep` work: parser generation, deep-dive synthesis, incident narratives.
+The target setup is **two-tier, fully local**. A local open-weight model
+at the measured reliability floor (~24B class — see above) handles the
+everyday calls. The goal is 80% or more of all interactions handled this
+way. The model escalates to a larger, local open-weight model only for
+`@deep` work: parser generation, deep-dive synthesis, incident write-ups.
 "Small" here means the smaller of the two local tiers, not a 7-8B model —
-those were tested and are not reliable enough to anchor either tier. The
-escalation mechanism itself (a policy deciding when to route up)
-is implemented and tested against a cloud-hosted small/deep pair in
-`evals/escalation_policy.py`; picking and verifying the actual local model
-for each tier against real hardware is still open. The original
-measurement plan is in
-[`evals/model-eval-plan.md`](evals/model-eval-plan.md) (Part 3) — read its
-Part 1 benchmark shortlist skeptically; it predates the real eval above and
-its picks did not hold up at this server's actual tool count.
+those were tested, and they are not reliable enough to anchor either tier.
+We built and tested the escalation logic itself — a rule that decides when
+to route up — against a cloud-hosted small/deep pair, in
+`evals/escalation_policy.py`. We still need to pick and check the real
+local model for each tier, on real hardware. The original measurement plan
+is in [`evals/model-eval-plan.md`](evals/model-eval-plan.md) (Part 3).
+Read its Part 1 benchmark shortlist with caution — it predates the real
+test above, and its picks did not hold up at this server's real tool
+count.
 
 ---
 
