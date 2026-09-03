@@ -220,29 +220,55 @@ air-gapped environments:
   match an allowed scheme, and only an operator can set it.
 
 **What we have actually checked about self-hosted model use** — not just
-claimed. Full method and data:
-[docs/model-routing-cost-validation-2026-08-23.md](docs/model-routing-cost-validation-2026-08-23.md).
-This corrects earlier guidance in this section. That guidance claimed
-"small local models route reliably." We measured this against this
-server's real 70-tool schema. The claim did not hold. A reader who builds
-a sovereign deployment needs the true number, not the hopeful one:
+claimed. This corrects earlier guidance in this section. That guidance
+claimed "small local models route reliably." We measured this. The claim
+did not hold.
 
-- **7-8B local models do not work well enough.** We tested Qwen2.5:7b and
-  Llama3.1:8b locally, through Ollama, against the real schema. They
-  scored 5-7% tool-selection accuracy — far below a simple keyword-match
-  baseline of 66%. Public tool-calling benchmarks (BFCL) rank these model
-  families well. But those benchmarks test a much smaller tool count. They
-  do not predict how a model performs at this schema size (see the
-  now-outdated shortlist in
+#### How we tested this, and what we found
+
+We ran a real eval. We did not rely on a published benchmark. Local
+models ran through Ollama, on real hardware. Hosted models ran through
+OpenRouter, the same way a production deployment would call them. Every
+model answered the same 41 test cases, from `evals/router_cases.jsonl`,
+against berserk-mcp's own real tool schema — 69 tools, the schema size at
+test time. We measured four things per model: tool-selection accuracy,
+argument accuracy, latency (median and p95), and real billed cost per
+call. Cost came from the API's own reported figure, not a sticker-price
+guess. Test date: 2026-08-22/23. Full method, raw findings, and later
+re-checks: [docs/model-routing-cost-validation-2026-08-23.md](docs/model-routing-cost-validation-2026-08-23.md).
+
+| Model | Tool-selection accuracy | Argument accuracy | Latency (median / p95) | Real cost per call |
+|---|---|---|---|---|
+| `deepseek/deepseek-chat` | 93% | 98% | 4.2s / 4.7s | $0.0114 (never caches) |
+| `stealth/ox-alpha` | 93% | 93% | 7.3s / 20.8s | $0 (promotional pricing, not durable) |
+| `deepseek/deepseek-v4-flash` | 88% | 93% | 3.6s / 12.7s | $0.0003 (caches 5.5x) |
+| `mistralai/mistral-saba` | 83% | 90% | 0.76s / 1.5s | $0.00056 (caches 10x) |
+| `mistralai/mistral-small-3.2-24b-instruct` (open-weight, self-hostable) | 78% | 90% | 1.2s / 3.2s | n/a — local candidate |
+| `mistralai/mistral-nemo` | 63% | 85% | 1.6s / 4.0s | $0.0005 |
+| *mock keyword-match baseline* | *65.9%* | — | — | — |
+| `Qwen2.5:7b` (local) | 7% | 63% | — | free / local |
+| `Llama3.1:8b` (local) | 5% | 66% | — | free / local |
+
+This table is what the claims below rest on:
+
+- **7-8B local models do not work well enough.** Qwen2.5:7b and Llama3.1:8b
+  scored 7% and 5% tool-selection accuracy — far below the keyword-match
+  baseline of 65.9%. Public tool-calling benchmarks (BFCL) rank these
+  model families well. But those benchmarks test a much smaller tool
+  count. They do not predict how a model performs at this schema size
+  (see the now-outdated shortlist in
   [`evals/model-eval-plan.md`](evals/model-eval-plan.md)).
-- **The measured reliability floor is the ~24B parameter class.** One real
-  model at that size is confirmed open and self-hostable:
+- **The measured reliability floor is the ~24B parameter class.**
   `mistral-small-3.2-24b-instruct` (Apache 2.0, on Hugging Face, about
-  55GB of GPU RAM at bf16). It reached 78% tool-selection accuracy in the
-  same test. This number comes from the same OpenRouter-hosted test as
-  every other candidate, not from a real local deployment. We have not yet
-  checked its speed and behavior on that exact hardware, on its own.
-- One size class down (`mistral-nemo`, about 12B) scored *below* the
+  55GB of GPU RAM at bf16) is the only model in this test that is both
+  open-weight and genuinely self-hostable, and it clears the baseline: 78%
+  tool-selection accuracy. `mistral-saba` scores close behind it, but is
+  proprietary and API-only — not a self-hosting candidate despite the
+  similar accuracy. `mistral-small`'s number comes from the same
+  OpenRouter-hosted test as every other candidate, not from a real local
+  deployment. We have not yet checked its speed and behavior on that exact
+  hardware, on its own.
+- `mistral-nemo`, one size class down at about 12B, scored *below* the
   keyword-match baseline. Do not assume a smaller model works well
   anywhere in this range.
 - **Bottom line for a sovereign deployment today:** plan for a model of
