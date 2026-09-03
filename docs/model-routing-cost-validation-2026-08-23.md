@@ -370,3 +370,77 @@ a regression that would actually matter. This is a starting point from one
 model's one calibration run, not a permanent constant -- re-baseline if the
 case set changes size materially, or once enough real production history
 accumulates to compare against.
+
+## Addendum, 2026-09-03: `claude_workflow_insights` cross-model description fix
+
+Mining the raw per-case results still on disk from the 2026-08-29 addenda
+(`evals/results/`, gitignored -- these specific files have since rotated)
+found a miss that reproduced across every model tested, not just one:
+`claude_workflow_insights` lost to `claude_token_burn` or `claude_errors`
+on prompts asking about cross-session burn or error patterns, on
+`deepseek-chat`, `deepseek-v4-flash`, and `mistral-saba` alike. Every prior
+fix in this document only affected a single model (`mistral-saba`); a miss
+that reproduces across three unrelated model families is a stronger signal
+that the tool description itself is ambiguous, not that one model is weak.
+
+Added 3 held-out cases to `evals/router_cases.jsonl` to test generalization
+rather than the exact 2 known-failing prompts: `jworkflow_hotspots_2` and
+`jworkflow_burn_2` (differently-phrased variants of the two known misses),
+and `jtoken_burn_guardrail` (a genuine single-session burn question, to
+confirm `claude_token_burn`'s own territory doesn't get hijacked by a
+broader `claude_workflow_insights`).
+
+**Round 1 (broaden the target tool's description only): no reliable effect.**
+Added `Use for` phrasing to `claude_workflow_insights` echoing the failing
+prompts' own words ("where are the error hotspots", "which sessions are
+burning the most tokens"). Measured against real models, before/after,
+same 51-case set:
+
+| Model | Before | After (round 1) | Net |
+|---|---|---|---|
+| `deepseek/deepseek-v4-flash` | 46/51 (90.2%) | 46/51 (90.2%) | **identical miss set** |
+| `mistralai/mistral-saba` | 44/51 (86.3%) | 44/51 (86.3%) | 1 fixed (`jworkflow_hotspots`), 1 unrelated case flipped by run-to-run noise -- net zero |
+
+Diagnosis: `claude_token_burn`'s own *name* is a near-exact lexical match
+for "burning the most tokens" -- a tool's name likely carries more routing
+weight than an added `Use for` phrase on a *different* tool. Broadening
+`claude_workflow_insights` alone couldn't out-compete that.
+
+**Round 2 (reciprocal disambiguation on the competing tools): worked on
+both models, no regressions.** Added one line each to `claude_token_burn`
+and `claude_errors` -- "Not [cross-session pattern] -- see
+claude_workflow_insights for that" -- mirroring the same reciprocal
+cross-reference pattern already proven for `investigate_error_rate`/
+`sre_error_rate` earlier in this document. Measured again, same 51-case
+set, real models:
+
+| Model | Before | After (round 2) | Fixed | Newly broken |
+|---|---|---|---|---|
+| `deepseek/deepseek-v4-flash` | 46/51 (90.2%) | 48/51 (94.1%) | `jworkflow_burn`, `jworkflow_hotspots_2` | none |
+| `mistralai/mistral-saba` | 44/51 (86.3%) | 47/51 (92.2%) | `cc_recent`, `jworkflow_burn_2`, `jworkflow_hotspots` | none |
+
+**`deepseek/deepseek-chat` could not be re-baselined.** Five attempts over
+45+ minutes all failed partway through the same ~51-case run, always
+around case 12-13, with either a malformed (non-`choices`) response or an
+explicit `HTTP 429`. A direct, isolated single-call test of the exact case
+the run kept dying near (`raw_kql`) succeeded cleanly against the same
+model and endpoint -- so the failure is not this fix, not the prompt
+content, and not a client-side bug. It points to an intermittent issue
+with OpenRouter's `StreamLake` route for `deepseek-chat` specifically under
+this server's full ~51-tool, ~30K-token schema (`deepseek-chat` never
+caches, so every call resends the full schema at full price -- see Finding
+2 above). Left as a known gap: re-check `deepseek-chat` against this fix
+once that route is stable again, rather than keep retrying against a live
+external flake.
+
+A few misses remain open on both measured models after round 2 --
+`investigate_error_root_cause_2` and `jdive_loop` on `mistral-saba` (both
+pre-existing, unrelated to this fix, `investigate_error_root_cause_2`
+already documented as a known limit above); `detect_anomalies_nearmiss`
+and `jtoken_burn_guardrail` on `deepseek-v4-flash` (pre-existing,
+unrelated); and `jworkflow_burn`/`jworkflow_hotspots_2` still fail on
+`mistral-saba` even though their sibling variant now passes -- a real,
+if uneven, improvement rather than a clean full fix. Per this document's
+own established discipline, these are left as known limits rather than
+chased with further description tweaks that risk overfitting to these
+specific prompts.
