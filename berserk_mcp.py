@@ -4845,10 +4845,11 @@ def _doctor_check_llm_reachability():
         url_note = f" (using the unconfigured default {url!r})"
     else:
         url_note = ""
-    models_url = url.rsplit("/", 3)[0] + "/api/models" if "/api/" in url else None
+    models_url = parser_factory.hermes_models_url(url)
     if not models_url:
         return _doctor_result(
-            "llm_hermes_reachability", "fail", f"cannot derive /api/models from {url!r}",
+            "llm_hermes_reachability", "fail",
+            f"cannot derive a /models endpoint from {url!r}",
             remediation="confirm BERSERK_LLM_HERMES_URL points at a chat/completions endpoint",
             required=False,
         )
