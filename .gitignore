@@ -61,6 +61,26 @@ docs/implementation-report-2026-07.md
 docs/claude-precommit-checklist-2026-07.md
 progress.md
 
+# Local-only operational notes, by category (added 2026-09-03).
+# A second clone of this repo was found holding 26 untracked files of this
+# shape -- incident RCAs, triage write-ups, session handoffs, meeting
+# material, and some unrelated side projects. None were gitignored, so a
+# careless `git add -A` would have staged the lot. That is not hypothetical
+# here: progress.md was once committed to public GitHub with a real
+# Tailscale IP in it, and cost a history rewrite and force-push to remove.
+# Each pattern below was checked against `git ls-files` first -- none
+# shadows a tracked file. Keep it that way when extending this list.
+docs/rca-*
+docs/triage-*
+docs/session-handoff-*
+docs/*agenda*
+docs/*briefing*
+docs/*meeting*
+docs/bpc-*
+docs/wsj-*
+docs/dk-paywall*
+*.user.js
+
 # Scanner scratch output and in-flight review notes
 scratchpad_out/
 fix-review-primer.md
