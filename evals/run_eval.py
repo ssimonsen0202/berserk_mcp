@@ -123,6 +123,29 @@ def _http_error_message(error):
     return f"HTTP {code} from backend"
 
 
+def _call_with_retry(fn, max_retries=3, base_delay=2.0):
+    """Retry one backend call on a transient failure (HTTP error, or a
+    malformed response missing 'choices') instead of aborting the whole
+    eval run over a single flaky call. Exponential backoff between
+    attempts. Raises the last error if every retry is exhausted -- a case
+    that genuinely can't be answered still fails loudly, it just isn't
+    given up on after one blip."""
+    last_err = None
+    for attempt in range(max_retries + 1):
+        try:
+            return fn()
+        except urllib.error.HTTPError as e:
+            last_err = _http_error_message(e)
+        except Exception as e:
+            last_err = str(e)
+        if attempt < max_retries:
+            delay = base_delay * (2 ** attempt)
+            print(f"  [retry {attempt + 1}/{max_retries} in {delay:.0f}s: {last_err}]",
+                  file=sys.stderr)
+            time.sleep(delay)
+    raise RuntimeError(last_err)
+
+
 def _openai_chat_call(base_url, api_key, model, messages, tools, tool_choice):
     """Shared by the single-turn and multi-turn OpenAI-compatible callers --
     both just build a different `messages` list and hand it here."""
@@ -481,6 +504,11 @@ def main():
     ap.add_argument("--repeats", type=int, default=1)
     ap.add_argument("--limit", type=int, default=0, help="run only first N cases")
     ap.add_argument("--tool-choice", default="", help="override tool_choice")
+    ap.add_argument("--call-delay-ms", type=int, default=0,
+                    help="pause this many ms before each backend call (after the first), "
+                         "to throttle request/token rate against a provider route with a "
+                         "tight per-minute cap -- useful for a no-cache model like "
+                         "deepseek-chat that resends the full schema every call")
     ap.add_argument("--with-foreign-tools", action="store_true",
                     help="also send a fixture Slack/GitHub-shaped tool schema alongside "
                          "berserk-mcp's own tools, simulating a real agent that has other, "
@@ -576,6 +604,8 @@ def main():
     total = 0
     for case in cases:
         for _ in range(args_ns.repeats):
+            if total > 0 and args_ns.call_delay_ms > 0:
+                time.sleep(args_ns.call_delay_ms / 1000.0)
             try:
                 if "multi_turn" in case:
                     mt = case["multi_turn"]
@@ -586,13 +616,13 @@ def main():
                     )
                     prior_messages = build_multi_turn_messages(
                         is_anthropic, case["prompt"], hop1_text)
-                    name, cargs, dt, usage = run_multi_turn(prior_messages)
+                    name, cargs, dt, usage = _call_with_retry(
+                        lambda: run_multi_turn(prior_messages))
                 else:
-                    name, cargs, dt, usage = run_one(case["prompt"])
-            except urllib.error.HTTPError as e:
-                sys.exit("\n" + _http_error_message(e))
+                    name, cargs, dt, usage = _call_with_retry(
+                        lambda: run_one(case["prompt"]))
             except Exception as e:
-                sys.exit(f"\nbackend call failed: {e}")
+                sys.exit(f"\nbackend call failed after retries: {e}")
             tool_ok, arg_ok = score_case(case, name, cargs)
             total += 1
             tool_hits += tool_ok
