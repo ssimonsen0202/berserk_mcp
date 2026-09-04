@@ -293,16 +293,41 @@ appears in `claude.tool_names` in MCP form — **`mcp__berserk__<tool>`** (e.g.
 `mcp__berserk__top_cpu`). So berserk-specific routing decisions are
 separable from Claude Code's own built-in tools (Read, Edit, Bash…).
 
-A starting query to size this — **run this first, the plan depends on the
-answer**:
+The query to size this, and **its measured answer** (run 2026-09-03):
 
 ```kql
 default
 | where resource['service.name'] == 'claude-code'
 | where tostring(attributes['claude.tool_names']) contains 'mcp__berserk__'
-| summarize calls=count() by tool=tostring(attributes['claude.tool_names'])
-| order by calls desc
+| summarize calls=count()
 ```
+
+> ### ⚠️ MEASURED: 144 calls over 30 days.
+>
+> This was an open unknown when this brief was drafted; it has since been
+> measured, and **the answer should reshape your plan.**
+>
+> The mechanism works — the pairs are genuinely recoverable and the
+> `mcp__berserk__` filter cleanly separates berserk-mcp routing decisions
+> from Claude Code's own built-in tools. But **144 examples is not a
+> training set.** For scale: the hand-labelled eval set is 54 cases, so the
+> cluster contributes the same order of magnitude, before deduplication and
+> before any filtering for correctness.
+>
+> **Implications you should carry into the plan:**
+> - Cluster telemetry is best used as a **realistic held-out validation
+>   set** — its value is that it reflects true production phrasing and
+>   distribution, not its volume.
+> - **Synthetic generation from the tool catalog becomes the primary
+>   training-data avenue**, not cluster mining. The 74 tool definitions plus
+>   the collision clusters in Section 3.4 are the richer seed.
+> - Cluster data can still serve as a **style/distribution reference** to
+>   keep synthetic prompts realistic, and as a source of genuine hard
+>   negatives.
+> - If a plan needs materially more real data, say so explicitly and
+>   estimate how long accumulation would take at the observed rate
+>   (~144/month, and note that rate is itself an artifact of current usage,
+>   not a natural constant).
 
 ### 6.3 Honest limitations — do not overstate this data
 
