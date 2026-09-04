@@ -328,6 +328,38 @@ default
 >   estimate how long accumulation would take at the observed rate
 >   (~144/month, and note that rate is itself an artifact of current usage,
 >   not a natural constant).
+>
+> ### The distribution is worse than the total suggests
+>
+> Measured the same day, top 12 of 144 calls:
+>
+> | Tool | Calls |
+> |---|---|
+> | `search` (the raw-KQL escape hatch) | **46** |
+> | `list_services` | 11 |
+> | `sre_ingest_health` | 7 |
+> | `self_check` | 6 |
+> | `discover_schema` / `sre_service_health` / `canonloom_list_artifacts` | 5 each |
+> | `claude_recent` / `top_memory` / `discovery_status` / `list_hosts` / `top_cpu` | 4 each |
+>
+> Top 12 tools account for ~105 of 144 calls, leaving **~39 calls spread
+> across the other ~62 tools — under one example each.** The tools where
+> collisions actually cost accuracy (Section 3.4) are in that thin tail.
+>
+> **And the single most-called tool, at 32% of all traffic, is `search` —
+> the generic raw-KQL escape hatch.** Two consequences worth weighing:
+>
+> 1. As training signal this is close to counterproductive. 46 examples
+>    labelled "reach for the escape hatch" teach the opposite of the goal,
+>    which is confident routing to a specific fixed-query tool. Naive
+>    supervised training on this corpus would bias toward `search`.
+> 2. As a **product finding** it is arguably more interesting than the
+>    training question: in real use, the most common outcome is falling
+>    back to raw KQL. That may indicate genuine coverage gaps in the fixed
+>    tool set, or it may be an artifact of who was driving and how. Either
+>    way it is worth surfacing separately from this brief's remit — and it
+>    is the same `search` tool implicated in the cross-lane collision in
+>    Section 3.2, so the two findings may share a cause.
 
 ### 6.3 Honest limitations — do not overstate this data
 
