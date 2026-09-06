@@ -1326,23 +1326,52 @@ pass when it did not run is worse than no gate. So a non-zero exit,
 unparseable output, zero records, or any tool not reporting
 `status == "completed"` all fail the build.
 
-**It gates on a reviewed baseline, not on zero findings.** The YARA rules
-flag imperative routing and limitation guidance in tool descriptions as
-prompt injection — for example `top_cpu`'s "use ONLY when the user names a
-container … use `host_cpu` instead". That phrasing is deliberate: it is the
-tool disambiguation this project *measured* as improving real routing
-accuracy (`mistral-saba` 86.3% → 92.2%, `deepseek-v4-flash` 90.2% → 94.1%,
-zero regressions — see
-[docs/model-routing-cost-validation-2026-08-23.md](docs/model-routing-cost-validation-2026-08-23.md)).
-A zero-findings gate would create standing pressure to delete the thing
-that demonstrably works. Accepted findings live in
-`scripts/mcp_scan_baseline.json`, each with a written reason; the gate
-fails only on findings that are **new**.
+**It gates on a reviewed baseline, not on zero findings.** The single
+finding against this server is a false positive, and the cause is precise
+rather than a matter of taste. It comes from one string in
+`coercive_injection.yara`:
 
-For calibration: the same rules also flag Microsoft's official Azure MCP
-server ("It should be called for any code generation …") on the same
-pattern. The signal is about the rule's precision on imperative usage
-guidance, not about those servers.
+```regex
+$execution_overrides = /\b(do not execute[^\n]*other[^\n]*tool|must[^\n]*this tool|only[^\n]*this tool|tool[^\n]*will not work)\b/i
+```
+
+The `only[^\n]*this tool` alternative matches **anything on one line**
+between "only" and "this tool", so it fires across sentence boundaries.
+What it matched here:
+
+```
+Only findings with sufficient samples/confidence are approval-eligible; this tool
+```
+
+That is two separate clauses of a Limitations statement, not a directive.
+The rule's own stated target is "directives forcing execution order (e.g.
+'Always execute this tool first')" — it caught the exact inverse: language
+that *restricts* the tool.
+
+The same string matches Microsoft's official Azure MCP server twice, on
+the same cross-sentence shape:
+
+```
+compute:                 only access compute resources accessible to the authenticated user.This tool
+get_azure_bestpractices: Only call this function when you are confident ... If this tool
+```
+
+`compute`'s match is a permissions-scoping disclosure — a
+security-*positive* statement. Three hits across two independent vendors,
+all on restrictive language, is a rule-precision issue rather than a
+finding about any of these servers. Reported upstream as
+[cisco-ai-defense/mcp-scanner#252](https://github.com/cisco-ai-defense/mcp-scanner/issues/252).
+
+This matters for the gate's design. Requiring zero findings would create
+standing pressure to reword descriptions to satisfy a regex — including
+`top_cpu`'s "use ONLY when the user names a container … use `host_cpu`
+instead", which trips the same string and is the tool disambiguation this
+project *measured* as improving real routing accuracy (`mistral-saba`
+86.3% → 92.2%, `deepseek-v4-flash` 90.2% → 94.1%, zero regressions — see
+[docs/model-routing-cost-validation-2026-08-23.md](docs/model-routing-cost-validation-2026-08-23.md)).
+Accepted findings therefore live in `scripts/mcp_scan_baseline.json`, each
+with a written reason, and the gate fails only on findings that are
+**new**.
 
 #### Not used: Snyk Agent Scan
 
