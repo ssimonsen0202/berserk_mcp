@@ -1276,6 +1276,94 @@ results, including that one finding, in
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
+### Security tooling: what runs, and what deliberately does not
+
+Two scanners run against this repo. Both are local. Neither sends code,
+tool definitions, or configuration to a third party.
+
+**Semgrep, on every push.** Custom rules in `.semgrep/` encode
+repo-specific invariants that generic linters do not know about — chiefly
+the untrusted-data fencing rule, backtested against real historical bugs
+in this codebase. See `.semgrep/fence-untrusted-data.yml`.
+
+**Cisco MCP Scanner ([`cisco-ai-defense/mcp-scanner`](https://github.com/cisco-ai-defense/mcp-scanner)),
+on every push.** It connects to the running server over stdio, pulls the
+real `tools/list`, and checks every tool description for prompt injection
+and tool poisoning — an attacker-authored instruction hidden in a tool
+description, which a client model reads as trusted server text.
+
+That threat is real here, not theoretical. Most of the 74 tools are static
+and maintainer-authored, so their descriptions are as trustworthy as the
+repo. But `saved__*` tools are **projected into `tools/list` at runtime**
+from caller-supplied and LLM-generated text (see `_saved_query_description`).
+That is the poisoning surface, and running the scanner against a
+deliberately poisoned learned-query store on 2026-09-06 found a real gap in
+it: forged fence-tag neutralization ran only for LLM-generated
+descriptions, not caller-supplied ones, though both land in the same
+`tools/list` payload. Fixed, with a regression test.
+
+#### Which analyzers, and why not the others
+
+| Analyzer | Used | Reason |
+|---|---|---|
+| YARA | **yes** | Fully local pattern matching. No credentials, no network. |
+| Cisco AI Defense API | no | Requires an API key and uploads tool definitions. |
+| LLM | no | Requires an LLM key and uploads tool definitions. |
+| Behavioral | no | Requires an LLM key and uploads **source code**. |
+| VirusTotal | no | Requires a key and uploads file hashes. |
+| Vulnerable-package | no | This project declares zero dependencies (`dependencies = []`, standard library only), so there is nothing to audit. It also fails open — see below. |
+
+The gate is `scripts/mcp_scan_gate.py`, wired into CI as the `mcp-scan`
+job. Two of its design choices are worth stating, because both are
+deliberate:
+
+**It fails closed.** The scanner itself fails open in at least two places,
+observed 2026-09-06: `vulnerable-package` reported `SAFE (0 findings)`
+while its own log showed `pip-audit exited with code 2 and produced no
+JSON output`, and the LLM analyzer counted three tools as safe after they
+errored with `Empty response from LLM`. A security gate that reports a
+pass when it did not run is worse than no gate. So a non-zero exit,
+unparseable output, zero records, or any tool not reporting
+`status == "completed"` all fail the build.
+
+**It gates on a reviewed baseline, not on zero findings.** The YARA rules
+flag imperative routing and limitation guidance in tool descriptions as
+prompt injection — for example `top_cpu`'s "use ONLY when the user names a
+container … use `host_cpu` instead". That phrasing is deliberate: it is the
+tool disambiguation this project *measured* as improving real routing
+accuracy (`mistral-saba` 86.3% → 92.2%, `deepseek-v4-flash` 90.2% → 94.1%,
+zero regressions — see
+[docs/model-routing-cost-validation-2026-08-23.md](docs/model-routing-cost-validation-2026-08-23.md)).
+A zero-findings gate would create standing pressure to delete the thing
+that demonstrably works. Accepted findings live in
+`scripts/mcp_scan_baseline.json`, each with a written reason; the gate
+fails only on findings that are **new**.
+
+For calibration: the same rules also flag Microsoft's official Azure MCP
+server ("It should be called for any code generation …") on the same
+pattern. The signal is about the rule's precision on imperative usage
+guidance, not about those servers.
+
+#### Not used: Snyk Agent Scan
+
+[`snyk/agent-scan`](https://github.com/snyk/agent-scan) covers more ground
+— it discovers agents, MCP servers, and skills across Claude Desktop,
+Cursor, VS Code, Windsurf, and others, and analyses them semantically.
+
+It is not used here, and the reason is architectural rather than a
+judgement on the tool. Its detection runs **server-side**: the client
+(`verify_api.py`) is a discovery-and-upload harness that POSTs to Snyk's
+API and renders the verdict it gets back. There are no local rules in the
+repository to run offline, so there is nothing to adopt without also
+adopting the upload. Using it would mean sending MCP configuration, skill
+contents, and tool definitions to a third party, and it needs a Snyk
+account and token.
+
+That trade may be right for a fleet — it answers "is anything in my
+installed agent surface hostile", which no purely local scanner can. It is
+the wrong trade for this project, whose stated position is that everything
+can run on hardware you own with no cloud egress.
+
 ## Wrong-answer containment
 
 berserk-mcp groups its controls against a *confident false negative* under
