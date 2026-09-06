@@ -1,9 +1,10 @@
 {
-  "_comment": "Accepted MCP-scanner findings. Each entry needs a reason. A finding belongs here only if it is a false positive or an accepted risk -- never to silence something real. Regenerate with: python3 scripts/mcp_scan_gate.py --update-baseline",
+  "_comment": "Accepted MCP-scanner findings. Each entry needs a reason. A finding belongs here only if it is a false positive or an accepted risk -- never to silence something real. description_sha256 binds the acceptance to the exact reviewed text: if the tool's description changes, the entry stops matching and the finding returns for re-review.",
   "accepted": {
     "claude_harness_recommendations": {
       "reason": "False positive, cause confirmed by running the rule directly. coercive_injection.yara's $execution_overrides string contains the alternative /only[^\\n]*this tool/i, where [^\\n]* matches anything on one line, so it fires across sentence boundaries. The matched text here is 'Only findings with sufficient samples/confidence are approval-eligible; this tool' -- two separate clauses of a Limitations statement, not a directive. The rule's stated target is 'directives forcing execution order (e.g. Always execute this tool first)'; it caught the inverse, language that restricts the tool. The same string matches Microsoft's Azure MCP server twice on the same shape, including a permissions-scoping disclosure. Reported upstream as cisco-ai-defense/mcp-scanner#252. Accepted 2026-09-06.",
-      "detail": "yara_analyzer=HIGH: Detected 1 threat: coercive injection"
+      "detail": "yara_analyzer=HIGH: Detected 1 threat: coercive injection",
+      "description_sha256": "0c803f6a4131"
     }
   },
   "_not_baselined": {

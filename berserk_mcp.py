@@ -475,6 +475,20 @@ _UNTRUSTED_DATA_CLOSE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Same treatment for the saved-query fence tag. A literal-only replacement
+# (text.replace("<", "(")) leaves every HTML-entity form intact, so
+# "&lt;/generated-description&gt;" reaches the model looking like a real
+# closing tag. That is the identical bypass Codex found for
+# untrusted_log_data above ("Round 2 finding 2"); this path simply never got
+# the same defence until a Codex Security review flagged it 2026-09-06.
+# Matches the OPEN form too, not just the close: a forged opening tag in a
+# user-origin description can make everything after it appear fenced --
+# i.e. make trusted server text look like untrusted model-authored content.
+_GENERATED_DESC_TAG_RE = re.compile(
+    rf"{_ANGLE_OPEN_RE}\s*(?:{_SLASH_RE})?\s*generated-description\s*{_ANGLE_CLOSE_RE}",
+    re.IGNORECASE,
+)
+
 
 def _fence_untrusted(text, inline=False):
     """Wrap real telemetry content in an explicit untrusted-data marker.
@@ -1802,6 +1816,11 @@ def _saved_query_description(item):
     # a CRLF-styled "\r\n\r\n---\r\n" must be caught by the same structural-
     # token check as its LF form, not survive as an unrecognized variant.
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # NFKC before any tag matching, for the same reason _fence_untrusted does
+    # it: a fullwidth "＜/generated-description＞" is a compatibility variant
+    # that collapses to its ASCII form here, so the literal replacement below
+    # catches it instead of it surviving as an unrecognized shape.
+    text = unicodedata.normalize("NFKC", text)
     text = _DESCRIPTION_CONTROL_CHARS_RE.sub("", text)
     text = text[:_DESCRIPTION_CAP]
     for token in _DESCRIPTION_STRUCTURAL_TOKENS:
@@ -1818,6 +1837,15 @@ def _saved_query_description(item):
     # content (the premise the whole untrusted-fencing regime rests on).
     # Found 2026-09-06 while validating the Cisco mcp-scanner against a
     # deliberately poisoned learned-query store.
+    #
+    # The entity-encoded pass must come first: the literal replacement below
+    # rewrites "<" and ">" but leaves "&lt;/generated-description&gt;" whole,
+    # which still reads as a closing tag to a model. Found the same day by a
+    # Codex Security review, which asked whether "entity and Unicode
+    # delimiter variants retain security significance at the tool-description
+    # LLM trust boundary". They do: 5 of 6 encoded variants survived the
+    # literal-only replacement.
+    text = _GENERATED_DESC_TAG_RE.sub("(generated-description)", text)
     text = text.replace("<", "(").replace(">", ")")
     if item.get("origin") == "generated":
         text = "<generated-description>" + text + "</generated-description>"
