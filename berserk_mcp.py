@@ -1806,12 +1806,20 @@ def _saved_query_description(item):
     text = text[:_DESCRIPTION_CAP]
     for token in _DESCRIPTION_STRUCTURAL_TOKENS:
         text = text.replace(token, " ")
+    # Neutralize literal angle brackets in every saved description, not just
+    # generated ones, so a forged "</generated-description>" can't masquerade
+    # as a real closing tag and make trailing injected text look like it fell
+    # outside the fence. This used to run only for origin == "generated",
+    # but every saved description -- generated or user-origin -- lands in the
+    # SAME tools/list payload, so a forged tag in a user-origin description
+    # can corrupt the fence boundary of a generated one sitting beside it.
+    # user-origin text is not trusted either: save_query's description is
+    # authored by the model, which may have just read attacker-controlled log
+    # content (the premise the whole untrusted-fencing regime rests on).
+    # Found 2026-09-06 while validating the Cisco mcp-scanner against a
+    # deliberately poisoned learned-query store.
+    text = text.replace("<", "(").replace(">", ")")
     if item.get("origin") == "generated":
-        # Neutralize literal angle brackets in the untrusted text before
-        # wrapping, so a forged "</generated-description>" inside the
-        # description can't masquerade as the real closing tag and make
-        # trailing injected text look like it fell outside the fence.
-        text = text.replace("<", "(").replace(">", ")")
         text = "<generated-description>" + text + "</generated-description>"
     return text
 

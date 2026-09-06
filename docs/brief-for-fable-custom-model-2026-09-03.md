@@ -376,7 +376,8 @@ default
   tools where collisions actually hurt may be barely represented.
 - **The data is mostly Claude Code's own tool use**, not berserk-mcp's, so
   expect heavy filtering.
-- **Privacy/sovereignty.** This is operator telemetry from a homelab. Any
+- **Privacy/sovereignty.** This is operator telemetry from a private
+  self-hosted deployment. Any
   training corpus derived from it inherits that sensitivity. This repo has a
   documented history of a real leak (a private hostname/IP reaching public
   GitHub, requiring a history rewrite and force-push). Treat derived datasets

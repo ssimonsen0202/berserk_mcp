@@ -1,0 +1,14 @@
+{
+  "_comment": "Accepted MCP-scanner findings. Each entry needs a reason. A finding belongs here only if it is a false positive or an accepted risk -- never to silence something real. Regenerate with: python3 scripts/mcp_scan_gate.py --update-baseline",
+  "accepted": {
+    "claude_harness_recommendations": {
+      "reason": "False positive. The YARA rule flags the Limitations clause 'this tool never modifies a harness' as coercive injection / instruction manipulation. That clause is a safety disclosure written by this repo, is version-controlled, and is exactly the Limitations phrasing docs/tool-description-audit.md's 6-axis rubric asks for. The rule's threat model is a malicious third-party server poisoning descriptions to hijack a client; there is no untrusted authorship path into the static TOOLS list. Accepted 2026-09-06.",
+      "detail": "yara_analyzer=HIGH: Detected 1 threat: coercive injection"
+    }
+  },
+  "_not_baselined": {
+    "_comment": "Recorded for the next person, not accepted -- these are LLM-analyzer findings, and the CI gate runs YARA only (see scripts/mcp_scan_gate.py for why). Listed so a future LLM-enabled run is not mistaken for a regression.",
+    "top_cpu": "False positive, same class. Flags 'use ONLY when the user names a container ... use host_cpu instead' as instruction manipulation. That is deliberate routing disambiguation, and this project measured that exact style of phrasing improving real routing accuracy (mistral-saba 86.3%->92.2%, deepseek-v4-flash 90.2%->94.1%, zero regressions -- docs/model-routing-cost-validation-2026-08-23.md). Weakening it to satisfy the scanner would trade measured accuracy for a heuristic.",
+    "save_query": "False positive, same class. Flags the usage guideline 'Call this after you answer a non-standard question with a custom search query.'"
+  }
+}

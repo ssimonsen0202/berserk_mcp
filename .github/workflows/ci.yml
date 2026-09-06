@@ -65,3 +65,37 @@ jobs:
         run: python -m pip install semgrep
       - name: Run custom fencing rules
         run: semgrep --config .semgrep/ --error berserk_mcp.py
+
+  mcp-scan:
+    # Cisco's MCP scanner against this server's live tools/list. Catches
+    # tool-poisoning in tool descriptions -- the attack this server is
+    # structurally exposed to, since saved__* tools are projected into
+    # tools/list from caller- and LLM-authored text (see
+    # _saved_query_description). Validated 2026-09-06 against a
+    # deliberately poisoned learned-query store: it flags the injected
+    # descriptions HIGH, and that exercise found a real fence-integrity
+    # gap in the user-origin path, now fixed.
+    #
+    # YARA analyzer only: the API/LLM/Behavioral/VirusTotal analyzers need
+    # credentials and transmit tool definitions or source to a third
+    # party. CI stays local and keyless.
+    #
+    # The gate applies a reviewed baseline rather than requiring zero
+    # findings, because the rules flag deliberate routing/limitation
+    # phrasing as prompt injection -- phrasing this project measured as
+    # improving real routing accuracy. See scripts/mcp_scan_gate.py.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - name: Install mcp-scanner
+        # CI/dev-only dependency. Does not affect the shipped server, which
+        # stays standard-library-only by design.
+        run: python -m pip install cisco-ai-mcp-scanner
+      - name: Scan tools/list for poisoning
+        run: python3 scripts/mcp_scan_gate.py
