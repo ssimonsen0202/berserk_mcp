@@ -2957,11 +2957,15 @@ class BerserkMcpTest(unittest.TestCase):
             sock.settimeout(5)
             try:
                 received = sock.recv(1)
-            except ConnectionResetError:
+            except ConnectionError:
                 # The abrupt close (server drops the connection with unread
-                # trickle bytes still queued) can surface as an RST instead of
-                # a clean EOF depending on OS/timing -- either way proves the
-                # connection did not stay open.
+                # trickle bytes still queued) can surface as a reset instead
+                # of a clean EOF depending on OS/timing -- ConnectionResetError
+                # on Linux/macOS, ConnectionAbortedError (WinError 10053) on
+                # Windows for the identical event. ConnectionError is the
+                # common base for both (and BrokenPipeError/
+                # ConnectionRefusedError besides) -- any of them proves the
+                # connection did not stay open, which is all this asserts.
                 received = b""
             self.assertEqual(received, b"")
             self.assertLess(elapsed, len(full_body) * 0.15, "deadline should cut the trickle short")
