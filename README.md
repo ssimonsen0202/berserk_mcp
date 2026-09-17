@@ -42,10 +42,20 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.28.0**. This is a bullet-point overview, most recent
+Current version: **1.29.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.29.0** (2026-09-17) — Sovereign deployment hardening: an opt-in
+  local-only egress policy (`BERSERK_LOCAL_ONLY`, `BERSERK_EGRESS_ALLOWED_HOSTS`,
+  `BERSERK_EGRESS_ALLOWED_CIDRS`) that refuses unapproved non-loopback
+  destinations across every outbound integration. DNS-rebinding-resistant
+  connection pinning, no-inherited-proxy isolation, a management-token gate
+  (`BERSERK_MCP_MGMT_TOKEN`) for `save_query` and the new
+  `approve_generated_query` tool, bounded doctor-probe concurrency, and
+  egress-policy enforcement on the live quota endpoint. Eighteen rounds of
+  Codex adversarial review, each finding independently verified against real
+  code before fixing. See [details](docs/releases/v1.29.0.md).
 - **v1.28.0** (2026-09-03) — Model-behavior monitoring: `model_drift_check`
   and `model_drift_history` classify a canaried model's tool-routing
   accuracy over time against a calibrated noise band, plus a `--drift-report`
@@ -218,6 +228,17 @@ air-gapped environments:
   endpoint, it receives only structural telemetry — key names, shapes,
   redacted excerpts. It never receives raw values. The endpoint URL must
   match an allowed scheme, and only an operator can set it.
+- **`BERSERK_LOCAL_ONLY=1` makes the sovereignty guarantee enforceable, not
+  just advisory.** It refuses OpenAI and Anthropic outright, even if their
+  API keys are present in the environment — an inherited key never
+  silently re-enables cloud fallback — and activates a destination
+  allowlist (`BERSERK_EGRESS_ALLOWED_HOSTS`/`_CIDRS`) for every outbound
+  integration: Hermes, CanonLoom, Discord, the eval harness. Every
+  approved destination is pinned to one DNS resolution per connection, so
+  a later rebind cannot silently redirect where the request actually
+  goes, and the shared HTTP opener ignores an inherited `HTTP_PROXY`, so a
+  proxy set for an unrelated purpose cannot become an unreviewed side
+  channel either. See [Security controls](docs/security-controls.md).
 
 **What we have actually checked about self-hosted model use** — not just
 claimed. This corrects earlier guidance in this section. That guidance
@@ -1259,10 +1280,12 @@ model routes correctly. Keep new tool descriptions that way.
 berserk-mcp applies defense in depth across the execution boundary, KQL
 validation, secret/PII redaction, generation-pipeline resource bounds,
 concurrency-safe store writes, role-visibility enforcement, and
-outbound-HTTP hardening. Each control has a name and an adversarial
-regression test. See [Security controls](docs/security-controls.md) for
-the full list of about 30 controls, plus the audit history: a hand audit, a
-differential re-review, and an external scanner pass across three tools.
+outbound-HTTP hardening (DNS-rebinding-resistant connection pinning, an
+opt-in local-only egress policy, and no inherited-proxy side channel). Each
+control has a name and an adversarial regression test. See [Security
+controls](docs/security-controls.md) for the full list of about 40
+controls, plus the audit history: a hand audit, a differential re-review,
+and an external scanner pass across three tools.
 One open finding as of 2026-08-29: the HTTP transport's DNS-rebinding
 protection (`BERSERK_MCP_HTTP_ALLOWED_HOSTS`) is opt-in rather than
 defaulted on for a loopback bind — see
