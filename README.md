@@ -42,10 +42,20 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.28.0**. This is a bullet-point overview, most recent
+Current version: **1.29.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.29.0** (2026-09-17) — Sovereign deployment hardening: an opt-in
+  local-only egress policy (`BERSERK_LOCAL_ONLY`, `BERSERK_EGRESS_ALLOWED_HOSTS`,
+  `BERSERK_EGRESS_ALLOWED_CIDRS`) that refuses unapproved non-loopback
+  destinations across every outbound integration. DNS-rebinding-resistant
+  connection pinning, no-inherited-proxy isolation, a management-token gate
+  (`BERSERK_MCP_MGMT_TOKEN`) for `save_query` and the new
+  `approve_generated_query` tool, bounded doctor-probe concurrency, and
+  egress-policy enforcement on the live quota endpoint. Eighteen rounds of
+  Codex adversarial review, each finding independently verified against real
+  code before fixing. See [details](docs/releases/v1.29.0.md).
 - **v1.28.0** (2026-09-03) — Model-behavior monitoring: `model_drift_check`
   and `model_drift_history` classify a canaried model's tool-routing
   accuracy over time against a calibrated noise band, plus a `--drift-report`
