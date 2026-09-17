@@ -262,6 +262,105 @@ class FetchLiveUsageRedirectSecurityTest(unittest.TestCase):
         self.assertEqual(received, [])
 
 
+class EgressPolicyEnforcementTest(unittest.TestCase):
+    """Codex adversarial-review finding: _fetch_live_usage called
+    NO_REDIRECT_OPENER.open() directly, bypassing validate_egress_destination().
+    With BERSERK_LOCAL_ONLY=1, a caller could still trigger a live cloud
+    request and send the Keychain-derived OAuth bearer token to
+    api.anthropic.com -- defeating the documented egress guarantee."""
+
+    def test_local_only_blocks_live_quota_request(self):
+        opener_calls = []
+        def opener(req, timeout):
+            opener_calls.append(req.full_url)
+            return _FakeResponse(200, json.dumps({"five_hour_utilization": 42}).encode())
+
+        import os
+        orig = os.environ.get("BERSERK_LOCAL_ONLY")
+        os.environ["BERSERK_LOCAL_ONLY"] = "1"
+        try:
+            result = qs._fetch_live_usage(
+                "secret-token", opener=opener,
+                endpoint="https://api.anthropic.com/api/oauth/usage",
+            )
+        finally:
+            if orig is None:
+                os.environ.pop("BERSERK_LOCAL_ONLY", None)
+            else:
+                os.environ["BERSERK_LOCAL_ONLY"] = orig
+        self.assertIsNone(result, "policy-blocked endpoint must degrade to None")
+        self.assertEqual(opener_calls, [], "opener must never be called for a blocked destination")
+
+    def test_local_only_falls_back_to_estimated_via_get_quota_status(self):
+        opener_calls = []
+        def opener(req, timeout):
+            opener_calls.append(req.full_url)
+            return _FakeResponse(200, json.dumps({"five_hour_utilization": 42}).encode())
+
+        run = lambda *a, **k: fake_completed_process(
+            0, json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
+
+        import os
+        orig = os.environ.get("BERSERK_LOCAL_ONLY")
+        os.environ["BERSERK_LOCAL_ONLY"] = "1"
+        try:
+            result = qs.get_quota_status(
+                run=run, opener=opener, platform_name="Darwin",
+                _total_tokens_estimate=lambda since: (999, True, False),
+            )
+        finally:
+            if orig is None:
+                os.environ.pop("BERSERK_LOCAL_ONLY", None)
+            else:
+                os.environ["BERSERK_LOCAL_ONLY"] = orig
+        self.assertEqual(result["source"], "estimated",
+                         "must fall back to estimated when local-only blocks the live endpoint")
+        self.assertEqual(result["total_tokens"], 999)
+        self.assertEqual(opener_calls, [], "opener must never be called")
+
+    def test_allowed_loopback_endpoint_still_works_under_local_only(self):
+        opener = lambda req, timeout: _FakeResponse(200, json.dumps({"utilization": 0.5}).encode())
+        import os
+        orig = os.environ.get("BERSERK_LOCAL_ONLY")
+        os.environ["BERSERK_LOCAL_ONLY"] = "1"
+        try:
+            result = qs._fetch_live_usage(
+                "tok", opener=opener,
+                endpoint="https://127.0.0.1:8443/api/oauth/usage",
+            )
+        finally:
+            if orig is None:
+                os.environ.pop("BERSERK_LOCAL_ONLY", None)
+            else:
+                os.environ["BERSERK_LOCAL_ONLY"] = orig
+        self.assertIsNotNone(result, "loopback must be allowed even under local-only")
+        self.assertEqual(result["utilization"], 0.5)
+
+    def test_egress_allowlist_permits_explicitly_listed_host(self):
+        opener = lambda req, timeout: _FakeResponse(200, json.dumps({"utilization": 0.7}).encode())
+        import os
+        orig_lo = os.environ.get("BERSERK_LOCAL_ONLY")
+        orig_hosts = os.environ.get("BERSERK_EGRESS_ALLOWED_HOSTS")
+        os.environ["BERSERK_LOCAL_ONLY"] = "1"
+        os.environ["BERSERK_EGRESS_ALLOWED_HOSTS"] = "api.anthropic.com"
+        try:
+            result = qs._fetch_live_usage(
+                "tok", opener=opener,
+                endpoint="https://api.anthropic.com/api/oauth/usage",
+            )
+        finally:
+            if orig_lo is None:
+                os.environ.pop("BERSERK_LOCAL_ONLY", None)
+            else:
+                os.environ["BERSERK_LOCAL_ONLY"] = orig_lo
+            if orig_hosts is None:
+                os.environ.pop("BERSERK_EGRESS_ALLOWED_HOSTS", None)
+            else:
+                os.environ["BERSERK_EGRESS_ALLOWED_HOSTS"] = orig_hosts
+        self.assertIsNotNone(result, "explicitly allowlisted host must be permitted")
+        self.assertEqual(result["utilization"], 0.7)
+
+
 class QuotaStatusToolIntegrationTest(unittest.TestCase):
     """Confirms total_tokens_estimate really is what the fallback wires to
     by default (no injected estimator) -- catches drift between the two

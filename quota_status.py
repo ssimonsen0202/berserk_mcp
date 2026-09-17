@@ -72,18 +72,26 @@ def _read_oauth_token(run=subprocess.run, platform_name=None):
     return token if isinstance(token, str) and token else None
 
 
-def _fetch_live_usage(token, opener=_http.NO_REDIRECT_OPENER.open):
+def _fetch_live_usage(token, opener=_http.NO_REDIRECT_OPENER.open,
+                      endpoint=None):
     """Calls the (undocumented, unstable) usage endpoint. Returns the
     parsed JSON dict, or None on ANY failure -- network error, non-200,
-    unexpected body shape, or a blocked redirect. Never raises.
+    unexpected body shape, a blocked redirect, or a policy-blocked
+    destination. Never raises.
 
     Uses the shared no-redirect opener (SEC-04, Codex security review):
     plain urlopen follows redirects and re-sends this request's
     Authorization: Bearer <oauth token> header to whatever host the
     redirect names. A redirect is treated the same as any other failure --
     degrade to the log-derived fallback, never forward the token onward."""
+    url = endpoint if endpoint is not None else USAGE_ENDPOINT
+    try:
+        _http.validate_http_url(url, label="quota endpoint")
+        _http.validate_egress_destination(url, label="quota endpoint")
+    except _http.UrlPolicyError:
+        return None
     req = urllib.request.Request(
-        USAGE_ENDPOINT,
+        url,
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
     )
     try:
