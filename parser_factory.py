@@ -554,22 +554,6 @@ def _q_fieldstats(source, kind):
     )
 
 
-def _render_multi_table(table):
-    """Render one bzrk JSON table as bounded TSV for existing parsers."""
-    schema = table.get("schema") or {}
-    columns = [c.get("name") for c in schema.get("columns", []) if isinstance(c, dict)]
-    rows = table.get("rows") or []
-    if not columns:
-        return ""
-    lines = ["\t".join(str(c) for c in columns)]
-    for row in rows:
-        values = []
-        for value in (row if isinstance(row, list) else []):
-            values.append(json.dumps(value, separators=(",", ":")) if isinstance(value, (dict, list)) else str(value or ""))
-        lines.append("\t".join(values))
-    return "\n".join(lines)
-
-
 def _parse_fieldstats_keys(raw_text):
     """Extract safe resource keys from fieldstats' AttributePath column."""
     if "AttributePath" not in str(raw_text or ""):
