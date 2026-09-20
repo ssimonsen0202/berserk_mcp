@@ -42,10 +42,20 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.28.0**. This is a bullet-point overview, most recent
+Current version: **1.29.1**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.29.1** (2026-09-20) — Security and correctness hardening from Codex
+  review of 8 oversized functions: reject non-finite floats in FinOps helpers
+  (OverflowError crash), validate KQL table name at configure time, cap ReDoS
+  in KQL validator, early-return on oversized queries, fence all network-derived
+  excerpts in LLM prompts, fix success_flag miscounting errored api_requests,
+  include cache_create_1h in context-size calculation.
+- **v1.29.0** (2026-09-20) — Decompose 933-line `_handle_call_uncached`
+  dispatcher into 5 category handlers. Remove dead `_render_multi_table`.
+  Fix body projection caps (240→2000) in claude search, error, and analytics
+  queries for full-fidelity session forensics.
 - **v1.28.0** (2026-09-03) — Model-behavior monitoring: `model_drift_check`
   and `model_drift_history` classify a canaried model's tool-routing
   accuracy over time against a calibrated noise band, plus a `--drift-report`
