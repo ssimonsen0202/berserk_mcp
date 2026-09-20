@@ -166,6 +166,7 @@ PHRASINGS = {
     "generate_parser": ["generate a parser for a new source", "create a log parser automatically"],
     "run_discovery_worker": ["run the discovery worker", "process the discovery queue", "advance discovery jobs"],
     "review_generated": ["review a generated parser", "audit an auto generated parser", "check a generated parser for issues"],
+    "approve_generated_query": ["approve a generated query", "promote a generated parser to active", "revoke a generated query's trust status"],
     "find_tool": ["find the right tool for a task", "search for a tool by what I want to do", "which tool should I use"],
     "model_drift_check": ["has the model got worse", "check model quality degradation", "did the provider change the model"],
     "model_drift_history": ["show model quality over time", "investigate model degradation history", "model score trend"],

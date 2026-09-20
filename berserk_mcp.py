@@ -54,15 +54,18 @@ import sys
 import json
 import subprocess
 import re
+import inspect
 import os
 import shutil
 import threading
 import time
 import uuid
 import urllib.error
+import urllib.parse
 import random
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hmac
+import contextvars
 import ipaddress
 import unicodedata
 from contextlib import contextmanager
@@ -240,8 +243,31 @@ _QUERY_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_QUERIES) if MAX_CON
 _FLEET_LOCK = threading.RLock()
 _RESULT_CACHE = {}
 _FAIL_COOLDOWN = {}
-_FLEET_CONTEXT = None
+# Per-call context (tool name, budget, cancellation), NOT a plain module
+# global. A plain global mutated with save/restore around _handle_call_uncached
+# was correct only for a single in-flight call at a time; HTTP's
+# ThreadingHTTPServer and background task workers both call handle_call
+# concurrently on separate threads, and the mutation was unsynchronized, so
+# one thread's context could overwrite another's mid-flight -- confirmed by
+# a deterministic two-thread repro (S4 in
+# docs/architecture-product-security-review-2026-09-12.md): request A read
+# request B's tool name, request B saw None, and a stale A context survived
+# both. contextvars.ContextVar gives each native thread its own value by
+# default (a new thread starts with no value set, independent of what any
+# other thread has .set()), which is exactly the isolation this needs --
+# see task-03-request-context-and-cancellation.md.
+_REQUEST_CONTEXT = contextvars.ContextVar("berserk_request_context", default=None)
 _FLEET_BACKEND_ID = None
+
+
+def _current_cancel_event():
+    """The current call's cancel_event, if this is a background task worker
+    -- None for a plain stdio/HTTP call, which has no cancellation concept.
+    Shared by every tool dispatch that needs to thread cancellation into
+    its own blocking work (bzrk_search's subprocess poll loop, and
+    generate_parser/run_discovery_worker's LLM-generation loops)."""
+    context = _REQUEST_CONTEXT.get()
+    return context.get("cancel_event") if context is not None else None
 
 
 def _reset_fleet_state():
@@ -384,11 +410,28 @@ HTTP_ALLOWED_HOSTS = os.environ.get("BERSERK_MCP_HTTP_ALLOWED_HOSTS", "").strip(
 HTTP_ALLOW_CIDRS = os.environ.get("BERSERK_MCP_HTTP_ALLOW_CIDRS", "127.0.0.1/32,::1/128").strip()
 HTTP_MAX_REQUEST_BYTES = _nonnegative_int_env("BERSERK_MCP_HTTP_MAX_REQUEST_BYTES", 1048576) or 1048576
 HTTP_MAX_CONCURRENT_REQUESTS = _nonnegative_int_env("BERSERK_MCP_HTTP_MAX_CONCURRENT_REQUESTS", 8) or 8
+HTTP_MAX_CONNECTIONS = _nonnegative_int_env("BERSERK_MCP_HTTP_MAX_CONNECTIONS", 64) or 64
 HTTP_USE_FORWARDED_FOR = os.environ.get(
     "BERSERK_MCP_HTTP_USE_FORWARDED_FOR", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
 HTTP_TRUSTED_PROXY_CIDRS = os.environ.get("BERSERK_MCP_HTTP_TRUSTED_PROXY_CIDRS", "").strip()
+HTTP_READ_TIMEOUT_SECONDS = _nonnegative_int_env("BERSERK_MCP_HTTP_READ_TIMEOUT_SECONDS", 30) or 30
 SERVER_INFO = {"name": "berserk-q", "title": "Berserk Query", "version": __version__}
+
+
+def _check_management_token(arguments):
+    """Enforce opt-in authorization for management-tool writes."""
+    configured = os.environ.get("BERSERK_MCP_MGMT_TOKEN", "")
+    if not configured:
+        return None
+    supplied = arguments.get("mgmt_token")
+    if not isinstance(supplied, str) or not hmac.compare_digest(supplied, configured):
+        return (
+            "management authorization required: provide the correct 'mgmt_token' "
+            "when BERSERK_MCP_MGMT_TOKEN is configured.",
+            True,
+        )
+    return None
 
 _BASE_INSTRUCTIONS = (
     "Answer observability questions by calling these tools — do not write KQL by hand. "
@@ -665,6 +708,37 @@ def tool_visible(tool):
 
 
 def item_visible(item):
+    # task-05: a generated query that hasn't been reviewed yet must never
+    # become a trusted, callable operational tool just because it executed
+    # successfully during generation -- item_visible is the single shared
+    # gate for list_saved, run_saved, saved__<name> dispatch, and the
+    # tools/list projection (_saved_query_tools), so this one change closes
+    # all four at once. review_generated deliberately bypasses
+    # item_visible (it reads load_learned() directly) because showing
+    # pending entries for audit is its entire purpose.
+    #
+    # Absent status means active for HUMAN entries only (every pre-existing
+    # save_query entry, and every store written before this field existed,
+    # has no status key at all) -- gating on "== pending_review" rather
+    # than "!= active" is what keeps every already-deployed human entry
+    # visible after this upgrade.
+    #
+    # Generated entries get the opposite default: origin=="generated" with
+    # no status means UNREVIEWED, not active. Every legacy generated entry
+    # ever written predates this gate entirely (it was added after
+    # generated queries already existed in the wild), so absent status
+    # there is not "written before this field existed and always trusted"
+    # -- it's "never been through the approval this gate exists to
+    # enforce." Requiring an explicit status=="active" is what actually
+    # closes the gap the pending_review gate was built for; the weaker
+    # "!= pending_review" check would silently re-trust every
+    # already-saved, never-reviewed LLM-authored query the moment this
+    # code shipped.
+    if item.get("origin") == "generated":
+        if item.get("status") != "active":
+            return False
+    elif item.get("status") == "pending_review":
+        return False
     roles = item.get("roles")
     return not roles or ACTIVE_ROLE == "all" or ACTIVE_ROLE in roles
 
@@ -1219,13 +1293,27 @@ MAX_BZRK_DIAGNOSTIC_CHARS = 100_000
 _PROCESS_READ_CHUNK = 64 * 1024
 
 
+class BzrkCancelled(Exception):
+    """Raised by _run_argv_bounded when cancel_event fires while the child
+    is still running. Cooperative: the poll loop notices within its normal
+    ~50ms granularity (same as the existing timeout check) and kills the
+    child immediately, rather than letting it run to completion unbounded
+    after a caller has already been told the work was cancelled -- see
+    task-03-request-context-and-cancellation.md and "Task cancellation
+    marks state but does not stop running work" in
+    docs/architecture-product-security-review-2026-09-12.md."""
+
+
 def _run_argv_bounded(argv, timeout, stdout_cap=MAX_BZRK_RESULT_BYTES,
-                      stderr_cap=MAX_BZRK_DIAGNOSTIC_CHARS):
+                      stderr_cap=MAX_BZRK_DIAGNOSTIC_CHARS, cancel_event=None):
     """Run argv without a shell, bounding captured bytes before decoding.
 
     Two readers drain stdout and stderr concurrently to avoid pipe deadlocks.
     stdout overflow terminates and reaps the child; stderr is retained only up
     to its diagnostic cap while the remainder is discarded until completion.
+    cancel_event, if given, is polled at the same cadence as the timeout
+    deadline and kills the child the moment it's set, rather than only
+    marking a task record cancelled while the subprocess keeps running.
     """
     process = subprocess.Popen(
         list(argv), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -1264,8 +1352,16 @@ def _run_argv_bounded(argv, timeout, stdout_cap=MAX_BZRK_RESULT_BYTES,
 
     deadline = time.monotonic() + max(0.0, float(timeout))
     timed_out = False
+    cancelled = False
     while process.poll() is None:
         if stdout_overflow.is_set():
+            try:
+                process.kill()
+            except OSError:  # pragma: no cover - child exited between poll and kill
+                pass
+            break
+        if cancel_event is not None and cancel_event.is_set():
+            cancelled = True
             try:
                 process.kill()
             except OSError:  # pragma: no cover - child exited between poll and kill
@@ -1285,6 +1381,8 @@ def _run_argv_bounded(argv, timeout, stdout_cap=MAX_BZRK_RESULT_BYTES,
         thread.join(timeout=2)
     if reader_errors:
         raise reader_errors[0]
+    if cancelled:
+        raise BzrkCancelled()
     if timed_out:
         raise subprocess.TimeoutExpired(list(argv), timeout)
     return {
@@ -1296,8 +1394,13 @@ def _run_argv_bounded(argv, timeout, stdout_cap=MAX_BZRK_RESULT_BYTES,
     }
 
 
-def run_bzrk(args, timeout=DEFAULT_TIMEOUT):
-    """Run the bzrk CLI with the given argument list. Returns (text, is_error)."""
+def run_bzrk(args, timeout=DEFAULT_TIMEOUT, cancel_event=None):
+    """Run the bzrk CLI with the given argument list. Returns (text, is_error).
+
+    cancel_event, if given (a threading.Event tied to a background task's
+    tasks/cancel), makes this genuinely cooperative: the child process is
+    killed as soon as it's set, not just marked cancelled while continuing
+    to run unbounded in the background."""
     if _RESOLVED_BZRK_BIN is None:
         return (
             f"error: '{_BZRK_BIN_CONFIG}' not found on PATH. Install the Berserk CLI or set "
@@ -1319,7 +1422,14 @@ def run_bzrk(args, timeout=DEFAULT_TIMEOUT):
     if "search" in args and "--no-stream" not in args:
         args = args + ["--no-stream"]
     try:
-        result = _run_argv_bounded([_RESOLVED_BZRK_BIN] + args, timeout)
+        # Same reasoning as bzrk_search's extra_kwargs: only pass
+        # cancel_event through when actually given one, so the many
+        # existing `def fake(args, timeout, ...)` test doubles for
+        # _run_argv_bounded keep working unmodified.
+        extra_kwargs = {"cancel_event": cancel_event} if cancel_event is not None else {}
+        result = _run_argv_bounded(
+            [_RESOLVED_BZRK_BIN] + args, timeout, **extra_kwargs,
+        )
         out = result["stdout"].decode("utf-8", errors="replace").strip()
         err = result["stderr"].decode("utf-8", errors="replace").strip()
         if err and _AUTH_FAILURE_RE.search(err):
@@ -1343,6 +1453,8 @@ def run_bzrk(args, timeout=DEFAULT_TIMEOUT):
         ), True
     except subprocess.TimeoutExpired:
         return f"bzrk timed out after {timeout}s", True
+    except BzrkCancelled:
+        return "bzrk query cancelled", True
     except Exception as e:  # pragma: no cover - defensive
         return ("error running bzrk: " + str(e)), True
 
@@ -1477,14 +1589,23 @@ def bzrk_search(kql, since, extra=None):
         ), True
     timeout = None
     tool_name = None
-    if _FLEET_CONTEXT is not None:
+    cancel_event = None
+    context = _REQUEST_CONTEXT.get()
+    if context is not None:
         timeout = _window_budget(
-            _FLEET_CONTEXT.get("budget"),
+            context.get("budget"),
             since,
-            _FLEET_CONTEXT.get("budget_multiplier", 1.0),
+            context.get("budget_multiplier", 1.0),
         )
-        tool_name = _FLEET_CONTEXT.get("tool")
+        tool_name = context.get("tool")
+        cancel_event = context.get("cancel_event")
     effective_timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
+    # Only pass cancel_event through when a task worker actually set one
+    # (never true for a plain stdio/HTTP call, which has no cancellation
+    # concept). This is also what keeps every existing `def fake(args,
+    # timeout=...)` test double across the suite working unmodified: they
+    # were never written to accept this parameter and don't need to be.
+    extra_kwargs = {"cancel_event": cancel_event} if cancel_event is not None else {}
     with _query_semaphore_slot(effective_timeout) as acquired:
         if not acquired:
             return (
@@ -1495,12 +1616,13 @@ def bzrk_search(kql, since, extra=None):
             )
         if timeout is None:
             out, is_err = run_bzrk(
-                ["-P", PROFILE, "search", query, "--since", since] + list(extra or [])
+                ["-P", PROFILE, "search", query, "--since", since] + list(extra or []),
+                **extra_kwargs,
             )
         else:
             out, is_err = run_bzrk(
                 ["-P", PROFILE, "search", query, "--since", since] + list(extra or []),
-                timeout=timeout,
+                timeout=timeout, **extra_kwargs,
             )
     if is_err and _BZRK_TIMEOUT_TEXT_RE.match(str(out or "")) and tool_name:
         return (
@@ -1892,7 +2014,18 @@ def persist_learned_query(entry, action_source):
         existing = next((it for it in all_items if it["name"] == nm), None)
         is_amendment = existing is not None
         if action_source == "generated":
-            entry = {**entry, "origin": "generated"}
+            # task-05: every generated write starts pending, whether it's a
+            # brand-new query or replacing an already-approved one --
+            # execution success during generation is not proof of
+            # correctness (docs/architecture-product-security-review-
+            # 2026-09-12.md's "Additional boundaries" section), and a
+            # regenerated query's content can change even when its name
+            # doesn't, so a prior approval must not silently carry over to
+            # different content. item_visible() is the enforcement point:
+            # a pending entry is excluded from list_saved/run_saved/
+            # saved__<name>/tools/list until approve_generated_query
+            # explicitly promotes it.
+            entry = {**entry, "origin": "generated", "status": "pending_review"}
             by_name = {it["name"]: it for it in all_items}
 
             def _is_free_or_generated(candidate):
@@ -1967,6 +2100,85 @@ def persist_learned_query(entry, action_source):
         except Exception as exc:
             log(f"failed to send tools/list_changed notification: {type(exc).__name__}: {exc}")
     return log_entry
+
+
+def _set_generated_query_status(name, approve):
+    """task-05 release gate: promote a pending generated query to active
+    (trusted, callable), or revoke an already-approved one back to
+    pending_review. Returns (message, is_error).
+
+    Deliberately not routed through persist_learned_query: that function's
+    generated-write path handles *creating or replacing* an entry
+    (collision renaming, room-eviction protection); this only flips the
+    `status` field on an entry that already exists, in place, so none of
+    that machinery applies.
+    """
+    nm = sanitize_name(name)
+    with _FileLock(LEARNED_PATH):
+        all_items = load_learned()
+        match = next((it for it in all_items if it["name"] == nm), None)
+        if match is None:
+            return f"No saved query named '{nm}'.", True
+        if "generated_by" not in match:
+            return (
+                f"'{nm}' is not a generated query (no generation provenance); "
+                "approval only applies to LLM-generated queries.",
+                True,
+            )
+        # A legacy generated entry saved before this status field existed
+        # has current_status is None, not "pending_review" -- item_visible
+        # treats that the same as pending (unreviewed), so approval must
+        # too. Checking "!= pending_review" here (rather than "!= active")
+        # would make such an entry permanently unapprovable: this call
+        # would report "already active" without ever writing status, and
+        # item_visible would keep hiding it forever since status stays
+        # unset. Branching on is_active instead treats None the same as
+        # pending_review on both the approve and revoke paths.
+        current_status = match.get("status")
+        is_active = current_status == "active"
+        if approve:
+            if is_active:
+                return f"'{nm}' is already active (not pending review).", False
+            match = {**match, "status": "active"}
+            action = "approved"
+        else:
+            if not is_active:
+                return f"'{nm}' is already pending_review.", False
+            match = {**match, "status": "pending_review"}
+            action = "revoked"
+        items = [match if it["name"] == nm else it for it in all_items]
+        save_learned(items)
+
+    log_entry = {
+        "ts": now_iso(),
+        "name": nm,
+        "action": action,
+        "role": ACTIVE_ROLE,
+    }
+    # Best-effort, same pattern as persist_learned_query's own amendments
+    # write -- the status flip above already landed; a logging failure
+    # must not undo it or be reported as an error to the caller.
+    amendments_path = Path(LEARNED_PATH).parent / "amendments_log.json"
+    try:
+        with _FileLock(amendments_path):
+            amendments = load_json_list(amendments_path)
+            amendments.append(log_entry)
+            amendments = amendments[-1000:]
+            save_json_list(amendments_path, amendments)
+    except Exception as exc:
+        log(f"failed to write amendments log: {type(exc).__name__}: {exc}")
+
+    # Approving/revoking changes whether saved__<name> is projected into
+    # tools/list (item_visible gates on status) -- same notification
+    # persist_learned_query sends for the same reason.
+    if _list_changed_supported():
+        try:
+            send({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+        except Exception as exc:
+            log(f"failed to send tools/list_changed notification: {type(exc).__name__}: {exc}")
+
+    verb = "approved (now active/trusted)" if approve else "revoked (back to pending_review)"
+    return f"'{nm}' {verb}.", False
 
 
 parser_factory.configure(
@@ -2134,6 +2346,7 @@ def _canonloom_call(path: str, method: str = "GET", body=None):
         headers["X-API-Key"] = api_key
     try:
         url = server_url + path
+        _http.validate_egress_destination(url, label="canonloom endpoint")
         import json as _json
         if method == "GET":
             data, err = _http.http_get_json(url, headers, timeout=120)
@@ -2387,13 +2600,14 @@ TOOLS = [
 MGMT_TOOLS = [
     {"name": "list_saved", "description": "List previously-saved custom queries (name + description). For a non-standard question, CHECK HERE FIRST before writing new KQL.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "run_saved", "description": "Run a previously-saved query by name (see list_saved). Deterministic - no KQL authoring.", "inputSchema": {"type": "object", "properties": dict({"name": {"type": "string", "description": "saved query name"}}, **_since()), "required": ["name"]}},
-    {"name": "save_query", "description": "Persist a WORKING KQL query as a reusable named query so it never has to be figured out again. Call this after you answer a non-standard question with a custom search query. The query is run once to verify it works; if it errors it is NOT saved. Replacing an existing saved query of the same name requires overwrite=true.", "inputSchema": {"type": "object", "properties": dict({"name": {"type": "string", "description": "short snake_case name"}, "description": {"type": "string", "description": "what the query answers"}, "kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'"}, "roles": {"type": ["array", "string"], "items": {"type": "string"}, "description": "optional role(s) this query serves: sre, soc, claude, ops"}, "overwrite": {"type": "boolean", "description": "must be true to replace an existing saved query of the same name"}}, **_since()), "required": ["name", "description", "kql"]}},
+    {"name": "save_query", "description": "Persist a WORKING KQL query as a reusable named query so it never has to be figured out again. Call this after you answer a non-standard question with a custom search query. The query is run once to verify it works; if it errors it is NOT saved. Replacing an existing saved query of the same name requires overwrite=true. If BERSERK_MCP_MGMT_TOKEN is configured, also provide mgmt_token with its value; otherwise this optional authorization argument is not required.", "inputSchema": {"type": "object", "properties": dict({"name": {"type": "string", "description": "short snake_case name"}, "description": {"type": "string", "description": "what the query answers"}, "kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'"}, "roles": {"type": ["array", "string"], "items": {"type": "string"}, "description": "optional role(s) this query serves: sre, soc, claude, ops"}, "overwrite": {"type": "boolean", "description": "must be true to replace an existing saved query of the same name"}, "mgmt_token": {"type": "string", "description": "management authorization token; required when BERSERK_MCP_MGMT_TOKEN is configured"}}, **_since()), "required": ["name", "description", "kql"]}},
     {"name": "request_discovery", "description": "Queue a newly-added service or metric for author-lane integration. Validates the source is currently visible in Berserk, then records a job for the discovery worker to drain. Use when a user says 'I added / connected / started shipping SOURCE'.", "inputSchema": {"type": "object", "properties": {"service": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "service.name to integrate"}, "metric": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "metric name to integrate"}, "role_hint": {"type": "string", "description": "optional target role: sre, soc, claude, ops"}, "requested_by": {"type": "string", "description": "optional requester label"}, **_since()}}},
     {"name": "discovery_status", "description": "List pending and completed discovery jobs for new services or metrics.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "detect_new_sources", "description": "Scan Berserk for services/metrics never seen before (and optionally schema drift on known ones). Use for 'anything new reporting?', or run with auto_queue=true to queue newcomers for parser generation.", "inputSchema": {"type": "object", "properties": dict(_since(), **{"auto_queue": {"type": "boolean", "description": "queue newly-detected sources for parser generation"}, "check_drift": {"type": "boolean", "description": "also check known services for resource-key schema drift"}})}},
     {"name": "generate_parser", "description": "Generate and verify a query pack for one source right now (synchronous; may take minutes). An LLM authors 2-4 KQL queries from a live schema profile, validates each against Berserk, and saves the survivors. Requires at least one configured LLM provider (HERMES_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY).", "inputSchema": {"type": "object", "properties": {"service": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "service.name to generate a parser for"}, "metric": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "metric_name to generate a parser for"}, "role_hint": {"type": "string", "description": "optional target role: sre, soc, claude, ops"}}}},
     {"name": "run_discovery_worker", "description": "Drain queued discovery jobs: for each one, an LLM authors a verified query pack for the new source. Requires at least one configured LLM provider; may take minutes per job.", "inputSchema": {"type": "object", "properties": {"max_jobs": {"type": "integer", "description": "max jobs to process this call, default 1, capped at 5"}}}},
     {"name": "review_generated", "description": "List or inspect LLM-generated saved queries for audit before trusting them. No arg: list all generated queries with their provider/model/timestamp. With name: full entry including the KQL.", "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "description": "optional: a specific generated query name to inspect in full"}}}},
+    {"name": "approve_generated_query", "description": "Promote (or revoke) a generated query's trust status. A freshly-generated query is staged pending_review -- excluded from list_saved/run_saved/saved__<name>/tools/list until explicitly approved here, so an LLM-authored query that merely executed successfully can never silently become a callable operational tool. Use review_generated first to inspect the KQL. Pass approve=false to revert an already-approved query back to pending_review (e.g. after discovering a problem) -- reversible either direction. If BERSERK_MCP_MGMT_TOKEN is configured, also provide mgmt_token with its value; otherwise this optional authorization argument is not required.", "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "description": "the generated query's saved name"}, "approve": {"type": "boolean", "description": "true to promote to active/trusted (default), false to revoke back to pending_review"}, "mgmt_token": {"type": "string", "description": "management authorization token; required when BERSERK_MCP_MGMT_TOKEN is configured"}}, "required": ["name"]}},
     {"name": "find_tool", "description": "Find a tool by what you're trying to do, when the full tool list isn't resident (BERSERK_MCP_DISCOVERY=1). Returns up to 5 candidates with their full inputSchema inline, so no second round trip is needed before calling one. If nothing matches confidently, returns the always-resident anchor set instead and says so explicitly.", "inputSchema": {"type": "object", "properties": {"intent": {"type": "string", "maxLength": MAX_SEARCH_TERM_CHARS, "description": "what you're trying to find out or do, in your own words"}}, "required": ["intent"]}},
 ]
 
@@ -2422,9 +2636,98 @@ _ANNOTATIONS = {
     "generate_parser": _WRITE_EXTERNAL,
     "run_discovery_worker": _WRITE_EXTERNAL,
     "review_generated": _READ_LOCAL,
+    "approve_generated_query": _WRITE_LOCAL,
     "claude_record_recommendation_decision": _WRITE_EXTERNAL,
     "claude_generate_dashboard": _WRITE_LOCAL,
+    "canonloom_run_pipeline": _WRITE_EXTERNAL,
+    # Not named in the original review, but caught by
+    # _mutating_tools_from_dispatch_source() below: despite its
+    # read-sounding name/description ("Compute a freshness score..."), the
+    # handler POSTs to the CanonLoom server the same way canonloom_run_pipeline
+    # does. Classified conservatively by call shape, since this codebase
+    # cannot verify what the remote server does with the POST body.
+    "canonloom_freshness_report": _WRITE_EXTERNAL,
 }
+
+# Tools whose dispatch handler is known (by direct source inspection, not
+# just by convention) to perform a mutating outbound call or otherwise
+# change persistent state. Kept as a floor, not the sole source of truth --
+# _annotation_catalog_violations() below also *derives* the mutating set
+# from the dispatch source itself, so a brand-new tool that mutates state
+# but was never added here still gets caught. A name here that is not an
+# actually-advertised tool also fails the check, so this list cannot rot
+# into asserting about phantoms.
+_KNOWN_MUTATING_TOOLS = frozenset({
+    "save_query",
+    "request_discovery",
+    "detect_new_sources",
+    "generate_parser",
+    "run_discovery_worker",
+    "claude_record_recommendation_decision",
+    "claude_generate_dashboard",
+    "canonloom_run_pipeline",
+    "canonloom_freshness_report",
+    # task-05: mutates the learned-query store (via _set_generated_query_status
+    # -> save_learned) but the dispatch block calls that helper rather than
+    # save_learned/persist_learned_query directly, so it isn't derivable by
+    # _mutating_tools_from_dispatch_source()'s literal marker scan -- added
+    # to the hand-curated floor set instead, same as every other tool here.
+    "approve_generated_query",
+})
+
+# Source-text markers that indicate a dispatch block performs a mutating
+# outbound call or local persistence write. "POST" catches CanonLoom-style
+# bridges (any future integration that follows the same
+# `_call(path, "POST", body)` shape this codebase already uses); the
+# _http.* names catch a dispatch branch that calls the shared HTTP client
+# directly instead of through a bridge helper (both shapes exist in this
+# codebase -- ai_finops.py and _post_discord_alert use post_bytes_status
+# directly); the rest catch the local-store write helpers this codebase
+# already uses.
+_MUTATION_SOURCE_MARKERS = (
+    '"POST"',
+    "_http.http_post_json(",
+    "_http.post_bytes_status(",
+    "persist_learned_query(",
+    "save_json_list(",
+    "save_learned(",
+    "_store.save_json_dict(",
+)
+
+
+def _dispatch_blocks_from_source(source):
+    """Split _handle_call_uncached's source into (tool_names, block_text)
+    pairs -- one per top-level `if name == "...":` or `if name in {...}:`
+    dispatch line, with block_text running through to the next such
+    dispatch line (or end of function)."""
+    pattern = re.compile(
+        r'^    if name == "([A-Za-z_][A-Za-z0-9_]*)":'
+        r'|^    if name in \{([^}]*)\}:',
+        re.MULTILINE,
+    )
+    matches = list(pattern.finditer(source))
+    blocks = []
+    for i, m in enumerate(matches):
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(source)
+        if m.group(1):
+            names = [m.group(1)]
+        else:
+            names = re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', m.group(2))
+        blocks.append((names, source[start:end]))
+    return blocks
+
+
+def _mutating_tools_from_dispatch_source():
+    """Derive the set of tool names whose dispatch block matches a known
+    mutation marker, by inspecting _handle_call_uncached's actual source --
+    not a hand-maintained list that a new tool could silently miss."""
+    source = inspect.getsource(_handle_call_uncached)
+    derived = set()
+    for names, block_text in _dispatch_blocks_from_source(source):
+        if any(marker in block_text for marker in _MUTATION_SOURCE_MARKERS):
+            derived.update(names)
+    return derived
 
 # Issue #14: just-in-time tool discovery. Off by default for one release
 # (kill switch) -- when on, tools/list returns only the anchor set below
@@ -2516,11 +2819,12 @@ TITLES = {
     "generate_parser": "Generate Parser",
     "run_discovery_worker": "Run Discovery Worker",
     "review_generated": "Review Generated Queries",
+    "approve_generated_query": "Approve Generated Query",
 }
 
 
 def annotations_for(name):
-    """Read-only by default; only the two store-management tools differ."""
+    """Read-only by default; tools in _ANNOTATIONS override that."""
     if isinstance(name, str) and name.startswith("saved__"):
         # A projected saved query is a deterministic replay of a verified
         # local query, same as list_saved/run_saved -- not an open-world
@@ -2528,6 +2832,67 @@ def annotations_for(name):
         # otherwise imply.
         return _READ_LOCAL
     return _ANNOTATIONS.get(name, _READ)
+
+
+def _annotation_catalog_violations():
+    """Return a list of human-readable violation strings (empty if none).
+
+    A tool that mutates state must never be missing from _ANNOTATIONS or
+    still advertise readOnlyHint=True -- a client that trusts annotations to
+    streamline approvals (e.g. skip confirmation for readOnlyHint tools)
+    must never see that hint on a tool that POSTs to an external service or
+    persists state -- see S3 in
+    docs/architecture-product-security-review-2026-09-12.md.
+
+    The mutating set is the union of _KNOWN_MUTATING_TOOLS and whatever
+    _mutating_tools_from_dispatch_source() finds by inspecting the real
+    dispatch code -- so a brand-new tool that mutates state is caught even
+    if nobody remembered to add it to _KNOWN_MUTATING_TOOLS.
+    _KNOWN_MUTATING_TOOLS itself is checked against the real tool catalog so
+    it cannot rot into asserting about a renamed/removed tool.
+
+    Deliberately does not raise: this is a static-code property, checked by
+    a dedicated test and reported by doctor (required=True there), not
+    something that should be able to crash import of this module and take
+    every consumer (--doctor included) down with it -- annotations are
+    advisory metadata (per requirements.md, "annotations never replace
+    authorization"), and the fixed-query path is the primary operational
+    surface that must keep working even if this specific check can't run
+    (e.g. inspect.getsource failing on a .pyc-only install)."""
+    violations = []
+    catalog_names = {t["name"] for t in TOOLS} | {t["name"] for t in MGMT_TOOLS}
+    for tool_name in _KNOWN_MUTATING_TOOLS:
+        if tool_name not in catalog_names:
+            violations.append(
+                f"{tool_name!r} is listed in _KNOWN_MUTATING_TOOLS but is "
+                "not an advertised tool -- update or remove the stale entry"
+            )
+    try:
+        derived = _mutating_tools_from_dispatch_source()
+    except OSError as exc:
+        violations.append(f"could not inspect dispatch source: {exc}")
+        derived = set()
+    mutating = _KNOWN_MUTATING_TOOLS | derived
+    for tool_name in mutating:
+        annotation = annotations_for(tool_name)
+        if annotation.get("readOnlyHint", True):
+            violations.append(
+                f"{tool_name!r} is a mutating tool but annotations_for() "
+                "reports readOnlyHint=True (missing or misclassified in "
+                "_ANNOTATIONS)"
+            )
+    return violations
+
+
+def _assert_annotation_catalog_complete():
+    """Test/CI-facing form of _annotation_catalog_violations(): raises if
+    any violation is found. Not called at import time -- see
+    _doctor_check_annotation_catalog for the production-facing check."""
+    violations = _annotation_catalog_violations()
+    if violations:
+        raise RuntimeError(
+            "annotation catalog invariant violated: " + "; ".join(violations)
+        )
 
 
 def _job_identity(job):
@@ -2538,10 +2903,13 @@ def _job_identity(job):
     return (job.get("source"), job.get("kind"), job.get("ts"))
 
 
-def _drain_pending_jobs(max_jobs):
+def _drain_pending_jobs(max_jobs, cancel_event=None):
     """Drain up to max_jobs pending discovery jobs through the parser
     factory pipeline. Mutates and persists the discovery queue. Shared by
-    the run_discovery_worker MCP tool and the --worker CLI mode.
+    the run_discovery_worker MCP tool and the --worker CLI mode (the CLI
+    mode has no task/cancellation concept, so it never passes cancel_event
+    and this always runs to completion there, matching its prior
+    behavior).
 
     Returns (outcome_lines, any_needs_human), or (None, False) if there was
     nothing pending -- callers render their own "no jobs" message so the
@@ -2557,6 +2925,17 @@ def _drain_pending_jobs(max_jobs):
     any change another writer made to the queue in the meantime (a new
     enqueue, a status change) is preserved rather than clobbered by a
     stale in-memory copy.
+
+    cancel_event is threaded into generate_parser_for for the job
+    currently in flight, AND checked again here between jobs -- a
+    round-7 adversarial-review finding: without this, a client could get
+    a successful tasks/cancel response while this loop kept starting
+    MORE jobs (each making real LLM provider calls and persisting
+    generated queries) regardless. A job already reported cancelled by
+    generate_parser_for's own internal check is NOT marked "done" or
+    "needs_human" in the queue -- it is left "pending" so a future,
+    uncancelled run_discovery_worker call picks it up again, exactly as
+    if this drain had never reached it.
     """
     with _FileLock(DISCOVERY_QUEUE_PATH):
         queue = load_json_list(DISCOVERY_QUEUE_PATH)
@@ -2568,12 +2947,22 @@ def _drain_pending_jobs(max_jobs):
     outcomes = []
     any_needs_human = False
     for job in pending[:max_jobs]:
-        report, ok = parser_factory.generate_parser_for(job)
+        if cancel_event is not None and cancel_event.is_set():
+            outcomes.append(f"- {job['source']}: skipped (cancelled)")
+            break
+        report, ok = parser_factory.generate_parser_for(job, cancel_event=cancel_event)
         if ok:
             job_report = report.get("report", {})
             names = ", ".join(job_report.get("queries_saved", []))
             updates[_job_identity(job)] = ("done", job_report)
             outcomes.append(f"- {job['source']}: done ({names})")
+        elif report.get("reason") == "cancelled":
+            # Not a real "needs_human" outcome -- deliberately does NOT
+            # add to `updates`, so the job stays "pending" in the queue
+            # (see docstring) rather than being marked needs_human for
+            # something that was never actually attempted to completion.
+            outcomes.append(f"- {job['source']}: cancelled (left pending for retry)")
+            break
         else:
             job_report = {
                 "reason": report.get("reason"),
@@ -2640,6 +3029,9 @@ def _handle_learning_loop(name, arguments):
             return "No saved query named '" + qn + "'. Available: " + avail, True
         return _run_saved_entry(match, arguments.get("since"))
     if name == "save_query":
+        authorization_error = _check_management_token(arguments)
+        if authorization_error:
+            return authorization_error
         nm = sanitize_name(arguments.get("name", ""))
         desc = str(arguments.get("description", "")).strip()
         kql = str(arguments.get("kql", "")).strip()
@@ -2773,7 +3165,7 @@ def _handle_parser_factory(name, arguments):
             "source": target, "kind": kind,
             "role_hint": role_hint[0] if role_hint else "",
         }
-        report, ok = parser_factory.generate_parser_for(job)
+        report, ok = parser_factory.generate_parser_for(job, cancel_event=_current_cancel_event())
         return json.dumps(report, indent=2), not ok
     if name == "run_discovery_worker":
         raw_max = arguments.get("max_jobs")
@@ -2782,7 +3174,7 @@ def _handle_parser_factory(name, arguments):
         except (TypeError, ValueError):
             max_jobs = 1
         max_jobs = max(1, min(max_jobs, 5))
-        outcomes, any_needs_human = _drain_pending_jobs(max_jobs)
+        outcomes, any_needs_human = _drain_pending_jobs(max_jobs, cancel_event=_current_cancel_event())
         if outcomes is None:
             return "No pending discovery jobs.", False
         return "\n".join(outcomes), any_needs_human
@@ -2806,6 +3198,17 @@ def _handle_parser_factory(name, arguments):
                 f"[{gb.get('provider','?')}/{gb.get('model','?')} @ {gb.get('ts','?')}]"
             )
         return "Generated queries:\n" + "\n".join(lines), False
+    if name == "approve_generated_query":
+        authorization_error = _check_management_token(arguments)
+        if authorization_error:
+            return authorization_error
+        nm_arg = arguments.get("name")
+        if not nm_arg:
+            return "missing required 'name'", True
+        approve = arguments.get("approve", True)
+        if not isinstance(approve, bool):
+            return "'approve' must be a boolean", True
+        return _set_generated_query_status(nm_arg, approve)
 
     if name == "validate_kql":
         kql = arguments.get("kql")
@@ -3598,7 +4001,15 @@ def _fleet_args_key(name, arguments):
         backend = run_bzrk
     except TypeError:
         backend = (type(run_bzrk), id(run_bzrk))
-    return (backend, str(name), encoded)
+    # ACTIVE_ROLE is a single value for this process's whole lifetime (set
+    # once at startup, never mutated per-request -- see the role-filtering
+    # comments near ACTIVE_ROLE's definition), so no two concurrent
+    # requests in production ever see different roles here. Included
+    # anyway so the cache/cooldown key stays correct by construction if
+    # that assumption ever changes, rather than by an argument about
+    # current deployment shape -- see task-03's "preserve cache/cooldown
+    # isolation by ... role" acceptance criterion.
+    return (backend, ACTIVE_ROLE, str(name), encoded)
 
 
 def _fleet_backend_fingerprint():
@@ -3613,9 +4024,16 @@ def _cache_marker(text, age):
     return f"{text}\n(cached, {age:.1f}s old)"
 
 
-def handle_call(name, arguments):
-    """Dispatch one tool call with fleet-friendly budget/cache controls."""
-    global _FLEET_CONTEXT, _FLEET_BACKEND_ID
+def handle_call(name, arguments, cancel_event=None):
+    """Dispatch one tool call with fleet-friendly budget/cache controls.
+
+    cancel_event, if given, is a threading.Event a background task worker
+    ties to its own task record's tasks/cancel state -- see _run_task. It
+    rides along in the per-call context (_REQUEST_CONTEXT) so bzrk_search
+    can pass it down to the actual subprocess call, making cancellation of
+    a running query genuinely cooperative rather than a status flag the
+    subprocess ignores."""
+    global _FLEET_BACKEND_ID
     args = arguments if isinstance(arguments, dict) else {}
     _normalize_since_arg(args)
     backend_id = _fleet_backend_fingerprint()
@@ -3645,16 +4063,22 @@ def handle_call(name, arguments):
             if cached:
                 _RESULT_CACHE.pop(key, None)
 
-    previous_context = _FLEET_CONTEXT
-    _FLEET_CONTEXT = {
+    context_token = _REQUEST_CONTEXT.set({
         "tool": str(name),
         "budget": TOOL_BUDGET_SECONDS if TOOL_BUDGET_SECONDS > 0 else None,
         "budget_multiplier": _tool_budget_multiplier(name),
-    }
+        "cancel_event": cancel_event,
+    })
     try:
         text, is_err = _handle_call_uncached(name, args)
     finally:
-        _FLEET_CONTEXT = previous_context
+        # .reset(), not another .set() -- restores exactly whatever this
+        # ContextVar held (in this thread's context) before this call, on
+        # every exit path (success, error, or an exception propagating
+        # through _handle_call_uncached), same guarantee the old
+        # try/finally save-restore had, now per-thread-correct instead of
+        # racing every other thread that also mutates one shared global.
+        _REQUEST_CONTEXT.reset(context_token)
 
     text = str(text)
     # `in`, not startswith: the SIMPLE-dispatch error path now fences every
@@ -3866,8 +4290,8 @@ def _launch_task_worker(target):
     return worker
 
 
-def _execute_task_tool(name, arguments, mode):
-    text, is_err = handle_call(name, arguments)
+def _execute_task_tool(name, arguments, mode, cancel_event=None):
+    text, is_err = handle_call(name, arguments, cancel_event=cancel_event)
     text = secret_scan.apply_output_filter(
         text,
         mode=REDACT_MODE,
@@ -3877,7 +4301,7 @@ def _execute_task_tool(name, arguments, mode):
     return _tool_call_result(name, text, is_err, mode)
 
 
-def _run_task(task_id, name, arguments, mode):
+def _run_task(task_id, name, arguments, mode, cancel_event):
     with _TASK_LOCK:
         record = _TASKS.get(task_id)
         if record is None or record.get("status") == "cancelled":
@@ -3886,7 +4310,14 @@ def _run_task(task_id, name, arguments, mode):
         record["updated_ts"] = _task_now()
         record["updated_at"] = now_iso()
     try:
-        result = _execute_task_tool(name, arguments, mode)
+        result = _execute_task_tool(name, arguments, mode, cancel_event=cancel_event)
+        # cancel_event can flip to set() after _execute_task_tool already
+        # returned a result built from a partial/killed run (e.g. it lost
+        # the race between the subprocess finishing its own last poll tick
+        # and tasks/cancel firing). The task's own "status" field is the
+        # single source of truth a client reads -- checked again under the
+        # lock below -- so an ambiguous result never gets reported as
+        # "complete" once cancellation was requested.
         status = "complete"
         error = ""
     except Exception as exc:  # pragma: no cover - defensive boundary
@@ -3907,6 +4338,7 @@ def _run_task(task_id, name, arguments, mode):
 def _create_task(name, arguments, mode):
     now = _task_now()
     task_id = "task_" + uuid.uuid4().hex
+    cancel_event = threading.Event()
     record = {
         "id": task_id,
         "status": "pending",
@@ -3920,13 +4352,19 @@ def _create_task(name, arguments, mode):
         "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + MCP_TASK_TTL_SECONDS)),
         "result": None,
         "error": "",
+        # Internal-only: never serialized (_task_public/_task_result
+        # whitelist their own fields), tied to this task's own
+        # tasks/cancel so a running bzrk subprocess is actually killed
+        # instead of just having its result discarded once it eventually
+        # finishes on its own -- see run_bzrk/_run_argv_bounded.
+        "cancel_event": cancel_event,
     }
     with _TASK_LOCK:
         _task_prune_locked(now)
         if len(_TASKS) >= MCP_MAX_TASKS:
             return None
         _TASKS[task_id] = record
-    _launch_task_worker(lambda: _run_task(task_id, name, dict(arguments), mode))
+    _launch_task_worker(lambda: _run_task(task_id, name, dict(arguments), mode, cancel_event))
     return {"resultType": "task", "task": _task_public(record)}
 
 
@@ -4185,6 +4623,15 @@ def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE
                     current["status"] = "cancelled"
                     current["updated_ts"] = _task_now()
                     current["updated_at"] = now_iso()
+                    # Set the event too, not just the status flag -- if the
+                    # worker thread is mid-flight inside a bzrk subprocess
+                    # call, this is what actually kills that subprocess
+                    # (see run_bzrk/_run_argv_bounded) rather than letting
+                    # it keep running to completion while the client has
+                    # already been told the task was cancelled.
+                    cancel_event = current.get("cancel_event")
+                    if cancel_event is not None:
+                        cancel_event.set()
                 record = dict(current)
         return _jsonrpc_result(id_, _task_result(record))
 
@@ -4322,6 +4769,7 @@ def _serve_mcp():
     global _TRANSPORT
     _TRANSPORT = "stdio"
     log(f"starting v{__version__} (profile={PROFILE}, table={TABLE}, bzrk={BZRK_BIN})")
+    log(f"egress policy: {_effective_egress_policy_summary()[0]}")
     while True:
         line = sys.stdin.readline()
         if not line:
@@ -4465,6 +4913,18 @@ def _http_effective_client_ip(handler, config):
     return peer
 
 
+# A loopback bind with no explicit BERSERK_MCP_HTTP_ALLOWED_HOSTS used to
+# accept any Host header at all (the "allowed_hosts and ..." guard in
+# _http_request_allowed treats an empty set as "no restriction"). That is
+# exactly the DNS-rebinding gap in S2 of
+# docs/architecture-product-security-review-2026-09-12.md: a browser-driven
+# request naming an attacker-controlled Host still reaches the loopback
+# server. Default to a safe loopback-only Host allowlist instead so an
+# operator who never configured BERSERK_MCP_HTTP_ALLOWED_HOSTS still gets a
+# real one.
+_DEFAULT_LOOPBACK_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
 def _build_http_config(
     *,
     enable=HTTP_ENABLE,
@@ -4475,8 +4935,10 @@ def _build_http_config(
     allow_cidrs=HTTP_ALLOW_CIDRS,
     max_request_bytes=HTTP_MAX_REQUEST_BYTES,
     max_concurrent_requests=HTTP_MAX_CONCURRENT_REQUESTS,
+    max_connections=HTTP_MAX_CONNECTIONS,
     use_forwarded_for=HTTP_USE_FORWARDED_FOR,
     trusted_proxy_cidrs=HTTP_TRUSTED_PROXY_CIDRS,
+    read_timeout_seconds=HTTP_READ_TIMEOUT_SECONDS,
 ):
     host, port = _parse_http_bind(bind)
     loopback = _host_is_loopback(host)
@@ -4495,12 +4957,19 @@ def _build_http_config(
             raise HttpConfigError("non-loopback HTTP bind requires BERSERK_MCP_HTTP_AUTH_TOKEN")
         if not hosts:
             raise HttpConfigError("non-loopback HTTP bind requires BERSERK_MCP_HTTP_ALLOWED_HOSTS")
+    elif not hosts:
+        hosts = set(_DEFAULT_LOOPBACK_HTTP_HOSTS)
+        hosts.add(host.lower())
     if use_forwarded_for and not trusted:
         raise HttpConfigError("forwarded-header mode requires BERSERK_MCP_HTTP_TRUSTED_PROXY_CIDRS")
     if max_request_bytes <= 0:
         raise HttpConfigError("BERSERK_MCP_HTTP_MAX_REQUEST_BYTES must be positive")
     if max_concurrent_requests <= 0:
         raise HttpConfigError("BERSERK_MCP_HTTP_MAX_CONCURRENT_REQUESTS must be positive")
+    if max_connections <= 0:
+        raise HttpConfigError("BERSERK_MCP_HTTP_MAX_CONNECTIONS must be positive")
+    if read_timeout_seconds <= 0:
+        raise HttpConfigError("BERSERK_MCP_HTTP_READ_TIMEOUT_SECONDS must be positive")
     return {
         "enabled": bool(enable),
         "host": host,
@@ -4511,8 +4980,10 @@ def _build_http_config(
         "allow_cidrs": allowed,
         "max_request_bytes": int(max_request_bytes),
         "semaphore": threading.BoundedSemaphore(int(max_concurrent_requests)),
+        "connection_semaphore": threading.BoundedSemaphore(int(max_connections)),
         "use_forwarded_for": bool(use_forwarded_for),
         "trusted_proxy_cidrs": trusted,
+        "read_timeout_seconds": int(read_timeout_seconds),
     }
 
 
@@ -4527,9 +4998,53 @@ def _http_error(handler, status, message):
 
 
 def _http_request_allowed(handler, config):
+    # allowed_hosts is never empty by the time it reaches here -- a remote
+    # bind requires an explicit non-empty set (_build_http_config), and a
+    # loopback bind with none configured gets _DEFAULT_LOOPBACK_HTTP_HOSTS.
     host = _normalize_host_header(handler.headers.get("Host", ""))
-    if config["allowed_hosts"] and host not in config["allowed_hosts"]:
+    if host not in config["allowed_hosts"]:
         return False, 403, "host not allowed"
+    # MCP transport security requires rejecting an invalid Origin outright
+    # (browsers send it on cross-origin requests; curl/urllib/most non-browser
+    # MCP clients simply don't send one, so its absence is not itself
+    # suspicious). See S2 and
+    # https://modelcontextprotocol.io/specification/2025-11-25/basic/transports
+    #
+    # Hostname alone is not enough: on the default loopback config, checking
+    # only the hostname would let ANY page served from ANY port on
+    # 127.0.0.1/localhost reach this server (a local dev server, another
+    # local app, anything the browser happens to have open) -- Origin
+    # exists specifically to distinguish that from a same-host request, and
+    # a different port is a different origin.
+    #
+    # Compare Origin's host+port against THIS REQUEST's own Host header,
+    # not against config["port"] (the bind port): behind a reverse proxy
+    # (see docs/mcp-http-reverse-proxy.md) the bind port (e.g. 8765) is
+    # never what a browser's Origin carries -- the proxy terminates TLS on
+    # 443 and rewrites Host to the public hostname, so legitimate traffic
+    # arrives as Host: mcp.internal.example.com / Origin:
+    # https://mcp.internal.example.com, neither carrying port 8765. Host is
+    # already allowlist-validated above; requiring Origin to equal it
+    # (rather than separately re-checking Origin against the allowlist) is
+    # the conventional same-origin check and keeps the allowlist as the
+    # single source of truth.
+    origin = handler.headers.get("Origin")
+    if origin:
+        # .port raises ValueError for a syntactically-invalid port (e.g.
+        # "http://127.0.0.1:bad", attacker-controlled via the Origin
+        # header) -- caught here and treated as "not allowed" rather than
+        # left to propagate out of do_POST uncontrolled, which would skip
+        # the intended 403 response and exit through the server's generic
+        # exception path instead.
+        try:
+            origin_parts = urllib.parse.urlsplit(origin)
+            host_parts = urllib.parse.urlsplit("//" + str(handler.headers.get("Host", "")))
+            origin_authority = ((origin_parts.hostname or "").lower(), origin_parts.port)
+            host_authority = ((host_parts.hostname or "").lower(), host_parts.port)
+        except (ValueError, UnicodeError):
+            return False, 403, "origin not allowed"
+        if origin_authority != host_authority:
+            return False, 403, "origin not allowed"
     client_ip = _http_effective_client_ip(handler, config)
     if not _ip_allowed(client_ip, config["allow_cidrs"]):
         return False, 403, "client ip not allowed"
@@ -4542,10 +5057,297 @@ def _http_request_allowed(handler, config):
     return True, 200, "ok"
 
 
+class _AdmissionControlledHTTPServer(ThreadingHTTPServer):
+    """Bounds concurrently ADMITTED connections via verify_request() --
+    the stdlib socketserver hook called BEFORE process_request() (and so
+    before ThreadingMixIn spawns a per-connection thread). A handler-level
+    check (e.g. a handle() override) runs only AFTER the thread already
+    exists, so it cannot prevent thread-creation churn under a connection
+    flood -- verify_request() closes the excess connection with zero
+    thread ever created for it, which is what "bound total accepted
+    connections" actually requires.
+
+    DEVIATION from the originally documented fix (docs/adversarial-review-
+    fixes-round2-2026-09-13.md, Finding 2): that doc paired the acquire
+    here with a release in a handler-level finish() override. That pairing
+    is unsound -- BaseRequestHandler.__init__ calls setup() OUTSIDE its own
+    try/finally, and ThreadingMixIn.process_request's t.start() call can
+    itself raise (e.g. "can't start new thread", precisely the resource-
+    exhaustion condition this cap exists to prevent) BEFORE the handler
+    object -- and thus finish() -- is ever constructed. Either failure path
+    would leak a permit with no handler-level hook ever running to release
+    it; with a small BoundedSemaphore, a handful of such leaks makes
+    verify_request() return False forever, permanently refusing every
+    future connection -- worse than the unbounded-thread-creation bug this
+    fix exists to close. Releasing here instead, paired with the two
+    stdlib hooks that can actually observe every terminal outcome of an
+    admitted connection (including thread-spawn failure), avoids that."""
+    connection_semaphore = None  # attached by the caller before serving
+
+    def verify_request(self, request, client_address):
+        if self.connection_semaphore is None:
+            return True
+        return self.connection_semaphore.acquire(blocking=False)
+
+    def _release_admission(self):
+        if self.connection_semaphore is not None:
+            self.connection_semaphore.release()
+
+    def process_request(self, request, client_address):
+        # ThreadingMixIn.process_request only STARTS the worker thread (via
+        # t.start()) -- it does not wait for the thread to run, and it has
+        # no try/except of its own. If starting the thread itself raises,
+        # process_request_thread's body below never executes at all (the
+        # thread never ran), so its release (below) would never fire. This
+        # is the only place that failure is observable, so release here.
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._release_admission()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        # Paired with verify_request()'s acquire above. Runs in the spawned
+        # worker thread and wraps the handler's ENTIRE per-connection
+        # lifecycle (BaseRequestHandler.__init__ -> setup(), handle(),
+        # finally finish() -- covering every HTTP keep-alive request
+        # handled on this connection), because ThreadingMixIn's own
+        # process_request_thread already wraps that whole construction in
+        # its own try/except/finally (so a setup() failure -- which
+        # __init__ does not itself guard -- is still caught here, exactly
+        # once). A handler-level finish() override cannot substitute for
+        # this: it never runs at all if thread creation itself fails (see
+        # process_request above), which would leak the permit permanently
+        # under exactly the flood condition this cap exists to bound.
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._release_admission()
+
+
+class _DeadlineBoundedRFile:
+    """Transparent proxy around a handler's self.rfile, active only across
+    the request-line + header-reading phase of handle_one_request(). Turns
+    the per-syscall socket timeout into an ABSOLUTE wall-clock deadline for
+    that phase, the same fix round 2 already applied to the body -- without
+    it, self.timeout only bounds each individual blocking read, so a client
+    can hold an admitted connection (and its connection_semaphore permit)
+    indefinitely by trickling one byte of request-line/header data in just
+    under read_timeout_seconds, repeatedly: each individual read succeeds,
+    the socket timeout never fires, and the connection_semaphore cap can be
+    exhausted by a handful of such connections, denying admission to every
+    legitimate client (S5, header phase).
+
+    http.server.BaseHTTPRequestHandler.handle_one_request() reads the
+    request line via self.rfile.readline(65537), and parse_request() reads
+    headers via http.client.parse_headers(self.rfile, ...) -> _read_headers,
+    which also calls fp.readline(...) in a loop -- both go exclusively
+    through rfile.readline(), verified against the installed stdlib via
+    inspect.getsource().
+
+    CANNOT simply delegate readline() to the real rfile's own readline()
+    while narrowing the socket timeout once beforehand: BufferedReader.
+    readline(), like plain .read(n), loops internally across as many raw
+    reads as it takes to find '\\n', without ever returning control to this
+    wrapper in between -- narrowing the timeout once before the call and
+    then delegating lets that internal loop keep succeeding on a steady
+    trickle forever, never re-checking the deadline (empirically confirmed:
+    delegating this way let a live connection accumulate bytes for 8+
+    seconds under a 1-second deadline without ever raising). This is the
+    exact same trap round 2's body-read fix already avoided by using
+    read1() instead of read() -- readline() here is therefore implemented
+    from scratch on top of read1() (returns after at most ONE underlying
+    raw read), re-checking/re-narrowing the deadline before every single
+    read1() call, buffering across calls to reassemble line boundaries
+    that don't align with read1()'s chunk boundaries.
+
+    Any bytes read1() pulls in past the newline (e.g. the first bytes of
+    the body, arriving in the same underlying raw read that completed the
+    final header line -- routine for a small request sent in one write())
+    are buffered in self._buf. This class stays assigned as self.rfile for
+    the ENTIRE handle_one_request() call, including do_POST's own body
+    read, so its own read1() (below) drains that buffer first before ever
+    doing a new raw read -- this is what keeps those bytes from being
+    silently lost. A first version of this fix instead swapped self.rfile
+    back to the plain rfile for the body phase, handing leftover bytes to
+    a separate wrapper class; that missed that __getattr__'s fallback for
+    read1 bypassed the buffer entirely once swapped out, and body reads
+    for any request whose full request+body arrived in one TCP segment
+    (the common case for a small request in tests and in practice) hung
+    forever waiting for bytes that had already been consumed into the now
+    inaccessible buffer -- caught via the full test suite genuinely
+    hanging/timing out, not by inspection. read1() itself does no deadline
+    checking of its own: _read_body_with_deadline already narrows the
+    socket timeout to ITS OWN independent absolute deadline before every
+    read1() call it makes, so simply draining this buffer first and
+    falling through to the real rfile afterward reproduces exactly what
+    the plain rfile's own internal buffering already did before this fix
+    existed -- draining here is transparent to that logic, not a second,
+    competing deadline."""
+
+    def __init__(self, rfile, connection, deadline):
+        self._rfile = rfile
+        self._connection = connection
+        self._deadline = deadline
+        self._buf = b""
+
+    def readline(self, size=-1):
+        limit = size if size is not None and size >= 0 else None
+        while True:
+            nl = self._buf.find(b"\n")
+            if nl != -1:
+                line, self._buf = self._buf[: nl + 1], self._buf[nl + 1 :]
+                return line
+            if limit is not None and len(self._buf) >= limit:
+                line, self._buf = self._buf[:limit], self._buf[limit:]
+                return line
+            remaining_time = self._deadline - time.monotonic()
+            if remaining_time <= 0:
+                raise TimeoutError("header read exceeded absolute deadline")
+            self._connection.settimeout(remaining_time)
+            want = 4096 if limit is None else max(1, limit - len(self._buf))
+            chunk = self._rfile.read1(want)
+            if not chunk:
+                # EOF: return whatever's buffered, mirroring BufferedReader's
+                # own readline() behavior of yielding a partial final line
+                # (or b"") rather than blocking forever.
+                line, self._buf = self._buf, b""
+                return line
+            self._buf += chunk
+
+    def read1(self, n):
+        if self._buf:
+            chunk, self._buf = self._buf[:n], self._buf[n:]
+            return chunk
+        return self._rfile.read1(n)
+
+    def __getattr__(self, name):
+        return getattr(self._rfile, name)
+
+    # Round-14 adversarial-review finding: any bytes still sitting in
+    # self._buf when handle_one_request() returns (e.g. the start of a
+    # PIPELINED second request, arriving in the same read1() call that
+    # completed the first request's body) are dropped -- this instance is
+    # discarded and self.rfile is restored to the plain original in
+    # handle_one_request() below, with nothing copying leftover _buf
+    # content back. Confirmed via a live repro (see
+    # test_pipelined_requests_get_exactly_one_response_because_keep_alive_
+    # is_off) that this has NO observable effect today, for a reason
+    # entirely external to this class: BerserkMcpHttpHandler never sets
+    # protocol_version, so it stays at the stdlib default "HTTP/1.0" --
+    # and BaseHTTPRequestHandler.parse_request() only ever sets
+    # close_connection=False (persistent/keep-alive) when the handler's
+    # OWN protocol_version is ">= HTTP/1.1", regardless of what the client
+    # requests. handle()'s "while not self.close_connection" loop therefore
+    # never runs a second iteration, so handle_one_request() -- and this
+    # class -- is never invoked more than once per accepted TCP connection;
+    # a pipelined second request's bytes are never going to be processed on
+    # this connection EITHER WAY, buffering bug or not. This is a LATENT
+    # bug, not a stale one: if protocol_version is ever bumped to enable
+    # real keep-alive, this buffer-discarding becomes live and silently
+    # drops pipelined requests. See the matching comment at
+    # BerserkMcpHttpHandler's class body, which is where that change would
+    # actually be made.
+
+
 def _make_http_handler(config):
     class BerserkMcpHttpHandler(BaseHTTPRequestHandler):
         server_version = "berserk-mcp"
         sys_version = ""
+        # No protocol_version override here -- stays at the stdlib default
+        # "HTTP/1.0", which means parse_request() never sets
+        # close_connection=False regardless of what the client requests
+        # (see its own source: keep-alive requires the HANDLER's
+        # protocol_version to be ">= HTTP/1.1", not just the client's).
+        # Every accepted connection therefore gets exactly one
+        # handle_one_request() call. IMPORTANT if this is ever changed to
+        # "HTTP/1.1" to support persistent connections: _DeadlineBoundedRFile
+        # below silently DROPS any bytes left in its internal buffer past
+        # the current request's boundary when handle_one_request() returns
+        # (e.g. the start of a pipelined next request) -- currently
+        # unobservable only because there is never a second
+        # handle_one_request() call for that loss to affect. See
+        # _DeadlineBoundedRFile's own docstring and
+        # test_pipelined_requests_get_exactly_one_response_because_keep_alive_
+        # is_off for the full reasoning; that buffer-discarding would need
+        # fixing (hand the leftover bytes to the NEXT handle_one_request()
+        # call) before this could safely become "HTTP/1.1".
+        #
+        # socketserver.StreamRequestHandler.setup() calls
+        # self.connection.settimeout(self.timeout) when this is not None --
+        # bounds every blocking socket read (request line, headers, and the
+        # body read in do_POST below), not just the body. Without this an
+        # incomplete/slow client can hold the connection (and, before the
+        # reordering below, the concurrency semaphore) indefinitely (S5).
+        timeout = config["read_timeout_seconds"]
+
+        def handle_one_request(self):
+            # Wraps self.rfile with _DeadlineBoundedRFile for the ENTIRE
+            # call, covering request-line + header reading AND the
+            # do_POST/do_GET dispatch that happens inside
+            # super().handle_one_request() -- including do_POST's own body
+            # read (_read_body_with_deadline's read1() calls), which stay
+            # on this same proxy instance rather than being swapped back
+            # to the plain rfile, so any bytes the proxy already pulled
+            # off the socket past the header boundary (the start of the
+            # body, arriving in the same read for a small request sent in
+            # one write()) are still visible via its own read1() (see
+            # class docstring). TimeoutError raised by the proxy
+            # propagates up through parse_request/handle_one_request,
+            # which already has its own "except TimeoutError: discard this
+            # connection" handling (stdlib) -- no new exception handling
+            # needed here.
+            deadline = time.monotonic() + self.timeout
+            original_rfile = self.rfile
+            self.rfile = _DeadlineBoundedRFile(original_rfile, self.connection, deadline)
+            try:
+                super().handle_one_request()
+            finally:
+                self.rfile = original_rfile
+                self.connection.settimeout(self.timeout)
+
+        def _read_body_with_deadline(self, length, deadline_seconds):
+            """Read exactly `length` bytes, bounded by an ABSOLUTE wall-clock
+            deadline -- self.timeout alone only bounds each individual
+            blocking read syscall to its FULL value, so a single read1()
+            starting just before the deadline could otherwise still block
+            for up to another whole read_timeout_seconds (roughly 2x the
+            advertised bound in the worst case). Narrowing the socket's own
+            timeout to the actual remaining time before each read closes
+            that gap. Restores self.timeout afterward so a subsequent
+            HTTP/1.1 keep-alive request on this same connection gets the
+            full nominal timeout again, not a leftover narrowed one.
+
+            Deliberately uses rfile.read1(), not rfile.read(): for a
+            non-interactive stream (a socket is never a tty), plain
+            BufferedIOBase.read(n) issues as many underlying raw reads as it
+            takes to fully satisfy n before returning -- so a single call
+            can block across many raw reads and many seconds, and this loop
+            would never get control back to re-check the deadline while data
+            keeps trickling in just under the per-syscall socket timeout.
+            read1(n) returns after at most ONE underlying raw read (whatever
+            is available up to n bytes, or b"" at EOF), which is what lets
+            this loop actually re-check the deadline between chunks. Staying
+            on rfile (rather than reading self.connection directly) matters
+            too: header parsing may already have pulled some of the body
+            into rfile's internal buffer, and read1() drains that first."""
+            deadline = time.monotonic() + deadline_seconds
+            chunks = []
+            remaining = length
+            try:
+                while remaining > 0:
+                    remaining_time = deadline - time.monotonic()
+                    if remaining_time <= 0:
+                        raise TimeoutError("body read exceeded absolute deadline")
+                    self.connection.settimeout(remaining_time)
+                    chunk = self.rfile.read1(min(remaining, 65536))
+                    if not chunk:
+                        raise OSError("connection closed before full body received")
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                return b"".join(chunks)
+            finally:
+                self.connection.settimeout(self.timeout)
 
         def log_message(self, fmt, *args):
             log("http: " + _sanitize_log_line(fmt % args))
@@ -4585,11 +5387,23 @@ def _make_http_handler(config):
             if length < 0 or length > config["max_request_bytes"]:
                 _http_error(self, 413, "request too large")
                 return
+            # Read the body BEFORE acquiring the concurrency semaphore, under
+            # the read-deadline set via self.timeout above. Connection
+            # admission (accepting a socket, reading its body) and query
+            # execution concurrency are deliberately separate concerns: a
+            # slow/incomplete body must not hold a semaphore slot indefinitely,
+            # it should simply time out and drop the connection (S5). The
+            # semaphore below now guards only the actual dispatch, which is
+            # what "too many concurrent requests" is meant to bound.
+            try:
+                raw = self._read_body_with_deadline(length, config["read_timeout_seconds"])
+            except (TimeoutError, OSError):
+                self.close_connection = True
+                return
             if not config["semaphore"].acquire(blocking=False):
                 _http_error(self, 429, "too many concurrent requests")
                 return
             try:
-                raw = self.rfile.read(length)
                 try:
                     req = json.loads(raw.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
@@ -4623,7 +5437,9 @@ def _serve_http():
         raise HttpConfigError("HTTP transport is disabled; set BERSERK_MCP_HTTP_ENABLE=1")
     handler = _make_http_handler(config)
     log(f"http starting v{__version__} on {config['host']}:{config['port']}")
-    server = ThreadingHTTPServer((config["host"], config["port"]), handler)
+    log(f"egress policy: {_effective_egress_policy_summary()[0]}")
+    server = _AdmissionControlledHTTPServer((config["host"], config["port"]), handler)
+    server.connection_semaphore = config["connection_semaphore"]
     try:
         server.serve_forever()
     finally:
@@ -4642,6 +5458,30 @@ def _serve_http():
 
 _DOCTOR_REACHABILITY_TIMEOUT = 5
 
+# Round-12 adversarial-review finding: self_check is an unauthenticated,
+# freely-repeatable MCP tool (empty inputSchema, no rate limit) that calls
+# _with_wall_clock_timeout up to twice per call (one LLM-reachability probe
+# -- either the discovery-URL or explicit-model branch, never both -- plus
+# one CanonLoom probe). Without this semaphore, a slow-trickling endpoint
+# (one byte just under each socket read's timeout, forever) left its daemon
+# thread AND its open socket running after _with_wall_clock_timeout gave up
+# waiting -- "harmless for a one-shot preflight" does not hold once the
+# check is callable an unbounded number of times: each repeat call could
+# abandon another thread+socket, an unbounded resource leak over the
+# server's lifetime. BoundedSemaphore(2) -- reusing the exact pattern
+# _QUERY_SEMAPHORE already uses for run_bzrk concurrency -- caps this at a
+# FIXED, small number of ever-leaked threads/sockets, not an unbounded
+# count: once both slots are held by permanently-hung probes, every further
+# probe attempt is refused outright (no new thread is ever created) rather
+# than silently piling up a third, a fourth, a fifth abandoned thread.
+_DOCTOR_PROBE_SEMAPHORE = threading.BoundedSemaphore(2)
+
+# Distinct from the existing "timed out" sentinel (None) -- a caller needs
+# to tell "the probe ran and didn't finish in time" apart from "the probe
+# was refused outright because both slots are already held by earlier,
+# still-hung probes" to report an accurate, non-misleading status.
+_PROBE_SLOTS_EXHAUSTED = object()
+
 
 def _with_wall_clock_timeout(fn, timeout):
     """Run fn() with a genuine wall-clock deadline. urllib's own timeout=
@@ -4650,20 +5490,51 @@ def _with_wall_clock_timeout(fn, timeout):
     read can keep a request open far longer than the advertised timeout
     implies (measured: 8.02s wall clock against a 5s per-operation
     timeout). Returns None if fn() hasn't finished within `timeout`
-    seconds. A plain daemon thread, not concurrent.futures.ThreadPoolExecutor:
-    the executor registers an atexit hook that joins pending work, which
-    would make the whole process hang waiting for exactly the slow call
-    this exists to stop waiting on. The tradeoff this accepts: Python
-    cannot forcibly kill a thread, so a truly stuck call keeps running in
-    the background after this returns -- harmless for a one-shot preflight
-    check, since the daemon thread cannot block process exit either."""
+    seconds, or _PROBE_SLOTS_EXHAUSTED if no probe slot is available at all
+    (see _DOCTOR_PROBE_SEMAPHORE above). A plain daemon thread, not
+    concurrent.futures.ThreadPoolExecutor: the executor registers an atexit
+    hook that joins pending work, which would make the whole process hang
+    waiting for exactly the slow call this exists to stop waiting on. The
+    tradeoff this accepts: Python cannot forcibly kill a thread, so a truly
+    stuck call keeps running in the background after this returns -- this
+    alone is harmless for a single, one-shot preflight check (the daemon
+    thread cannot block process exit either), which is what the semaphore
+    above exists to make true even when the check ISN'T one-shot: a bounded
+    NUMBER of such abandoned threads/sockets can accumulate, never an
+    unbounded one, regardless of how many times this is called."""
+    if not _DOCTOR_PROBE_SEMAPHORE.acquire(blocking=False):
+        return _PROBE_SLOTS_EXHAUSTED
     box = {}
 
     def runner():
-        box["result"] = fn()
+        try:
+            box["result"] = fn()
+        finally:
+            # Only reached if fn() actually returns -- a permanently-hung
+            # probe (the pathological case this exists for) never releases
+            # its slot, which is the intended, bounded cost: one probe slot
+            # consumed forever, not an unbounded number of threads.
+            _DOCTOR_PROBE_SEMAPHORE.release()
 
     t = threading.Thread(target=runner, daemon=True)
-    t.start()
+    try:
+        t.start()
+    except BaseException:
+        # Round-15 adversarial-review finding: thread creation itself can
+        # fail (e.g. RuntimeError: can't start new thread, under real
+        # process/thread exhaustion -- precisely the condition
+        # _DOCTOR_PROBE_SEMAPHORE exists to defend against). Without this,
+        # the permit acquired above is never released (runner(), which
+        # does the release, never even begins), and after two such
+        # failures every future probe would report _PROBE_SLOTS_EXHAUSTED
+        # forever, even once thread-starting recovers -- hiding recovery
+        # rather than surfacing the real, transient cause. Released here
+        # and re-raised so _run_doctor_checks()'s existing per-check
+        # exception isolation reports the real failure ("check raised
+        # RuntimeError: ...") instead of a misleading "timed out" or
+        # "slots exhausted".
+        _DOCTOR_PROBE_SEMAPHORE.release()
+        raise
     t.join(timeout)
     if t.is_alive():
         return None
@@ -4870,15 +5741,21 @@ def _doctor_check_http_config():
             allow_cidrs=HTTP_ALLOW_CIDRS,
             max_request_bytes=HTTP_MAX_REQUEST_BYTES,
             max_concurrent_requests=HTTP_MAX_CONCURRENT_REQUESTS,
+            max_connections=HTTP_MAX_CONNECTIONS,
             use_forwarded_for=HTTP_USE_FORWARDED_FOR,
             trusted_proxy_cidrs=HTTP_TRUSTED_PROXY_CIDRS,
+            read_timeout_seconds=HTTP_READ_TIMEOUT_SECONDS,
         )
     except HttpConfigError as exc:
         return _doctor_result(
             "http_config", "fail", str(exc),
             remediation="fix the HTTP env var named in the error above",
         )
-    return _doctor_result("http_config", "pass", f"coherent, binds {config['host']}:{config['port']}")
+    return _doctor_result(
+        "http_config", "pass",
+        f"coherent, binds {config['host']}:{config['port']}, "
+        f"allowed_hosts={sorted(config['allowed_hosts'])}",
+    )
 
 
 def _doctor_check_llm_reachability():
@@ -4893,6 +5770,7 @@ def _doctor_check_llm_reachability():
     configured = bool(os.environ.get("BERSERK_LLM_HERMES_URL")) or bool(
         parser_factory._llm_config().get("hermes_url")
     )
+    configured_model = os.environ.get("BERSERK_LLM_HERMES_MODEL")
     url = parser_factory._hermes_url()
     if not configured:
         url_note = f" (using the unconfigured default {url!r})"
@@ -4900,10 +5778,88 @@ def _doctor_check_llm_reachability():
         url_note = ""
     models_url = parser_factory.hermes_models_url(url)
     if not models_url:
+        if configured_model:
+            # An explicit BERSERK_LLM_HERMES_MODEL bypasses model DISCOVERY
+            # entirely in the real generation path (see
+            # parser_factory._hermes_model) -- but generation still sends
+            # requests straight to `url` itself (the configured
+            # chat-completions endpoint), so that endpoint's own
+            # reachability is exactly as probeable as in the discovery
+            # case, just via a plain GET to `url` instead of a derived
+            # .../models URL. Reporting "skip" here (Codex round-8 finding)
+            # let a genuinely unreachable or egress-blocked explicit
+            # endpoint look merely unprobed rather than broken -- so this
+            # probes `url` for real: any HTTP response (even an error
+            # status, since chat-completions endpoints are typically
+            # POST-only) proves the server is there; only a connection-level
+            # failure or a policy block is reported as broken.
+            try:
+                _http.validate_egress_destination(url, label="hermes endpoint")
+            except _http.UrlPolicyError as exc:
+                return _doctor_result(
+                    "llm_hermes_reachability", "fail", f"blocked by egress policy: {exc}",
+                    remediation="this destination is not in BERSERK_EGRESS_ALLOWED_HOSTS/"
+                                 "_CIDRS (or BERSERK_LOCAL_ONLY forbids it) -- either "
+                                 "approve it or point BERSERK_LLM_HERMES_URL at an "
+                                 "approved/loopback destination",
+                    required=False,
+                )
+            key = os.environ.get("HERMES_API_KEY", "")
+            headers = {"Authorization": f"Bearer {key}"} if key else {}
+            outcome = _with_wall_clock_timeout(
+                lambda: _http.http_get_json(url, headers, timeout=_DOCTOR_REACHABILITY_TIMEOUT),
+                _DOCTOR_REACHABILITY_TIMEOUT,
+            )
+            if outcome is _PROBE_SLOTS_EXHAUSTED:
+                return _doctor_result(
+                    "llm_hermes_reachability", "fail",
+                    "probe slots exhausted -- a previous reachability probe is still hung; "
+                    "self_check/doctor cannot start another one right now",
+                    remediation="an earlier probe never returned; this is expected to clear "
+                                 "once that connection eventually closes on its own, or after "
+                                 "a server restart",
+                    required=False,
+                )
+            if outcome is None:
+                return _doctor_result(
+                    "llm_hermes_reachability", "fail",
+                    f"timed out after {_DOCTOR_REACHABILITY_TIMEOUT}s probing {url}{url_note} "
+                    "(discovery bypassed by BERSERK_LLM_HERMES_MODEL)",
+                    remediation="Hermes is not responding in time; confirm it's running and reachable",
+                    required=False,
+                )
+            _out, err = outcome
+            if err and not err.startswith("HTTP "):
+                return _doctor_result(
+                    "llm_hermes_reachability", "fail",
+                    f"unreachable at {url}{url_note} "
+                    f"(discovery bypassed by BERSERK_LLM_HERMES_MODEL): {err}",
+                    remediation="confirm Hermes is running and BERSERK_LLM_HERMES_URL is correct",
+                    required=False,
+                )
+            return _doctor_result(
+                "llm_hermes_reachability", "pass",
+                f"endpoint responded at {url}{url_note}; model discovery bypassed by "
+                f"BERSERK_LLM_HERMES_MODEL={configured_model!r}, so the configured model "
+                "itself was not verified",
+                required=False,
+            )
         return _doctor_result(
             "llm_hermes_reachability", "fail",
             f"cannot derive a /models endpoint from {url!r}",
-            remediation="confirm BERSERK_LLM_HERMES_URL points at a chat/completions endpoint",
+            remediation="confirm BERSERK_LLM_HERMES_URL points at a chat/completions endpoint, "
+                         "or set BERSERK_LLM_HERMES_MODEL to bypass discovery",
+            required=False,
+        )
+    try:
+        _http.validate_egress_destination(models_url, label="hermes endpoint")
+    except _http.UrlPolicyError as exc:
+        return _doctor_result(
+            "llm_hermes_reachability", "fail", f"blocked by egress policy: {exc}",
+            remediation="this destination is not in BERSERK_EGRESS_ALLOWED_HOSTS/"
+                         "_CIDRS (or BERSERK_LOCAL_ONLY forbids it) -- either "
+                         "approve it or point BERSERK_LLM_HERMES_URL at an "
+                         "approved/loopback destination",
             required=False,
         )
     key = os.environ.get("HERMES_API_KEY", "")
@@ -4912,6 +5868,16 @@ def _doctor_check_llm_reachability():
         lambda: _http.http_get_json(models_url, headers, timeout=_DOCTOR_REACHABILITY_TIMEOUT),
         _DOCTOR_REACHABILITY_TIMEOUT,
     )
+    if outcome is _PROBE_SLOTS_EXHAUSTED:
+        return _doctor_result(
+            "llm_hermes_reachability", "fail",
+            "probe slots exhausted -- a previous reachability probe is still hung; "
+            "self_check/doctor cannot start another one right now",
+            remediation="an earlier probe never returned; this is expected to clear "
+                         "once that connection eventually closes on its own, or after "
+                         "a server restart",
+            required=False,
+        )
     if outcome is None:
         return _doctor_result(
             "llm_hermes_reachability", "fail",
@@ -4934,12 +5900,92 @@ def _doctor_check_llm_reachability():
     )
 
 
+def _effective_egress_policy_summary():
+    """One line describing the effective local-only/egress policy, without
+    leaking credentials -- shared by doctor and by the startup log line in
+    _serve_mcp/_serve_http, since an operator relying on local-only mode
+    needs to see it actually took effect (not just that keys are absent
+    today -- an inherited key later would silently change the outcome
+    otherwise). See S1 in docs/architecture-product-security-review-2026-09-12.md
+    and requirements step 3, "report effective provider and egress policy
+    in doctor/startup output".
+
+    Returns (detail_string, blocked_list) -- round-13 adversarial-review
+    finding: _doctor_check_egress_policy() used to always report status
+    "pass" regardless of this detail string's content, so a reader/
+    automation consumer checking specifically whether configured
+    destinations are policy-compliant could see status=pass while the text
+    said "blocked by egress policy: ...". Returning the blocked list
+    structured, not just embedded in prose, lets the doctor check derive
+    its status from the actual data instead of string-matching its own
+    detail message."""
+    local_only = _http.local_only_enabled()
+    effective_ladder = parser_factory.ladder()
+    destinations = {"hermes": parser_factory._hermes_url()}
+    canonloom_url = os.environ.get("CANONLOOM_SERVER_URL", "").rstrip("/")
+    if canonloom_url:
+        destinations["canonloom"] = canonloom_url
+    if DISCORD_ALERT_SECRET:
+        destinations["discord"] = DISCORD_ALERT_URL
+    blocked = []
+    for dest_name, url in destinations.items():
+        try:
+            _http.validate_egress_destination(url, label=dest_name)
+        except _http.UrlPolicyError as exc:
+            blocked.append(f"{dest_name}: {exc}")
+    detail = f"local_only={local_only}, effective_ladder={effective_ladder}"
+    if blocked:
+        detail += "; blocked by egress policy: " + "; ".join(blocked)
+    return detail, blocked
+
+
+def _doctor_check_egress_policy():
+    detail, blocked = _effective_egress_policy_summary()
+    # A blocked destination is the policy doing its job (nothing insecure
+    # happens -- validate_egress_destination() already refuses the actual
+    # connection at the point of use), so this stays required=False like
+    # the reachability checks it's adjacent to: it's "something configured
+    # is currently non-functional," not itself a vulnerability. But it must
+    # never say "pass" while its own detail says "blocked" -- that reads as
+    # a false all-clear to anyone checking egress-policy compliance.
+    status = "fail" if blocked else "pass"
+    return _doctor_result("egress_policy", status, detail, required=False)
+
+
+def _doctor_check_annotation_catalog():
+    """Production-facing form of the annotation-catalog invariant (see
+    _annotation_catalog_violations). Required=True: a tool that mutates
+    state but advertises readOnlyHint=True is a real defect an operator
+    should see and fix, not silently ignore -- but it is reported through
+    doctor's normal per-check isolation rather than raised at import time,
+    so this one check failing (or even crashing outright) can never take
+    down --doctor itself or the fixed-query path."""
+    violations = _annotation_catalog_violations()
+    if violations:
+        return _doctor_result(
+            "annotation_catalog", "fail", "; ".join(violations),
+            remediation="fix the _ANNOTATIONS entry named above in berserk_mcp.py",
+        )
+    return _doctor_result("annotation_catalog", "pass", "all mutating tools correctly classified")
+
+
 def _doctor_check_canonloom_reachability():
     server_url = os.environ.get("CANONLOOM_SERVER_URL", "").rstrip("/")
     if not server_url:
         return _doctor_result(
             "canonloom_reachability", "skip",
             "CANONLOOM_SERVER_URL not set; CanonLoom tools are optional",
+            required=False,
+        )
+    try:
+        _http.validate_egress_destination(server_url, label="canonloom endpoint")
+    except _http.UrlPolicyError as exc:
+        return _doctor_result(
+            "canonloom_reachability", "fail", f"blocked by egress policy: {exc}",
+            remediation="this destination is not in BERSERK_EGRESS_ALLOWED_HOSTS/"
+                         "_CIDRS (or BERSERK_LOCAL_ONLY forbids it) -- either "
+                         "approve it or point CANONLOOM_SERVER_URL at an "
+                         "approved/loopback destination",
             required=False,
         )
     headers = {"Content-Type": "application/json"}
@@ -4952,6 +5998,16 @@ def _doctor_check_canonloom_reachability():
         ),
         _DOCTOR_REACHABILITY_TIMEOUT,
     )
+    if outcome is _PROBE_SLOTS_EXHAUSTED:
+        return _doctor_result(
+            "canonloom_reachability", "fail",
+            "probe slots exhausted -- a previous reachability probe is still hung; "
+            "self_check/doctor cannot start another one right now",
+            remediation="an earlier probe never returned; this is expected to clear "
+                         "once that connection eventually closes on its own, or after "
+                         "a server restart",
+            required=False,
+        )
     if outcome is None:
         return _doctor_result(
             "canonloom_reachability", "fail",
@@ -4979,6 +6035,8 @@ _DOCTOR_CHECK_FUNCS = (
     ("tool_tier", _doctor_check_tool_tier),
     ("learned_store_writable", _doctor_check_learned_store_writable),
     ("http_config", _doctor_check_http_config),
+    ("egress_policy", _doctor_check_egress_policy),
+    ("annotation_catalog", _doctor_check_annotation_catalog),
     ("llm_hermes_reachability", _doctor_check_llm_reachability),
     ("canonloom_reachability", _doctor_check_canonloom_reachability),
 )
@@ -5274,6 +6332,7 @@ def _post_discord_alert(text):
     )
     try:
         _http.validate_http_url(DISCORD_ALERT_URL, label="discord alert endpoint")
+        _http.validate_egress_destination(DISCORD_ALERT_URL, label="discord alert endpoint")
     except _http.UrlPolicyError as e:
         log(f"discord alert: endpoint rejected: {e}")
         return False
