@@ -868,7 +868,7 @@ def detect_new_sources(since="24h ago", auto_queue=False, check_drift=False,
                         baseline["services"][svc] = {"first_seen": _now_iso()}
         else:
             to_queue = (new_services + drifted_services)[:MAX_AUTOQUEUE_PER_RUN]
-            if to_queue:
+            if to_queue and discovery_queue_path is not None:
                 with _FileLock(discovery_queue_path):
                     queue = load_json_list(discovery_queue_path)
                     for svc in to_queue:
@@ -1155,8 +1155,14 @@ def validate_generated_query(q):
 def generate_parser_for(job):
     """Run the full generation pipeline for one discovery job.
     Returns (report_dict, ok_bool)."""
-    source = job["source"]
-    kind = job["kind"]
+    try:
+        source = job["source"]
+        kind = job["kind"]
+    except (KeyError, TypeError) as e:
+        return _bound_report({
+            "status": "needs_human",
+            "reason": f"malformed job entry: missing {e}",
+        }), False
     role_hint = job.get("role_hint") or ""
 
     # F-005: one monotonic deadline spans the whole job -- profiling, model
@@ -1196,8 +1202,8 @@ def generate_parser_for(job):
         f"Source: {source} (kind={kind})\n"
         f"Target role: {role_hint or 'none specified'}\n"
         f"Resource keys: {', '.join(profile['resource_keys']) or '(none discovered)'}\n"
-        f"fieldstats excerpt:\n{profile.get('fieldstats_excerpt', '')}\n\n"
-        f"getschema excerpt:\n{profile['getschema_excerpt']}\n\n"
+        f"{_fence_sample_data(profile.get('fieldstats_excerpt', ''))}\n\n"
+        f"{_fence_sample_data(profile['getschema_excerpt'])}\n\n"
         f"{_fence_sample_data(profile['sample_excerpt'])}\n"
     )
 
@@ -1308,7 +1314,15 @@ def generate_parser_for(job):
             })
         if role_hint:
             entry["roles"] = [role_hint]
-        log_entry = _persist_learned_query(entry, action_source="generated")
+        try:
+            log_entry = _persist_learned_query(entry, action_source="generated")
+        except Exception as e:
+            return _bound_report({
+                "status": "needs_human",
+                "reason": f"persistence failed for {q['name']}: {type(e).__name__}: {e}",
+                "provider": used_provider, "model": used_model,
+                "attempts": attempts_used,
+            }), False
         saved_names.append(log_entry.get("name", q["name"]))
 
     with _FileLock(_schema_knowledge_path()):  # F-007: whole RMW cycle, not just the save

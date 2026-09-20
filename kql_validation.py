@@ -57,7 +57,7 @@ _SINCE_RE = re.compile(
 
 _STRING_RE = re.compile(r"'(?:''|[^'])*'|\"(?:\\.|[^\"])*\"")
 _BOUND_RE = re.compile(r"\b(take|tail|limit)\s+(\d+)\b|\btop\s+(\d+)\s+by\b", re.I)
-_COUNT_RE = re.compile(r"\b(count|summarize\s+[^|]*\bcount\s*\()", re.I)
+_COUNT_RE = re.compile(r"\bcount\s*\(\s*\)|\bsummarize\s+[^|]*\bcount\s*\(", re.I)
 _SELECTIVE_RE = re.compile(
     r"\bwhere\b[^|]*(metric_name|severity_text|trace_id|span_id|status_code|"
     r"resource\s*\[\s*['\"](?:service\.name|host\.name|container\.name)['\"]\s*\]|"
@@ -115,8 +115,10 @@ _SOURCE_INTRODUCING_RE = re.compile(
 _IN_OPEN_RE = re.compile(r"\b!?in~?\s*\(", re.I)
 
 
-def _in_clause_hides_tabular_subquery(stripped):
-    for m in _IN_OPEN_RE.finditer(stripped):
+def _in_clause_hides_tabular_subquery(stripped, max_matches=64):
+    for count, m in enumerate(_IN_OPEN_RE.finditer(stripped)):
+        if count >= max_matches:
+            return True
         depth = 1
         i = m.end()
         while i < len(stripped) and depth > 0:
@@ -158,15 +160,24 @@ def _split_pipeline(kql):
     buf = []
     quote = None
     escape = False
-    for ch in str(kql or ""):
+    s = str(kql or "")
+    i = 0
+    while i < len(s):
+        ch = s[i]
         if quote:
             buf.append(ch)
             if quote == '"' and ch == "\\" and not escape:
                 escape = True
+                i += 1
+                continue
+            if quote == "'" and ch == "'" and i + 1 < len(s) and s[i + 1] == "'":
+                buf.append("'")
+                i += 2
                 continue
             if ch == quote and not escape:
                 quote = None
             escape = False
+            i += 1
             continue
         if ch in ("'", '"'):
             quote = ch
@@ -176,6 +187,7 @@ def _split_pipeline(kql):
             buf = []
         else:
             buf.append(ch)
+        i += 1
     parts.append("".join(buf).strip())
     return parts
 
@@ -251,6 +263,12 @@ def validate_kql_static(kql, *, table, since, schema_fields=None, max_chars=5000
             findings.append(_finding("EMPTY_QUERY", "error", "Query is empty."))
         if len(query) > max_chars:
             findings.append(_finding("QUERY_TOO_LONG", "error", f"Query exceeds {max_chars} characters."))
+            return {
+                "valid": False, "risk": "high", "score": 100,
+                "findings": findings, "recommendations": [],
+                "query_shape": {}, "schema": schema_info,
+                "runtime": None, "validation_version": VALIDATION_VERSION,
+            }
         if not _SINCE_RE.match(since.strip()) or len(since) > 32:
             findings.append(_finding("INVALID_SINCE", "error", f"Invalid since window: {since!r}."))
         if _CONTROL_RE.match(query):
@@ -326,7 +344,7 @@ def validate_kql_static(kql, *, table, since, schema_fields=None, max_chars=5000
         has_selective = bool(_SELECTIVE_RE.search(stripped))
         stages = [p.lower() for p in parts[1:]]
         first_where = next((i for i, p in enumerate(stages) if p.startswith("where ")), None)
-        first_sort = next((i for i, p in enumerate(stages) if p.startswith("sort ") or p.startswith("order ")), None)
+        first_sort = next((i for i, p in enumerate(stages) if re.match(r"sort\s|order\s", p)), None)
         if first_sort is not None and (first_where is None or first_sort < first_where):
             findings.append(_finding("SORT_BEFORE_FILTER", "warning", "Sort occurs before a selective filter.", "pipeline"))
         if first_sort is not None:

@@ -54,7 +54,10 @@ def configure(search, table="default", redact=None, redact_aggressive=None, cata
     global _decision_store_path, _pseudonym_key_path, _pseudonym_key_cache
     global _pseudonym_key_source, _report_dir, _otlp_endpoint, _otlp_headers
     _search = search
-    _table = str(table or "default")
+    t = str(table or "default")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", t):
+        raise ValueError(f"invalid table name: {t!r}")
+    _table = t
     _redact = redact or (lambda value: str(value))
     _redact_aggressive = redact_aggressive or _redact
     _catalog_path = Path(catalog_path) if catalog_path else None
@@ -118,16 +121,35 @@ def _pseudonymize(value):
 
 def _nonnegative_int(value):
     try:
-        return max(0, int(float(value)))
-    except (TypeError, ValueError):
+        f = float(value)
+        if not math.isfinite(f):
+            return 0
+        return max(0, int(f))
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
 def _nonnegative_float(value):
     try:
-        return max(0.0, float(value))
-    except (TypeError, ValueError):
+        f = float(value)
+        if not math.isfinite(f):
+            return 0.0
+        return max(0.0, f)
+    except (TypeError, ValueError, OverflowError):
         return 0.0
+
+
+def _parse_micros_cost(value):
+    """Convert cost_usd_micros to USD, returning None if unparseable."""
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        f = float(value)
+        if not math.isfinite(f) or f < 0:
+            return None
+        return f / 1_000_000.0
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _bool(value):
@@ -409,8 +431,7 @@ def normalize_usage_row(obj):
         "reported_cost_usd": _nonnegative_float(_first(
             obj.get("reported_cost_usd"), obj.get("cost_usd"),
             attrs.get("cost_usd"),
-            (_nonnegative_float(attrs.get("cost_usd_micros")) / 1_000_000.0
-             if attrs.get("cost_usd_micros") not in (None, "") else None),
+            (_parse_micros_cost(attrs.get("cost_usd_micros"))),
             attrs.get("claude.cost_usd"),
         )),
         "active_seconds": _nonnegative_float(_first(
@@ -573,7 +594,8 @@ def usage_aggregate_query():
         "tostring(raw_attributes['speed'])) "
         "| extend context_tokens=iff(isnull(tokens_in), 0, tokens_in) + "
         "iff(isnull(cache_read), 0, cache_read) + "
-        "iff(isnull(cache_create), 0, cache_create) "
+        "iff(isnull(cache_create), 0, cache_create) + "
+        "iff(isnull(cache_create_1h), 0, cache_create_1h) "
         "| extend organization=iff(isnotempty(tostring(raw_attributes['organization.id'])), "
         "tostring(raw_attributes['organization.id']), tostring(raw_resource['organization.id'])), "
         "team=iff(isnotempty(tostring(raw_attributes['business.team.id'])), "
@@ -630,7 +652,9 @@ def usage_aggregate_query():
         "or (event_name == 'tool_result' and tostring(raw_attributes['success']) == 'false') "
         "or tostring(raw_attributes['error']) == 'true' "
         "or tostring(raw_attributes['claude.error']) == 'true', 1, 0), "
-        "success_flag=iff(event_name in ('api_request','claude_code.api_request') "
+        "success_flag=iff((event_name in ('api_request','claude_code.api_request') "
+        "and tostring(raw_attributes['error']) != 'true' "
+        "and tostring(raw_attributes['claude.error']) != 'true') "
         "or (legacy_type == 'assistant' "
         "and tostring(raw_attributes['claude.error']) != 'true'), 1, 0), "
         "request_attempts=iff(event_name in ('api_request','claude_code.api_request','api_error'), "
@@ -838,7 +862,7 @@ def calculate_public_cost(row, catalog):
             "output": _nonnegative_int(normalized.get("long_output_tokens")),
             "cache_read": _nonnegative_int(normalized.get("long_cache_read_tokens")),
             "cache_write_5m": _nonnegative_int(normalized.get("long_cache_creation_tokens")),
-            "cache_write_1h": 0,
+            "cache_write_1h": _nonnegative_int(normalized.get("long_cache_creation_1h_tokens")),
         }
         if normalized.get("long_context_split_known"):
             long_context = any(long_tokens.values())
