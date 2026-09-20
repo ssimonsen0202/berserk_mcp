@@ -18,11 +18,8 @@ import hashlib
 import json
 import os
 import re
-import threading
 import time
 import unicodedata
-from pathlib import Path
-
 import _http
 import _store
 
@@ -328,10 +325,6 @@ _NO_REDIRECT_OPENER = _http.NO_REDIRECT_OPENER
 MAX_PROVIDER_RESPONSE_BYTES = _http.MAX_RESPONSE_BYTES
 
 
-def _read_bounded_json(resp, cap=MAX_PROVIDER_RESPONSE_BYTES):
-    return _http.read_bounded_json(resp, cap)
-
-
 def _http_post_json(url, headers, payload, timeout=LLM_TIMEOUT):
     return _http.http_post_json(url, headers, payload, timeout=timeout)
 
@@ -561,23 +554,6 @@ def _q_fieldstats(source, kind):
     )
 
 
-def _q_profile_batch(source, kind):
-    """Batch fieldstats, sample, and getschema into one request."""
-    if kind == "service":
-        stats = (
-            f"{_table} | where resource['service.name'] == '{source}' "
-            f"| fieldstats resource with limit=50 depth=2"
-        )
-        sample = _q_discover_sample(source)
-    else:
-        stats = (
-            f"{_table} | where metric_name == '{source}' "
-            f"| fieldstats $raw with limit=50 depth=2"
-        )
-        sample = _q_metric_sample(source)
-    return f"{stats}; {sample}; {_table} | getschema"
-
-
 def _render_multi_table(table):
     """Render one bzrk JSON table as bounded TSV for existing parsers."""
     schema = table.get("schema") or {}
@@ -592,19 +568,6 @@ def _render_multi_table(table):
             values.append(json.dumps(value, separators=(",", ":")) if isinstance(value, (dict, list)) else str(value or ""))
         lines.append("\t".join(values))
     return "\n".join(lines)
-
-
-def _split_profile_batch(raw_text):
-    """Return (fieldstats, sample, getschema) text or None if ambiguous."""
-    try:
-        document = json.loads(str(raw_text or ""))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return None
-    tables = document.get("Tables") if isinstance(document, dict) else None
-    if not isinstance(tables, list) or len(tables) < 3:
-        return None
-    rendered = [_render_multi_table(t) for t in tables[:3] if isinstance(t, dict)]
-    return tuple(rendered) if len(rendered) == 3 and all(rendered) else None
 
 
 def _parse_fieldstats_keys(raw_text):
