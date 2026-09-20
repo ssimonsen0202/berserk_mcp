@@ -532,7 +532,7 @@ class AgentAnalyticsMcpTest(unittest.TestCase):
         self.assertFalse(err)
         self.assertIn("body-length fallback", text)
         self.assertIn("0 exact sessions, 1 estimated sessions", text)
-        self.assertIn("body=substring(tostring(body), 0, 240)", self.calls[-1][3])
+        self.assertIn("body=substring(tostring(body), 0, 2000)", self.calls[-1][3])
         self.assertIn("body_chars=strlen(tostring(body))", self.calls[-1][3])
         self.assertIn("claude.tokens_input", self.calls[-1][3])
         self.assertIn("claude.tokens_output", self.calls[-1][3])
@@ -570,7 +570,7 @@ class AgentAnalyticsMcpTest(unittest.TestCase):
 
     def test_burn_query_is_bounded_and_unordered(self):
         query = self.calls[-1][3] if self.calls else aa._burn_events_query()
-        self.assertIn("body=substring(tostring(body), 0, 240)", query)
+        self.assertIn("body=substring(tostring(body), 0, 2000)", query)
         self.assertIn("body_chars=strlen(tostring(body))", query)
         self.assertIn("| take 2000", query)
         self.assertNotIn("| sort by session", query)
