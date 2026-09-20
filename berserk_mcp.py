@@ -1043,7 +1043,7 @@ def q_cc_errors(agent="claude-code"):
         f"{cc} | where tostring(attributes['claude.error'])=='true' "
         f"| tail 40 | project ts=timestamp, typ=tostring(attributes['claude.type']), "
         f"tools=tostring(attributes['claude.tool_names']), "
-        f"body=substring(tostring(body),0,220)"
+        f"body=substring(tostring(body),0,2000)"
     )
 
 
@@ -1062,7 +1062,7 @@ def q_cc_search(term: str, agent="claude-code") -> str:
         f"| tail 40 | project ts=timestamp, typ=tostring(attributes['claude.type']), "
         f"model=tostring(attributes['claude.message_model']), "
         f"tools=tostring(attributes['claude.tool_names']), "
-        f"body=substring(tostring(body),0,240)"
+        f"body=substring(tostring(body),0,2000)"
     )
 
 
