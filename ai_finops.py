@@ -163,11 +163,6 @@ def _first(*values):
     return ""
 
 
-def _nested(obj, bag, key):
-    value = obj.get(bag)
-    return value.get(key) if isinstance(value, dict) else None
-
-
 def _json_records(value):
     if isinstance(value, list):
         return [row for row in value if isinstance(row, dict)]

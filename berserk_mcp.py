@@ -982,17 +982,6 @@ def q_soc_timeline(svc: str) -> str:
     )
 
 
-def q_discover_keys(service=None):
-    """Enumerate the keys present in `resource` (optionally for one service) with
-    counts — verified-working fallback for buildschema() which bzrk doesn't ship."""
-    filt = f"| where resource['service.name'] == '{service}' " if service else ""
-    return (
-        f"{T} | where isnotnull(resource) {filt}"
-        f"| project k=bag_keys(resource) | mv-expand k "
-        f"| summarize n=count() by key=tostring(k) | sort by n desc"
-    )
-
-
 def q_discover_sample(service=None):
     """Sample structural fields without exporting raw telemetry values."""
     filt = f"| where resource['service.name'] == '{service}' " if service else ""
@@ -3667,13 +3656,6 @@ def handle_call(name, arguments):
 #      instead of negotiating: this server implements exactly one version
 #      (PROTOCOL_VERSION), so it must report that version regardless of
 #      what the client claims to speak.
-# A non-dict `params` (e.g. a list or string) hit the same AttributeError
-# class as (1) the moment any branch called params.get(...); validated here
-# too rather than per-branch.
-def _is_object(value):
-    return isinstance(value, dict)
-
-
 def _jsonrpc_error(code, message, id_=None):
     return {"jsonrpc": "2.0", "id": id_, "error": {"code": code, "message": message}}
 
