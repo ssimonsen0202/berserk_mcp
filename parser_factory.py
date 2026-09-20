@@ -317,7 +317,9 @@ _is_loopback_host = _http.is_loopback_host
 
 
 def _validate_llm_url(url):
-    return _http.validate_http_url(url, label="llm endpoint")
+    _http.validate_http_url(url, label="llm endpoint")
+    _http.validate_egress_destination(url, label="llm endpoint")
+    return url
 
 
 _NoRedirectHandler = _http.NoRedirectHandler
@@ -428,6 +430,10 @@ def _hermes_model():
     models_url = hermes_models_url(url)
     if not models_url:
         return None, "hermes: cannot derive /models from configured URL"
+    try:
+        _http.validate_egress_destination(models_url, label="hermes endpoint")
+    except _http.UrlPolicyError as exc:
+        return None, f"hermes: {exc}"
     key = os.environ.get("HERMES_API_KEY", "")
     headers = {"Authorization": f"Bearer {key}"} if key else {}
     out, err = _http_get_json(models_url, headers)
@@ -447,12 +453,28 @@ def _hermes_model():
         return None, "hermes: unexpected /api/models response shape"
 
 
+_CLOUD_PROVIDERS = frozenset({"anthropic", "openai"})
+
+
 def llm_complete(provider, system_prompt, user_prompt):
     """One chat completion. Returns (text, None) or (None, error)."""
+    if provider in _CLOUD_PROVIDERS and _http.local_only_enabled():
+        # Enforced here, not just filtered out of ladder(), so a caller that
+        # invokes llm_complete directly with an explicit provider (bypassing
+        # the ladder) cannot reach a cloud provider either. An inherited
+        # ANTHROPIC_API_KEY/OPENAI_API_KEY must not re-enable cloud fallback.
+        return None, f"{provider}: blocked by BERSERK_LOCAL_ONLY (cloud LLM fallback is disabled)"
+
     if provider == "anthropic":
         key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not key:
             return None, "anthropic: no ANTHROPIC_API_KEY"
+        try:
+            _http.validate_egress_destination(
+                "https://api.anthropic.com/v1/messages", label="anthropic endpoint",
+            )
+        except _http.UrlPolicyError as exc:
+            return None, f"anthropic: {exc}"
         payload = {
             "model": os.environ.get("BERSERK_LLM_ANTHROPIC_MODEL", "claude-opus-4-8"),
             "max_tokens": 4096,
@@ -475,6 +497,12 @@ def llm_complete(provider, system_prompt, user_prompt):
         key = os.environ.get("OPENAI_API_KEY", "")
         if not key:
             return None, "openai: no OPENAI_API_KEY"
+        try:
+            _http.validate_egress_destination(
+                "https://api.openai.com/v1/chat/completions", label="openai endpoint",
+            )
+        except _http.UrlPolicyError as exc:
+            return None, f"openai: {exc}"
         payload = {
             "model": os.environ.get("BERSERK_LLM_OPENAI_MODEL", "gpt-4o"),
             "messages": [
@@ -496,6 +524,10 @@ def llm_complete(provider, system_prompt, user_prompt):
 
     if provider == "hermes":
         url = _hermes_url()
+        try:
+            _http.validate_egress_destination(url, label="hermes endpoint")
+        except _http.UrlPolicyError as exc:
+            return None, f"hermes: {exc}"
         key = os.environ.get("HERMES_API_KEY", "")
         model, err = _hermes_model()
         if err:
@@ -521,7 +553,15 @@ def llm_complete(provider, system_prompt, user_prompt):
 
 def ladder():
     raw = os.environ.get("BERSERK_LLM_LADDER", "hermes,openai,anthropic")
-    return [p.strip() for p in raw.split(",") if p.strip()]
+    providers = [p.strip() for p in raw.split(",") if p.strip()]
+    if _http.local_only_enabled():
+        # BERSERK_LLM_LADDER is operator-editable free text; local-only mode
+        # must not depend on the operator remembering to also edit the
+        # ladder. Cloud providers are dropped here too (not just refused in
+        # llm_complete) so doctor and generation both see the same effective
+        # ladder -- see docs/architecture-product-security-review-2026-09-12.md S1.
+        providers = [p for p in providers if p not in _CLOUD_PROVIDERS]
+    return providers
 
 
 # ---------- P2: source profiling and schema knowledge store ----------
@@ -1138,12 +1178,44 @@ def validate_generated_query(q):
             return False, "returns no data in 24h", None
         out = out2
 
+    # task-05 item 3 ("execution success is not treated as correctness"):
+    # a query that returns rows but whose output contains NONE of the
+    # columns it declares is very likely wrong -- e.g. an LLM naming a
+    # projected column one thing in the query text and something else in
+    # the actual `project`/`summarize` clause. That's promoted to a hard
+    # failure. A PARTIAL mismatch (some but not all declared columns
+    # missing) stays a warning: this is a coarse regex over declaration
+    # syntax, not a real KQL parser, so it can plausibly misread a nested
+    # expression's column name -- full semantic fixtures (expected values
+    # per phenomenon, not just column presence) remain out of scope for
+    # this task; see implementation-notes.md.
     warning = None
-    declared_cols = re.findall(r"(\w+)\s*=", kql)
+    # (?!=) excludes KQL's `==` equality operator (a `where x == 'y'`
+    # filter predicate, not a projected-column declaration) -- without it,
+    # promoting an all-missing match to a hard failure below produced a
+    # false positive on any query with a where-clause equality check and
+    # no `x=...`-style declaration at all (caught by
+    # test_happy_path_two_queries_saved_with_metadata, whose second query
+    # is exactly that shape).
+    declared_cols = re.findall(r"(\w+)\s*=(?!=)", stripped)
     if declared_cols:
         first_line = out.strip().splitlines()[0] if out.strip() else ""
-        missing = [c for c in declared_cols if c not in first_line]
+        # Whitespace-split header TOKENS, not a substring test -- `"n" in
+        # "row1 col"` and `"err" in "error_count"` both spuriously pass a
+        # bare substring check regardless of whether the column is
+        # actually present, which would have let a genuinely wrong query
+        # through the (now hard-failing) check on a name-length
+        # coincidence rather than an actual match.
+        header_cols = first_line.split()
+        missing = [c for c in declared_cols if c not in header_cols]
         if missing:
+            if len(missing) == len(declared_cols):
+                return (
+                    False,
+                    f"none of the declared columns ({', '.join(declared_cols)}) "
+                    "appear in the query's own output header",
+                    None,
+                )
             warning = f"columns not visible in output header: {', '.join(missing)}"
 
     if validation_report and validation_report.get("risk") == "medium":
@@ -1152,9 +1224,26 @@ def validate_generated_query(q):
     return True, None, warning
 
 
-def generate_parser_for(job):
+def generate_parser_for(job, cancel_event=None):
     """Run the full generation pipeline for one discovery job.
-    Returns (report_dict, ok_bool)."""
+    Returns (report_dict, ok_bool).
+
+    cancel_event, if given, is a threading.Event tied to a background
+    task's tasks/cancel state (see berserk_mcp.py's _current_cancel_event
+    and _run_task). Round-7 adversarial-review finding: without this, a
+    client could receive a successful tasks/cancel response while this
+    function kept contacting the LLM provider and persisting generated
+    queries regardless. Checked between provider/attempt iterations (the
+    same boundary the existing attempt-budget/deadline check already
+    uses) and again immediately before persisting -- a single already-
+    in-flight LLM HTTP call cannot be aborted with plain urllib, but no
+    FURTHER call is started once cancellation is observed, and nothing
+    generated is ever persisted if cancellation was observed at any
+    point up to the moment of persistence.
+    """
+    if cancel_event is not None and cancel_event.is_set():
+        return _bound_report({"status": "needs_human", "reason": "cancelled"}), False
+
     source = job["source"]
     kind = job["kind"]
     role_hint = job.get("role_hint") or ""
@@ -1208,11 +1297,20 @@ def generate_parser_for(job):
     validated_queries = None
     warnings = []
     budget_exhausted = False
+    cancelled = False
 
     for provider in ladder():
         feedback = ""
         provider_failed_immediately = False
         for attempt in range(1, MAX_REFINEMENT_ATTEMPTS + 1):
+            # Checked at the SAME boundary as the attempt-budget/deadline
+            # check just below, and for the same reason: an already-in-
+            # flight llm_complete() call cannot be aborted with plain
+            # urllib, but no FURTHER call may start once cancellation has
+            # been observed.
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled = True
+                break
             # F-005: one TOTAL attempt budget across the whole ladder (not
             # MAX_REFINEMENT_ATTEMPTS per provider), plus the job deadline.
             if attempts_used >= MAX_TOTAL_ATTEMPTS or time.monotonic() >= deadline:
@@ -1262,10 +1360,20 @@ def generate_parser_for(job):
 
         if validated_queries:
             break
-        if budget_exhausted:
+        if cancelled or budget_exhausted:
             break
         if provider_failed_immediately:
             continue
+
+    # Re-checked here (not just relying on the `cancelled` flag set inside
+    # the loop above) because cancellation observed at ANY point up to
+    # this line -- including the instant after the loop's very last
+    # attempt already succeeded -- must still prevent persistence below;
+    # a flag captured only inside the loop's own break condition would
+    # miss a cancellation that raced in between the loop finishing
+    # normally and reaching this check.
+    if cancelled or (cancel_event is not None and cancel_event.is_set()):
+        return _bound_report({"status": "needs_human", "reason": "cancelled"}), False
 
     if not validated_queries:
         reason = (
@@ -1281,6 +1389,27 @@ def generate_parser_for(job):
 
     saved_names = []
     for q in validated_queries:
+        # Round-9 adversarial-review finding: the pre-loop cancellation
+        # check above only guards entry into this loop -- a `tasks/cancel`
+        # racing in while a prior iteration's _persist_learned_query() call
+        # is running was not observed again, so the loop would keep
+        # persisting every remaining LLM-generated query regardless.
+        # Checked once per iteration, matching this function's established
+        # three-checkpoint pattern (top of function / between attempts /
+        # after the attempt loop): the already-in-flight persist call for
+        # the CURRENT query still can't be aborted mid-call (same accepted
+        # limitation as the LLM-call case above), but no FURTHER persist
+        # call starts once cancellation is observed. Already-persisted
+        # entries are left in place rather than rolled back -- every one of
+        # them lands as status="pending_review", which item_visible() gates
+        # out of list_saved/run_saved/saved__<name>/tools/list until a
+        # human explicitly approves it, so a partial batch here is inert,
+        # not a partial externally-visible write.
+        if cancel_event is not None and cancel_event.is_set():
+            return _bound_report({
+                "status": "needs_human", "reason": "cancelled",
+                "queries_saved": saved_names,
+            }), False
         entry = {
             "name": q["name"],
             "description": q["description"],

@@ -593,6 +593,17 @@ def main():
     cases = [json.loads(l) for l in Path(args_ns.cases).read_text(encoding="utf-8").splitlines() if l.strip()]
     if args_ns.limit:
         cases = cases[:args_ns.limit]
+    if not cases:
+        # Both _run_tier_policy and the single-backend path below divide by
+        # `total` (the number of cases actually scored) when printing/saving
+        # accuracy -- an empty or all-blank cases file reached that division
+        # with total == 0, crashing with a raw ZeroDivisionError traceback
+        # instead of a controlled error. For release automation this is
+        # worse than a failed eval: no report is written and no accuracy
+        # metric is produced at all. Rejected here, before either path
+        # calls a single model, so a misconfigured cases file/filter fails
+        # fast and cheaply.
+        sys.exit(f"no cases to evaluate in {args_ns.cases!r} (file is empty, or --limit filtered it to zero)")
 
     if args_ns.tier_policy:
         _run_tier_policy(args_ns, cases)

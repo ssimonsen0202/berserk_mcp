@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -68,7 +69,7 @@ class ParserFactoryTestBase(unittest.TestCase):
             "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "HERMES_API_KEY",
             "BERSERK_LLM_LADDER", "BERSERK_LLM_HERMES_MODEL",
             "BERSERK_LLM_OPENAI_MODEL", "BERSERK_LLM_ANTHROPIC_MODEL",
-            "BERSERK_LLM_HERMES_URL",
+            "BERSERK_LLM_HERMES_URL", "BERSERK_EGRESS_ALLOWED_HOSTS",
         ]
         self._orig_env = {k: os.environ.get(k) for k in self._env_keys}
         for k in self._env_keys:
@@ -126,6 +127,59 @@ class LlmClientTest(ParserFactoryTestBase):
         self.assertEqual(len(self._llm_get_calls), 1)
         self.assertEqual(self._llm_calls[0][2]["model"], "discovered-model")
 
+    def test_hermes_discovers_model_via_standard_v1_ollama_url(self):
+        os.environ["BERSERK_LLM_HERMES_URL"] = "http://127.0.0.1:11434/v1/chat/completions"
+        self.llm_responses = [({"choices": [{"message": {"content": "ok"}}]}, None)]
+        text, err = pf.llm_complete("hermes", "s", "u")
+        self.assertIsNone(err)
+        self.assertEqual(len(self._llm_get_calls), 1)
+        self.assertEqual(self._llm_get_calls[0][0], "http://127.0.0.1:11434/v1/models")
+
+    def test_hermes_discovers_model_via_standard_v1_llama_cpp_lm_studio_url(self):
+        os.environ["BERSERK_LLM_HERMES_URL"] = "http://127.0.0.1:8080/v1/chat/completions"
+        self.llm_responses = [({"choices": [{"message": {"content": "ok"}}]}, None)]
+        text, err = pf.llm_complete("hermes", "s", "u")
+        self.assertIsNone(err)
+        self.assertEqual(self._llm_get_calls[0][0], "http://127.0.0.1:8080/v1/models")
+
+    def test_hermes_discovers_model_via_standard_v1_vllm_sglang_url(self):
+        os.environ["BERSERK_LLM_HERMES_URL"] = "http://127.0.0.1:8000/v1/chat/completions"
+        self.llm_responses = [({"choices": [{"message": {"content": "ok"}}]}, None)]
+        text, err = pf.llm_complete("hermes", "s", "u")
+        self.assertIsNone(err)
+        self.assertEqual(self._llm_get_calls[0][0], "http://127.0.0.1:8000/v1/models")
+
+    def test_hermes_explicit_model_bypasses_discovery_on_v1_url(self):
+        # Explicit model plus a standard /v1/... endpoint must work without
+        # any discovery call at all (R1 acceptance criterion #1).
+        os.environ["BERSERK_LLM_HERMES_URL"] = "http://127.0.0.1:8000/v1/chat/completions"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "llama3"
+        self.llm_responses = [({"choices": [{"message": {"content": "ok"}}]}, None)]
+        text, err = pf.llm_complete("hermes", "s", "u")
+        self.assertIsNone(err)
+        self.assertEqual(len(self._llm_get_calls), 0)
+        self.assertEqual(self._llm_calls[0][2]["model"], "llama3")
+
+    def test_hermes_discovery_fails_cleanly_on_malformed_url(self):
+        os.environ["BERSERK_LLM_HERMES_URL"] = "not-a-url-shape"
+        text, err = pf.llm_complete("hermes", "s", "u")
+        self.assertIsNone(text)
+        self.assertIn("cannot derive /models from configured URL", err)
+        self.assertEqual(self._llm_get_calls, [])
+
+    def test_hermes_discovery_reports_unreachable_service(self):
+        os.environ["BERSERK_LLM_HERMES_URL"] = "http://127.0.0.1:8000/v1/chat/completions"
+
+        def fake_get_unreachable(url, headers, timeout=pf.LLM_TIMEOUT):
+            self._llm_get_calls.append((url, headers))
+            return None, "Connection refused"
+
+        pf._http_get_json = fake_get_unreachable
+        text, err = pf.llm_complete("hermes", "s", "u")
+        self.assertIsNone(text)
+        self.assertIn("model discovery failed", err)
+        self.assertIn("Connection refused", err)
+
     def test_http_error_propagates_without_key_material(self):
         os.environ["OPENAI_API_KEY"] = "sk-secret-value"
         self.llm_responses = [(None, "HTTP 500: boom")]
@@ -140,6 +194,7 @@ class LlmClientTest(ParserFactoryTestBase):
     def test_ladder_custom(self):
         os.environ["BERSERK_LLM_LADDER"] = "anthropic"
         self.assertEqual(pf.ladder(), ["anthropic"])
+
 
     def test_hermes_url_default_is_localhost_not_a_private_ip(self):
         # No env, no local config file -> privacy-safe default; the repo must
@@ -390,6 +445,162 @@ class LlmClientTest(ParserFactoryTestBase):
         pf._reset_hermes_model_cache()
         pf.llm_complete("hermes", "s", "u")
         self.assertEqual(len(self._llm_get_calls), 2)
+
+    # ---- round-2 finding 1: cloud LLM calls must respect an explicit
+    # egress allowlist even without BERSERK_LOCAL_ONLY ----
+    def test_anthropic_blocked_by_explicit_allowlist_without_local_only(self):
+        os.environ["ANTHROPIC_API_KEY"] = "sk-test"
+        os.environ["BERSERK_EGRESS_ALLOWED_HOSTS"] = "some-other-host.example.com"
+        text, err = pf.llm_complete("anthropic", "s", "u")
+        self.assertIsNone(text)
+        self.assertIn("not loopback", err)
+        self.assertEqual(self._llm_calls, [])
+
+    def test_openai_blocked_by_explicit_allowlist_without_local_only(self):
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        os.environ["BERSERK_EGRESS_ALLOWED_HOSTS"] = "some-other-host.example.com"
+        text, err = pf.llm_complete("openai", "s", "u")
+        self.assertIsNone(text)
+        self.assertIn("not loopback", err)
+        self.assertEqual(self._llm_calls, [])
+
+    def test_anthropic_unblocked_without_any_egress_policy_configured(self):
+        os.environ["ANTHROPIC_API_KEY"] = "sk-test"
+        self.llm_responses = [({"content": [{"text": "hi"}]}, None)]
+        text, err = pf.llm_complete("anthropic", "s", "u")
+        self.assertIsNone(err)
+        self.assertEqual(text, "hi")
+
+
+# ---------- Task 01: local-only mode blocks cloud fallback ----------
+class LocalOnlyEgressPolicyTest(ParserFactoryTestBase):
+    """BERSERK_LOCAL_ONLY must make cloud fallback impossible, independent of
+    whether cloud API keys happen to be present -- see S1 in
+    docs/architecture-product-security-review-2026-09-12.md and
+    specs/berserk-security/task-01-local-egress-and-side-effects.md."""
+
+    def tearDown(self):
+        os.environ.pop("BERSERK_LOCAL_ONLY", None)
+        os.environ.pop("BERSERK_EGRESS_ALLOWED_HOSTS", None)
+        os.environ.pop("BERSERK_EGRESS_ALLOWED_CIDRS", None)
+        super().tearDown()
+
+    def test_local_only_blocks_openai_even_with_key_present(self):
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        os.environ["BERSERK_LOCAL_ONLY"] = "1"
+        text, err = pf.llm_complete("openai", "s", "u")
+        self.assertIsNone(text)
+        self.assertIn("BERSERK_LOCAL_ONLY", err)
+        self.assertEqual(self._llm_calls, [])
+
+    def test_local_only_blocks_anthropic_even_with_key_present(self):
+        os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test"
+        os.environ["BERSERK_LOCAL_ONLY"] = "1"
+        text, err = pf.llm_complete("anthropic", "s", "u")
+        self.assertIsNone(text)
+        self.assertIn("BERSERK_LOCAL_ONLY", err)
+        self.assertEqual(self._llm_calls, [])
+
+    def test_local_only_does_not_block_hermes(self):
+        os.environ["BERSERK_LOCAL_ONLY"] = "1"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        self.llm_responses = [({"choices": [{"message": {"content": "hi"}}]}, None)]
+        text, err = pf.llm_complete("hermes", "s", "u")
+        self.assertIsNone(err)
+        self.assertEqual(text, "hi")
+
+    def test_ladder_drops_cloud_providers_when_local_only(self):
+        os.environ["BERSERK_LLM_LADDER"] = "hermes,openai,anthropic"
+        os.environ["BERSERK_LOCAL_ONLY"] = "1"
+        self.assertEqual(pf.ladder(), ["hermes"])
+
+    def test_ladder_unaffected_when_local_only_disabled(self):
+        os.environ["BERSERK_LLM_LADDER"] = "hermes,openai,anthropic"
+        self.assertEqual(pf.ladder(), ["hermes", "openai", "anthropic"])
+
+    def test_hermes_remote_destination_unrestricted_without_local_only_or_allowlist(self):
+        # Preserves the existing supported case (see LlmClientTest /
+        # save_hermes_url tests above): pointing Hermes at an operator-
+        # chosen remote host works with no policy configured at all.
+        os.environ["BERSERK_LLM_HERMES_URL"] = "https://example.com/api/chat/completions"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        self.llm_responses = [({"choices": [{"message": {"content": "hi"}}]}, None)]
+        text, err = pf.llm_complete("hermes", "s", "u")
+        self.assertIsNone(err)
+        self.assertEqual(text, "hi")
+
+    def test_hermes_egress_destination_blocked_under_local_only_when_unapproved(self):
+        os.environ["BERSERK_LLM_HERMES_URL"] = "https://example.com/api/chat/completions"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        os.environ["BERSERK_LOCAL_ONLY"] = "1"
+        text, err = pf.llm_complete("hermes", "s", "u")
+        self.assertIsNone(text)
+        self.assertIn("example.com", err)
+        self.assertEqual(self._llm_calls, [])
+
+    def test_hermes_egress_destination_allowed_under_local_only_when_listed(self):
+        os.environ["BERSERK_LLM_HERMES_URL"] = "https://example.com/api/chat/completions"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        os.environ["BERSERK_LOCAL_ONLY"] = "1"
+        os.environ["BERSERK_EGRESS_ALLOWED_HOSTS"] = "example.com"
+        self.llm_responses = [({"choices": [{"message": {"content": "hi"}}]}, None)]
+        text, err = pf.llm_complete("hermes", "s", "u")
+        self.assertIsNone(err)
+        self.assertEqual(text, "hi")
+
+    def test_generate_parser_for_end_to_end_local_only_with_cloud_credentials_present(self):
+        # The spec's own verification list names this scenario explicitly:
+        # "the local-only test with cloud credentials present". Cloud keys
+        # for both remaining ladder providers are set, local-only is on,
+        # and hermes itself fails -- the job must reach needs_human, and no
+        # call may ever target the OpenAI/Anthropic endpoints.
+        os.environ["OPENAI_API_KEY"] = "sk-test"
+        os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test"
+        os.environ["BERSERK_LOCAL_ONLY"] = "1"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        self._stub_profile_responses()
+        # No queued llm_responses -> hermes's own completion call fails too,
+        # so every ladder provider is exhausted.
+        report, ok = pf.generate_parser_for({"source": "x", "kind": "service", "role_hint": ""})
+        self.assertFalse(ok)
+        self.assertEqual(report["status"], "needs_human")
+        for url, _headers, _payload in self._llm_calls:
+            self.assertNotIn("openai.com", url)
+            self.assertNotIn("anthropic.com", url)
+
+    def test_hermes_egress_destination_blocked_when_allowlist_configured_without_local_only(self):
+        # Configuring an allowlist opts into the restrictive policy even
+        # with BERSERK_LOCAL_ONLY off -- defense in depth for an operator
+        # who wants destination pinning without full local-only mode.
+        os.environ["BERSERK_LLM_HERMES_URL"] = "https://example.com/api/chat/completions"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        os.environ["BERSERK_EGRESS_ALLOWED_HOSTS"] = "other.example"
+        text, err = pf.llm_complete("hermes", "s", "u")
+        self.assertIsNone(text)
+        self.assertIn("example.com", err)
+
+    def test_local_only_allowlisted_destination_still_needs_the_separate_plaintext_opt_in(self):
+        # Destination approval (BERSERK_EGRESS_ALLOWED_HOSTS/_CIDRS) and
+        # transport safety (BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE) are
+        # deliberately separate controls. Exercise the real (unstubbed)
+        # HTTP helpers -- self._orig_post bypasses this class's fake so the
+        # actual validate_http_url plaintext gate runs.
+        os.environ["BERSERK_LOCAL_ONLY"] = "1"
+        os.environ["BERSERK_EGRESS_ALLOWED_CIDRS"] = "10.0.0.0/8"
+        url = "http://10.1.2.3:3000/api/chat/completions"
+        pf._http.validate_egress_destination(url, label="hermes endpoint")  # approved
+        out, err = self._orig_post(url, {}, {"x": 1})  # transport still refuses it
+        self.assertIsNone(out)
+        self.assertIn("plaintext", err)
+        os.environ["BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE"] = "1"
+        try:
+            out, err = self._orig_post(url, {}, {"x": 1})
+            # Now past both gates -- fails on an unreachable real socket,
+            # not on either policy check.
+            self.assertNotIn("invalid endpoint", str(err))
+            self.assertNotIn("plaintext", str(err))
+        finally:
+            os.environ.pop("BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE", None)
 
 
 class HermesModelsUrlTest(unittest.TestCase):
@@ -900,7 +1111,11 @@ class GenerationPipelineTest(ParserFactoryTestBase):
         os.environ["BERSERK_LLM_LADDER"] = "hermes"
         os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
         self._stub_profile_responses()
-        self.default_response = ("row1 col\nval 5", False)
+        # "n" must actually appear in the header so query 1's declared
+        # column (`summarize n=count()`) passes the (now hard-failing,
+        # task-05) declared-columns-present check; query 2 has no `x=...`
+        # declaration (only `== ` filter predicates), so it isn't checked.
+        self.default_response = ("n\nval 5", False)
         queries = [
             {"name": "overview", "description": "overview", "kql": f"{bm.TABLE} | where resource['service.name'] == 'mysvc' | summarize n=count() | take 1", "since": "1h ago"},
             {"name": "errors", "description": "errors", "kql": f"{bm.TABLE} | where resource['service.name'] == 'mysvc' | where severity_text == 'ERROR' | take 10", "since": "1h ago"},
@@ -926,6 +1141,143 @@ class GenerationPipelineTest(ParserFactoryTestBase):
         amendments = bm.load_json_list(Path(bm.LEARNED_PATH).parent / "amendments_log.json")
         gen_actions = [a for a in amendments if a["action"] == "generated"]
         self.assertEqual(len(gen_actions), 2)
+
+    def test_cancel_before_generation_returns_immediately_without_any_calls(self):
+        # Round-7 adversarial-review finding: a client can get a successful
+        # tasks/cancel response while generate_parser_for keeps contacting
+        # the LLM provider and persisting results. An already-cancelled
+        # event must short-circuit before ANY blocking work starts.
+        os.environ["BERSERK_LLM_LADDER"] = "hermes"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        self._stub_profile_responses()
+        self.llm_responses = [(self._reply([{"name": "n", "description": "d", "kql": f"{bm.TABLE} | take 1", "since": "1h ago"}]), None)]
+        event = threading.Event()
+        event.set()
+
+        report, ok = pf.generate_parser_for(
+            {"source": "x", "kind": "service", "role_hint": ""}, cancel_event=event,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(report["reason"], "cancelled")
+        self.assertEqual(self.calls, [])  # no profiling query ran
+        self.assertEqual(self._llm_calls, [])  # no LLM call was made
+        self.assertEqual(bm.load_learned(), [])
+
+    def test_cancel_observed_between_attempts_stops_further_llm_calls(self):
+        # A first attempt that fails validation would normally feed back
+        # and retry (see test_invalid_kql_prefix_feeds_back_and_succeeds_
+        # next_attempt) -- if cancellation is observed by the time the
+        # loop reaches the top of the NEXT attempt, that retry must never
+        # happen: no second LLM call, nothing persisted.
+        os.environ["BERSERK_LLM_LADDER"] = "hermes"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        self._stub_profile_responses()
+        self.default_response = ("row1\nval 5", False)
+        bad = [{"name": "bad", "description": "d", "kql": "NOT_TABLE | take 1", "since": "1h ago"}]
+        good = [{"name": "good", "description": "d", "kql": f"{bm.TABLE} | take 1", "since": "1h ago"}]
+        self.llm_responses = [(self._reply(bad), None), (self._reply(good), None)]
+        event = threading.Event()
+
+        orig_post = pf._http_post_json
+
+        def fake_post_then_cancel(url, headers, payload, timeout=pf.LLM_TIMEOUT):
+            result = orig_post(url, headers, payload, timeout=timeout)
+            event.set()  # simulate tasks/cancel arriving right after this call returns
+            return result
+
+        pf._http_post_json = fake_post_then_cancel
+        try:
+            report, ok = pf.generate_parser_for(
+                {"source": "x", "kind": "service", "role_hint": ""}, cancel_event=event,
+            )
+        finally:
+            pf._http_post_json = orig_post
+
+        self.assertFalse(ok)
+        self.assertEqual(report["reason"], "cancelled")
+        self.assertEqual(len(self._llm_calls), 1)  # the second (retry) call never happened
+        self.assertEqual(bm.load_learned(), [])
+
+    def test_cancel_observed_after_success_still_prevents_persistence(self):
+        # The trickiest case: cancellation observed AFTER a single attempt
+        # already succeeded (validated_queries populated, the inner loop
+        # exits normally via its own success path, never through the
+        # in-loop cancellation check) but BEFORE generate_parser_for
+        # returns. The post-loop re-check must still catch this and skip
+        # persistence -- a flag set only inside the loop's own break
+        # condition would miss exactly this ordering.
+        os.environ["BERSERK_LLM_LADDER"] = "hermes"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        self._stub_profile_responses()
+        self.default_response = ("n\nval 5", False)
+        queries = [{"name": "overview", "description": "d", "kql": f"{bm.TABLE} | summarize n=count() | take 1", "since": "1h ago"}]
+        self.llm_responses = [(self._reply(queries), None)]
+        event = threading.Event()
+
+        orig_post = pf._http_post_json
+
+        def fake_post_then_cancel(url, headers, payload, timeout=pf.LLM_TIMEOUT):
+            result = orig_post(url, headers, payload, timeout=timeout)
+            event.set()  # cancellation races in after the (successful) LLM call
+            return result
+
+        pf._http_post_json = fake_post_then_cancel
+        try:
+            report, ok = pf.generate_parser_for(
+                {"source": "mysvc", "kind": "service", "role_hint": ""}, cancel_event=event,
+            )
+        finally:
+            pf._http_post_json = orig_post
+
+        self.assertFalse(ok)
+        self.assertEqual(report["reason"], "cancelled")
+        self.assertEqual(bm.load_learned(), [])  # generation succeeded but must not be saved
+
+    def test_cancel_observed_between_persisted_queries_stops_further_persistence(self):
+        # Round-9 adversarial-review finding: a single successful LLM reply
+        # can contain MULTIPLE validated queries, persisted one at a time
+        # in a loop -- the pre-loop cancellation check only guarded ENTRY
+        # into that loop, so a tasks/cancel racing in while the first
+        # query's _persist_learned_query() call was running went
+        # unnoticed, and the loop kept persisting every remaining query
+        # regardless. Simulates that exact race: cancellation is set right
+        # after the FIRST query is persisted, and the SECOND must never be.
+        os.environ["BERSERK_LLM_LADDER"] = "hermes"
+        os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
+        self._stub_profile_responses()
+        self.default_response = ("n\nval 5", False)
+        queries = [
+            {"name": "first", "description": "d", "kql": f"{bm.TABLE} | summarize n=count() | take 1", "since": "1h ago"},
+            {"name": "second", "description": "d", "kql": f"{bm.TABLE} | where severity_text == 'ERROR' | take 10", "since": "1h ago"},
+        ]
+        self.llm_responses = [(self._reply(queries), None)]
+        event = threading.Event()
+
+        orig_persist = pf._persist_learned_query
+        persisted = []
+
+        def fake_persist_then_cancel(entry, action_source):
+            result = orig_persist(entry, action_source)
+            persisted.append(result.get("name", entry["name"]))
+            event.set()  # simulate tasks/cancel arriving right after this write returns
+            return result
+
+        pf._persist_learned_query = fake_persist_then_cancel
+        try:
+            report, ok = pf.generate_parser_for(
+                {"source": "mysvc", "kind": "service", "role_hint": ""}, cancel_event=event,
+            )
+        finally:
+            pf._persist_learned_query = orig_persist
+
+        self.assertFalse(ok)
+        self.assertEqual(report["reason"], "cancelled")
+        # Only the first query's persist call happened; the loop stopped
+        # before ever calling _persist_learned_query for the second.
+        self.assertEqual(len(persisted), 1)
+        saved_names = [it["name"] for it in bm.load_learned()]
+        self.assertEqual(saved_names, persisted)
+        self.assertEqual(report["queries_saved"], persisted)
 
     def test_invalid_kql_prefix_feeds_back_and_succeeds_next_attempt(self):
         os.environ["BERSERK_LLM_LADDER"] = "hermes"
@@ -1061,6 +1413,69 @@ class GenerationPipelineTest(ParserFactoryTestBase):
              "since": "1h ago"}
         ok, err, _ = pf.validate_generated_query(q)
         self.assertTrue(ok, err)
+
+    # ---- task-05 item 3: execution success is not treated as correctness ----
+    def test_query_where_no_declared_columns_appear_in_output_is_rejected(self):
+        # A hard failure, not just a warning: if the query's output header
+        # contains NONE of the columns it declares, the query almost
+        # certainly doesn't measure what its name/description claim.
+        self.default_response = ("totally_unrelated_header\nval", False)
+        q = {"name": "n", "description": "d",
+             "kql": f"{bm.TABLE} | summarize error_rate=count() by service_name | take 1",
+             "since": "1h ago"}
+        ok, err, _ = pf.validate_generated_query(q)
+        self.assertFalse(ok)
+        self.assertIn("none of the declared columns", err)
+
+    def test_declared_column_check_is_token_match_not_substring(self):
+        # A bare substring test (the original bug, caught by advisor) would
+        # spuriously pass declared column "n" against header "count" (since
+        # "n" is a substring of "cou-n-t") -- a genuinely wrong query
+        # slipping through the hard-failure check on a name-length
+        # coincidence rather than an actual match. Header must be split
+        # into whitespace tokens and compared exactly.
+        self.default_response = ("count\nval", False)
+        q = {"name": "q", "description": "d",
+             "kql": f"{bm.TABLE} | summarize n=count() | take 1",
+             "since": "1h ago"}
+        ok, err, _ = pf.validate_generated_query(q)
+        self.assertFalse(ok, "declared column 'n' is not actually present in header 'count'")
+        self.assertIn("none of the declared columns", err)
+
+    def test_query_where_some_declared_columns_appear_is_only_a_warning(self):
+        # Partial mismatch stays a warning -- the column-name regex is
+        # coarse (not a real KQL parser), so a partial miss could just be
+        # an expression it misread, not proof the whole query is wrong.
+        self.default_response = ("error_rate other_col\nval1 val2", False)
+        q = {"name": "n", "description": "d",
+             "kql": f"{bm.TABLE} | summarize error_rate=count(), missing_col=avg(x) by service_name | take 1",
+             "since": "1h ago"}
+        ok, err, warn = pf.validate_generated_query(q)
+        self.assertTrue(ok, err)
+        self.assertIsNotNone(warn)
+        self.assertIn("missing_col", warn)
+
+    def test_declared_column_check_ignores_assignment_like_text_inside_quoted_literal(self):
+        # 'foo=bar' is a quoted comparison VALUE, not a column declaration --
+        # the raw-kql version of this check misread "foo" out of the literal
+        # as if it were a real declared output column, and hard-failed a
+        # query whose only genuinely declared column ("count") IS present in
+        # the header. This must pass.
+        self.default_response = ("count\nval", False)
+        q = {"name": "n", "description": "d",
+             "kql": f"{bm.TABLE} | where body == 'foo=bar' | summarize count=count() | take 1",
+             "since": "1h ago"}
+        ok, err, _ = pf.validate_generated_query(q)
+        self.assertTrue(ok, err)
+
+    def test_declared_column_check_still_rejects_genuinely_wrong_query(self):
+        self.default_response = ("totally_unrelated\nval", False)
+        q = {"name": "n", "description": "d",
+             "kql": f"{bm.TABLE} | summarize wrong_name=count() | take 1",
+             "since": "1h ago"}
+        ok, err, _ = pf.validate_generated_query(q)
+        self.assertFalse(ok)
+        self.assertIn("none of the declared columns", err)
 
     def test_fenced_reply_parses(self):
         os.environ["BERSERK_LLM_LADDER"] = "hermes"
