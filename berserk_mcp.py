@@ -2615,9 +2615,8 @@ def _run_saved_entry(match, since_arg):
     return prefix + _fence_untrusted(out), err
 
 
-def _handle_call_uncached(name, arguments):
-    """Dispatch a tools/call. Returns (text, is_error)."""
-    # --- learning-loop management tools ---
+def _handle_learning_loop(name, arguments):
+    """list_saved / run_saved / save_query. Returns (text, is_error) or None."""
     if name == "list_saved":
         items = [it for it in load_learned() if item_visible(it)]
         if not items:
@@ -2639,20 +2638,6 @@ def _handle_call_uncached(name, arguments):
         if not match:
             avail = ", ".join(it["name"] for it in items) or "(none)"
             return "No saved query named '" + qn + "'. Available: " + avail, True
-        return _run_saved_entry(match, arguments.get("since"))
-    if name.startswith("saved__"):
-        # Dispatch target for a projected saved-query tool (see
-        # _saved_query_tools / issue #5). Resolves against the same
-        # role-filtered list run_saved uses, so a role-hidden entry is
-        # indistinguishable from a name that was never saved -- this is the
-        # enforcement F-008 relies on for callers that reach
-        # _handle_call_uncached directly, bypassing dispatch()'s matched_tool
-        # lookup (e.g. a direct handle_call() call, as most tests make).
-        target = name[len("saved__"):]
-        items = [it for it in load_learned() if item_visible(it)]
-        match = next((it for it in items if sanitize_name(it["name"]) == target), None)
-        if not match:
-            return "unknown tool: " + name, True
         return _run_saved_entry(match, arguments.get("since"))
     if name == "save_query":
         nm = sanitize_name(arguments.get("name", ""))
@@ -2700,8 +2685,11 @@ def _handle_call_uncached(name, arguments):
             entry["roles"] = roles
         persist_learned_query(entry, action_source="manual")
         return "Saved '" + nm + "'. Reusable now via run_saved name=" + nm + " (verified, returned data).", False
+    return None
 
-    # --- discovery queue tools ---
+
+def _handle_discovery(name, arguments):
+    """request_discovery / discovery_status. Returns (text, is_error) or None."""
     if name == "request_discovery":
         service = str(arguments.get("service") or "").strip()
         metric = str(arguments.get("metric") or "").strip()
@@ -2756,8 +2744,11 @@ def _handle_call_uncached(name, arguments):
                 else:
                     lines.append(f"  -> {report.get('reason','')}")
         return "Discovery jobs:\n" + "\n".join(lines), False
+    return None
 
-    # --- parser-factory tools ---
+
+def _handle_parser_factory(name, arguments):
+    """Parser-factory / diagnostic tools. Returns (text, is_error) or None."""
     if name == "detect_new_sources":
         since = arguments.get("since") or "24h ago"
         auto_queue = arguments.get("auto_queue") is True
@@ -3088,80 +3079,11 @@ def _handle_call_uncached(name, arguments):
                 "has '<term>' for exact terms.", False
             )
         return _fence_untrusted(out), False
+    return None
 
-    # --- simple fixed-query tools ---
-    if name in SIMPLE or name in _AGENT_AWARE_SIMPLE:
-        if name in _AGENT_AWARE_SIMPLE:
-            kql_fn, default_since = _AGENT_AWARE_SIMPLE[name]
-            kql = kql_fn(arguments.get("agent") or "claude-code")
-        else:
-            kql, default_since = SIMPLE[name]
-        since = arguments.get("since") or default_since
-        if name in _SIMPLE_JSON_TOOLS:
-            out, err = bzrk_search_json(kql, since)
-        else:
-            out, err = bzrk_search(kql, since)
-        # Fencing (issue #11) is independent of ENVELOPE_ENABLED -- an
-        # operator disabling the envelope for byte-identical prior output
-        # must not also silently disable untrusted-data marking on the
-        # body-bearing subset. Also applies on the error path (round 2
-        # finding 4): the overflow rewrite below replaces `out` with a
-        # clean server message, safe as-is, but any other error diagnostic
-        # can still embed partial real rows (run_bzrk concatenates raw
-        # stdout with stderr on a failed query) and must be fenced too.
-        if err and out.startswith("bzrk result exceeded"):
-            out = (
-                f"Result exceeded BERSERK_MCP_MAX_RESULT_BYTES={MAX_BZRK_RESULT_BYTES}."
-                f" This tool's query is fixed — narrow the window, e.g. since='15m ago'."
-            )
-        elif ENVELOPE_ENABLED and not err:
-            # fence_body=True for all SIMPLE tools: host names, container
-            # names, service names, and metric names are all attacker-
-            # influenceable even when they're not log body content.
-            out = _envelope(name, since, out, fence_body=True)
-        elif not err:
-            # Success output for all SIMPLE tools is fenced -- same reason.
-            out = _fence_untrusted(out)
-        else:
-            # Error output for every SIMPLE tool -- JSON or not -- can carry
-            # partial real rows (run_bzrk concatenates raw stdout with
-            # stderr on a failed query), so it's fenced unconditionally.
-            # This branch used to only fence _SIMPLE_JSON_TOOLS' errors,
-            # leaving every non-JSON tool's generic (non-overflow) query
-            # failure completely unfenced -- caught by manual review after
-            # 4 Codex rounds missed it, confirmed by direct reproduction
-            # against list_hosts. The one caller that depends on this
-            # text's shape (handle_call's timeout/fail-cooldown check,
-            # ~line 3148) was changed to look for its marker as a substring
-            # rather than requiring an unfenced exact prefix, so fencing
-            # here doesn't break it.
-            out = _fence_untrusted(out)
-        return out, err
 
-    if name == "soc_new_services":
-        since = arguments.get("since") or "24h ago"
-        out, err = bzrk_search(Q_SOC_NEW_SERVICES, since)
-        if err:
-            return _fence_untrusted(out), True
-        baseline = parser_factory.load_json_dict(parser_factory._known_sources_path())
-        known = set(baseline.get("services", {}).keys())
-        if not known:
-            return (
-                "(no baseline — run detect_new_sources first to establish "
-                "known services; showing all active services)\n" + _fence_untrusted(out)
-            ), False
-        lines = out.strip().splitlines()
-        header = lines[0] if lines else ""
-        filtered = [header] if header else []
-        for line in lines[1:]:
-            svc_name = line.split()[0] if line.split() else ""
-            if svc_name and svc_name not in known:
-                filtered.append(line)
-        if len(filtered) <= 1:
-            return "No genuinely new services (all active services are in the baseline).", False
-        return _fence_untrusted("\n".join(filtered)), False
-
-    # --- tools needing input validation or extra calls ---
+def _handle_validated(name, arguments):
+    """Tools needing input validation or extra calls. Returns (text, is_error) or None."""
     if name == "self_check":
         results = _run_doctor_checks()
         code = _doctor_exit_code(results)
@@ -3428,6 +3350,11 @@ def _handle_call_uncached(name, arguments):
             fmt=str(arguments.get("format") or "markdown"),
             filename=str(arguments.get("filename") or ""),
         )
+    return None
+
+
+def _handle_tail(name, arguments):
+    """Tail tools: recommendation decisions, secret scan, ingestion advisor, CanonLoom. Returns (text, is_error) or None."""
     if name == "claude_record_recommendation_decision":
         return ai_finops.record_recommendation_decision(
             arguments.get("recommendation_id"), arguments.get("decision"),
@@ -3534,6 +3461,114 @@ def _handle_call_uncached(name, arguments):
         params.append(f"limit={limit}")
         qs = "?" + "&".join(params) if params else ""
         return _canonloom_call(f"/telemetry/runs{qs}", "GET")
+    return None
+
+
+def _handle_call_uncached(name, arguments):
+    """Dispatch a tools/call. Returns (text, is_error)."""
+    if name.startswith("saved__"):
+        # Dispatch target for a projected saved-query tool (see
+        # _saved_query_tools / issue #5). Resolves against the same
+        # role-filtered list run_saved uses, so a role-hidden entry is
+        # indistinguishable from a name that was never saved -- this is the
+        # enforcement F-008 relies on for callers that reach
+        # _handle_call_uncached directly, bypassing dispatch()'s matched_tool
+        # lookup (e.g. a direct handle_call() call, as most tests make).
+        target = name[len("saved__"):]
+        items = [it for it in load_learned() if item_visible(it)]
+        match = next((it for it in items if sanitize_name(it["name"]) == target), None)
+        if not match:
+            return "unknown tool: " + name, True
+        return _run_saved_entry(match, arguments.get("since"))
+
+    result = _handle_learning_loop(name, arguments)
+    if result is not None:
+        return result
+    result = _handle_discovery(name, arguments)
+    if result is not None:
+        return result
+    result = _handle_parser_factory(name, arguments)
+    if result is not None:
+        return result
+
+    # --- simple fixed-query tools ---
+    if name in SIMPLE or name in _AGENT_AWARE_SIMPLE:
+        if name in _AGENT_AWARE_SIMPLE:
+            kql_fn, default_since = _AGENT_AWARE_SIMPLE[name]
+            kql = kql_fn(arguments.get("agent") or "claude-code")
+        else:
+            kql, default_since = SIMPLE[name]
+        since = arguments.get("since") or default_since
+        if name in _SIMPLE_JSON_TOOLS:
+            out, err = bzrk_search_json(kql, since)
+        else:
+            out, err = bzrk_search(kql, since)
+        # Fencing (issue #11) is independent of ENVELOPE_ENABLED -- an
+        # operator disabling the envelope for byte-identical prior output
+        # must not also silently disable untrusted-data marking on the
+        # body-bearing subset. Also applies on the error path (round 2
+        # finding 4): the overflow rewrite below replaces `out` with a
+        # clean server message, safe as-is, but any other error diagnostic
+        # can still embed partial real rows (run_bzrk concatenates raw
+        # stdout with stderr on a failed query) and must be fenced too.
+        if err and out.startswith("bzrk result exceeded"):
+            out = (
+                f"Result exceeded BERSERK_MCP_MAX_RESULT_BYTES={MAX_BZRK_RESULT_BYTES}."
+                f" This tool's query is fixed — narrow the window, e.g. since='15m ago'."
+            )
+        elif ENVELOPE_ENABLED and not err:
+            # fence_body=True for all SIMPLE tools: host names, container
+            # names, service names, and metric names are all attacker-
+            # influenceable even when they're not log body content.
+            out = _envelope(name, since, out, fence_body=True)
+        elif not err:
+            # Success output for all SIMPLE tools is fenced -- same reason.
+            out = _fence_untrusted(out)
+        else:
+            # Error output for every SIMPLE tool -- JSON or not -- can carry
+            # partial real rows (run_bzrk concatenates raw stdout with
+            # stderr on a failed query), so it's fenced unconditionally.
+            # This branch used to only fence _SIMPLE_JSON_TOOLS' errors,
+            # leaving every non-JSON tool's generic (non-overflow) query
+            # failure completely unfenced -- caught by manual review after
+            # 4 Codex rounds missed it, confirmed by direct reproduction
+            # against list_hosts. The one caller that depends on this
+            # text's shape (handle_call's timeout/fail-cooldown check,
+            # ~line 3148) was changed to look for its marker as a substring
+            # rather than requiring an unfenced exact prefix, so fencing
+            # here doesn't break it.
+            out = _fence_untrusted(out)
+        return out, err
+
+    if name == "soc_new_services":
+        since = arguments.get("since") or "24h ago"
+        out, err = bzrk_search(Q_SOC_NEW_SERVICES, since)
+        if err:
+            return _fence_untrusted(out), True
+        baseline = parser_factory.load_json_dict(parser_factory._known_sources_path())
+        known = set(baseline.get("services", {}).keys())
+        if not known:
+            return (
+                "(no baseline — run detect_new_sources first to establish "
+                "known services; showing all active services)\n" + _fence_untrusted(out)
+            ), False
+        lines = out.strip().splitlines()
+        header = lines[0] if lines else ""
+        filtered = [header] if header else []
+        for line in lines[1:]:
+            svc_name = line.split()[0] if line.split() else ""
+            if svc_name and svc_name not in known:
+                filtered.append(line)
+        if len(filtered) <= 1:
+            return "No genuinely new services (all active services are in the baseline).", False
+        return _fence_untrusted("\n".join(filtered)), False
+
+    result = _handle_validated(name, arguments)
+    if result is not None:
+        return result
+    result = _handle_tail(name, arguments)
+    if result is not None:
+        return result
 
     return "unknown tool: " + str(name), True
 
