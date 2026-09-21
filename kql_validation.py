@@ -297,13 +297,251 @@ def _extract_referenced_fields(kql):
     return refs
 
 
+def _check_structure(query, table, since, max_chars, parts, stripped):
+    """Structural validity checks: empty/oversize query, since window, control
+    commands, semicolons, table prefix, unsafe/source-introducing operators.
+
+    `parts` and `stripped` are empty lists used as out-params: on return (unless
+    the oversize short-circuit fires) `parts` holds the split pipeline stages
+    and `stripped` holds a one-item list containing the string-stripped query,
+    so the caller can reuse them in later phases without recomputing.
+    """
+    findings = []
+    if not query.strip():
+        findings.append(_finding("EMPTY_QUERY", "error", "Query is empty."))
+    if len(query) > max_chars:
+        findings.append(_finding("QUERY_TOO_LONG", "error", f"Query exceeds {max_chars} characters."))
+        return findings
+    if not _SINCE_RE.match(since.strip()) or len(since) > 32:
+        findings.append(_finding("INVALID_SINCE", "error", f"Invalid since window: {since!r}."))
+    if _CONTROL_RE.match(query):
+        findings.append(_finding("CONTROL_COMMAND", "error", "Control commands are not allowed for user KQL."))
+    if ";" in query:
+        findings.append(
+            _finding(
+                "MULTI_STATEMENT_USER_QUERY",
+                "error",
+                "Semicolons are not allowed in user KQL, including string literals.",
+            )
+        )
+
+    computed_parts = _split_pipeline(query)
+    parts.extend(computed_parts)
+    if not computed_parts or computed_parts[0] != table or len(computed_parts) < 2:
+        findings.append(
+            _finding(
+                "WRONG_TABLE",
+                "error",
+                f"Query must begin with '{table} | ...'.",
+                recommendation=f"Start with: {table} | where ... | take 50",
+            )
+        )
+    computed_stripped = _strip_strings(query)
+    stripped.append(computed_stripped)
+    if _UNSAFE_RE.search(computed_stripped):
+        findings.append(_finding("UNSAFE_OPERATOR", "error", "Mutation-like or unsafe syntax is present."))
+    source_operator = _SOURCE_INTRODUCING_RE.search(computed_stripped)
+    if source_operator:
+        operator = next((part for part in source_operator.groups() if part), "externaldata")
+        findings.append(
+            _finding(
+                "SOURCE_INTRODUCING_OPERATOR",
+                "error",
+                f"Source-introducing operator {operator!r} is not allowed in user KQL.",
+                "pipeline",
+                "Query only the configured Berserk table through its existing pipeline.",
+            )
+        )
+    elif _in_clause_hides_tabular_subquery(computed_stripped):
+        findings.append(
+            _finding(
+                "SOURCE_INTRODUCING_OPERATOR",
+                "error",
+                "Source-introducing operator 'in' is not allowed in user KQL.",
+                "pipeline",
+                "Query only the configured Berserk table through its existing pipeline.",
+            )
+        )
+    return findings
+
+
+def _check_bounds(stripped, max_rows):
+    """Bounded-result checks. Returns (findings, bounds, has_count)."""
+    findings = []
+    bounds = []
+    for m in _BOUND_RE.finditer(stripped):
+        n = m.group(2) or m.group(3)
+        if n:
+            bounds.append(int(n))
+    has_count = bool(_COUNT_RE.search(stripped))
+    has_bound = bool(bounds) or has_count
+    if not has_bound and stripped.strip():
+        findings.append(
+            _finding(
+                "UNBOUNDED_RESULT",
+                "warning",
+                "Query has no explicit terminal result bound.",
+                "pipeline",
+                "End with take, top, tail, count, or a bounded summarize.",
+            )
+        )
+    for n in bounds:
+        if n > max_rows:
+            findings.append(
+                _finding(
+                    "RESULT_BOUND_TOO_LARGE",
+                    "warning",
+                    f"Explicit result bound {n} exceeds max_rows={max_rows}.",
+                    "pipeline",
+                    f"Use {max_rows} rows or fewer for arbitrary queries.",
+                )
+            )
+    return findings, bounds, has_count
+
+
+def _check_performance(stripped, parts, expensive_names, has_selective):
+    """Performance/pattern checks: expensive operators, sort ordering, missing
+    filters, raw scans, wide projections, series.
+
+    `expensive_names` is an empty list used as an out-param, filled with the
+    labels of any expensive operators found. `has_selective` is an empty list
+    used as a one-item out-param box holding the selective-filter bool.
+    """
+    findings = []
+    for rx, label in _EXPENSIVE_PATTERNS:
+        if rx.search(stripped):
+            expensive_names.append(label)
+    if expensive_names:
+        findings.append(
+            _finding(
+                "EXPENSIVE_OPERATOR",
+                "warning",
+                "Potentially expensive operator(s): " + ", ".join(sorted(set(expensive_names))) + ".",
+                "pipeline",
+                "Filter early and bound the result before using expensive operators.",
+            )
+        )
+
+    has_selective.append(bool(_SELECTIVE_RE.search(stripped)))
+    stages = [p.lower() for p in parts[1:]]
+    first_where = next((i for i, p in enumerate(stages) if p.startswith("where ")), None)
+    first_sort = next((i for i, p in enumerate(stages) if re.match(r"sort\s|order\s", p)), None)
+    if first_sort is not None and (first_where is None or first_sort < first_where):
+        findings.append(_finding("SORT_BEFORE_FILTER", "warning", "Sort occurs before a selective filter.", "pipeline"))
+    if first_sort is not None:
+        after_sort = " | ".join(stages[first_sort + 1 :])
+        if not _BOUND_RE.search(after_sort):
+            findings.append(
+                _finding("SORT_WITHOUT_BOUND", "warning", "Sort is not followed by a small take/top bound.", "pipeline")
+            )
+    if not has_selective[0] and (expensive_names or len(parts) <= 2 or "summarize" in stripped.lower()):
+        findings.append(
+            _finding(
+                "MISSING_SELECTIVE_FILTER",
+                "warning",
+                "Broad query has no early selective predicate.",
+                "pipeline",
+                "Filter by metric_name, service, host, severity, trace, or another selective field before aggregation.",
+            )
+        )
+    if _RAW_SCAN_RE.search(stripped):
+        findings.append(
+            _finding(
+                "RAW_CONTAINS_SCAN",
+                "warning",
+                "Broad text search scans raw body or $raw.",
+                "pipeline",
+                "Add a selective predicate and narrow time window before raw text search.",
+            )
+        )
+    if re.search(r"\bproject\b[^|]*(\bbody\b|\bresource\b|\battributes\b|\$raw)", stripped, re.IGNORECASE):
+        findings.append(
+            _finding(
+                "WIDE_PROJECTION",
+                "warning",
+                "Projection includes raw body/resource/attributes/$raw.",
+                "pipeline",
+                "Project specific bounded fields or substring raw text.",
+            )
+        )
+    if re.search(r"\bsummarize\b[^|]*\bby\b[^|]*(body|resource|attributes|\$raw)", stripped, re.IGNORECASE):
+        findings.append(
+            _finding("HIGH_CARDINALITY_GROUP", "warning", "Grouping uses a high-cardinality/raw field.", "pipeline")
+        )
+    if re.search(r"make-series", stripped, re.IGNORECASE):
+        dims = re.search(r"\bby\b([^|]+)", stripped, re.IGNORECASE)
+        if dims and dims.group(1).count(",") >= 2:
+            findings.append(
+                _finding("SERIES_TOO_WIDE", "warning", "make-series groups by too many dimensions.", "pipeline")
+            )
+    return findings
+
+
+def _check_schema(query, schema_fields, suggest):
+    """Unknown-field checks against the known schema."""
+    findings = []
+    known = _normalize_schema_fields(schema_fields)
+    unknown = []
+    if known:
+        for ref in sorted(_extract_referenced_fields(query)):
+            low = ref.lower()
+            if low in _FUNCTION_NAMES or low in _KQL_WORDS:
+                continue
+            if ref not in known:
+                unknown.append(ref)
+    for ref in unknown:
+        suggestions = []
+        if suggest:
+            try:
+                suggestions = list(suggest(ref))[:3]
+            except Exception:
+                suggestions = []
+        msg = f"Unknown field {ref!r}."
+        if suggestions:
+            msg += " Did you mean " + suggestions[0] + "?"
+        findings.append(
+            _finding(
+                "UNKNOWN_FIELD",
+                "warning",
+                msg,
+                "schema",
+                "Use discover_schema or a listed resource/attribute field.",
+            )
+        )
+    return findings
+
+
+def _compute_score(findings, has_selective, bounds, max_rows, stripped):
+    """Compute the aggregate risk score from findings and query shape."""
+    score = 0
+    for f in findings:
+        if f["severity"] == "error":
+            score += SCORE_WEIGHTS["blocked"]
+        elif f["code"] == "EXPENSIVE_OPERATOR":
+            score += SCORE_WEIGHTS["expensive_operator"]
+        elif f["code"] == "UNBOUNDED_RESULT":
+            score += SCORE_WEIGHTS["unbounded_result"]
+        elif f["code"] == "WIDE_PROJECTION":
+            score += SCORE_WEIGHTS["wide_projection"]
+        elif f["code"] == "RAW_CONTAINS_SCAN":
+            score += SCORE_WEIGHTS["raw_scan"]
+        elif f["code"] == "SORT_BEFORE_FILTER":
+            score += SCORE_WEIGHTS["sort_before_filter"]
+        elif f["code"] == "MISSING_SELECTIVE_FILTER":
+            score += SCORE_WEIGHTS["missing_filter"]
+    if has_selective:
+        score += SCORE_WEIGHTS["early_predicate"]
+    if bounds and max(bounds) <= min(max_rows, 100):
+        score += SCORE_WEIGHTS["small_bound"]
+    if _PROJECT_RE.search(stripped) and not re.search(r"\b(body|resource|attributes|\$raw)\b", stripped, re.IGNORECASE):
+        score += SCORE_WEIGHTS["narrow_projection"]
+    return max(0, min(100, score))
+
+
 def validate_kql_static(
     kql, *, table, since, schema_fields=None, max_chars=50000, max_rows=2000, suggest=None, schema_info=None
 ):
     """Return a deterministic validation report; never runs a subprocess."""
-    findings = []
-    recommendations = []
-    score = 0
     query = "" if kql is None else str(kql)
     table = str(table or "default")
     since = str(since or "")
@@ -312,10 +550,11 @@ def validate_kql_static(
     schema_info = dict(schema_info or {})
 
     try:
-        if not query.strip():
-            findings.append(_finding("EMPTY_QUERY", "error", "Query is empty."))
+        findings = []
+        parts = []
+        stripped_box = []
+        findings.extend(_check_structure(query, table, since, max_chars, parts, stripped_box))
         if len(query) > max_chars:
-            findings.append(_finding("QUERY_TOO_LONG", "error", f"Query exceeds {max_chars} characters."))
             return {
                 "valid": False,
                 "risk": "high",
@@ -327,209 +566,20 @@ def validate_kql_static(
                 "runtime": None,
                 "validation_version": VALIDATION_VERSION,
             }
-        if not _SINCE_RE.match(since.strip()) or len(since) > 32:
-            findings.append(_finding("INVALID_SINCE", "error", f"Invalid since window: {since!r}."))
-        if _CONTROL_RE.match(query):
-            findings.append(_finding("CONTROL_COMMAND", "error", "Control commands are not allowed for user KQL."))
-        if ";" in query:
-            findings.append(
-                _finding(
-                    "MULTI_STATEMENT_USER_QUERY",
-                    "error",
-                    "Semicolons are not allowed in user KQL, including string literals.",
-                )
-            )
+        stripped = stripped_box[0]
 
-        parts = _split_pipeline(query)
-        if not parts or parts[0] != table or len(parts) < 2:
-            findings.append(
-                _finding(
-                    "WRONG_TABLE",
-                    "error",
-                    f"Query must begin with '{table} | ...'.",
-                    recommendation=f"Start with: {table} | where ... | take 50",
-                )
-            )
-        stripped = _strip_strings(query)
-        if _UNSAFE_RE.search(stripped):
-            findings.append(_finding("UNSAFE_OPERATOR", "error", "Mutation-like or unsafe syntax is present."))
-        source_operator = _SOURCE_INTRODUCING_RE.search(stripped)
-        if source_operator:
-            operator = next((part for part in source_operator.groups() if part), "externaldata")
-            findings.append(
-                _finding(
-                    "SOURCE_INTRODUCING_OPERATOR",
-                    "error",
-                    f"Source-introducing operator {operator!r} is not allowed in user KQL.",
-                    "pipeline",
-                    "Query only the configured Berserk table through its existing pipeline.",
-                )
-            )
-        elif _in_clause_hides_tabular_subquery(stripped):
-            findings.append(
-                _finding(
-                    "SOURCE_INTRODUCING_OPERATOR",
-                    "error",
-                    "Source-introducing operator 'in' is not allowed in user KQL.",
-                    "pipeline",
-                    "Query only the configured Berserk table through its existing pipeline.",
-                )
-            )
-
-        bounds = []
-        for m in _BOUND_RE.finditer(stripped):
-            n = m.group(2) or m.group(3)
-            if n:
-                bounds.append(int(n))
-        has_count = bool(_COUNT_RE.search(stripped))
+        bound_findings, bounds, has_count = _check_bounds(stripped, max_rows)
+        findings.extend(bound_findings)
         has_bound = bool(bounds) or has_count
-        if not has_bound and query.strip():
-            findings.append(
-                _finding(
-                    "UNBOUNDED_RESULT",
-                    "warning",
-                    "Query has no explicit terminal result bound.",
-                    "pipeline",
-                    "End with take, top, tail, count, or a bounded summarize.",
-                )
-            )
-        for n in bounds:
-            if n > max_rows:
-                findings.append(
-                    _finding(
-                        "RESULT_BOUND_TOO_LARGE",
-                        "warning",
-                        f"Explicit result bound {n} exceeds max_rows={max_rows}.",
-                        "pipeline",
-                        f"Use {max_rows} rows or fewer for arbitrary queries.",
-                    )
-                )
 
         expensive_names = []
-        for rx, label in _EXPENSIVE_PATTERNS:
-            if rx.search(stripped):
-                expensive_names.append(label)
-        if expensive_names:
-            findings.append(
-                _finding(
-                    "EXPENSIVE_OPERATOR",
-                    "warning",
-                    "Potentially expensive operator(s): " + ", ".join(sorted(set(expensive_names))) + ".",
-                    "pipeline",
-                    "Filter early and bound the result before using expensive operators.",
-                )
-            )
+        has_selective_box = []
+        findings.extend(_check_performance(stripped, parts, expensive_names, has_selective_box))
+        has_selective = has_selective_box[0]
 
-        has_selective = bool(_SELECTIVE_RE.search(stripped))
-        stages = [p.lower() for p in parts[1:]]
-        first_where = next((i for i, p in enumerate(stages) if p.startswith("where ")), None)
-        first_sort = next((i for i, p in enumerate(stages) if re.match(r"sort\s|order\s", p)), None)
-        if first_sort is not None and (first_where is None or first_sort < first_where):
-            findings.append(
-                _finding("SORT_BEFORE_FILTER", "warning", "Sort occurs before a selective filter.", "pipeline")
-            )
-        if first_sort is not None:
-            after_sort = " | ".join(stages[first_sort + 1 :])
-            if not _BOUND_RE.search(after_sort):
-                findings.append(
-                    _finding(
-                        "SORT_WITHOUT_BOUND", "warning", "Sort is not followed by a small take/top bound.", "pipeline"
-                    )
-                )
-        if not has_selective and (expensive_names or len(parts) <= 2 or "summarize" in stripped.lower()):
-            findings.append(
-                _finding(
-                    "MISSING_SELECTIVE_FILTER",
-                    "warning",
-                    "Broad query has no early selective predicate.",
-                    "pipeline",
-                    "Filter by metric_name, service, host, severity, trace, or another selective field before aggregation.",
-                )
-            )
-        if _RAW_SCAN_RE.search(stripped):
-            findings.append(
-                _finding(
-                    "RAW_CONTAINS_SCAN",
-                    "warning",
-                    "Broad text search scans raw body or $raw.",
-                    "pipeline",
-                    "Add a selective predicate and narrow time window before raw text search.",
-                )
-            )
-        if re.search(r"\bproject\b[^|]*(\bbody\b|\bresource\b|\battributes\b|\$raw)", stripped, re.IGNORECASE):
-            findings.append(
-                _finding(
-                    "WIDE_PROJECTION",
-                    "warning",
-                    "Projection includes raw body/resource/attributes/$raw.",
-                    "pipeline",
-                    "Project specific bounded fields or substring raw text.",
-                )
-            )
-        if re.search(r"\bsummarize\b[^|]*\bby\b[^|]*(body|resource|attributes|\$raw)", stripped, re.IGNORECASE):
-            findings.append(
-                _finding("HIGH_CARDINALITY_GROUP", "warning", "Grouping uses a high-cardinality/raw field.", "pipeline")
-            )
-        if re.search(r"make-series", stripped, re.IGNORECASE):
-            dims = re.search(r"\bby\b([^|]+)", stripped, re.IGNORECASE)
-            if dims and dims.group(1).count(",") >= 2:
-                findings.append(
-                    _finding("SERIES_TOO_WIDE", "warning", "make-series groups by too many dimensions.", "pipeline")
-                )
+        findings.extend(_check_schema(query, schema_fields, suggest))
 
-        known = _normalize_schema_fields(schema_fields)
-        unknown = []
-        if known:
-            for ref in sorted(_extract_referenced_fields(query)):
-                low = ref.lower()
-                if low in _FUNCTION_NAMES or low in _KQL_WORDS:
-                    continue
-                if ref not in known:
-                    unknown.append(ref)
-        for ref in unknown:
-            suggestions = []
-            if suggest:
-                try:
-                    suggestions = list(suggest(ref))[:3]
-                except Exception:
-                    suggestions = []
-            msg = f"Unknown field {ref!r}."
-            if suggestions:
-                msg += " Did you mean " + suggestions[0] + "?"
-            findings.append(
-                _finding(
-                    "UNKNOWN_FIELD",
-                    "warning",
-                    msg,
-                    "schema",
-                    "Use discover_schema or a listed resource/attribute field.",
-                )
-            )
-
-        for f in findings:
-            if f["severity"] == "error":
-                score += SCORE_WEIGHTS["blocked"]
-            elif f["code"] == "EXPENSIVE_OPERATOR":
-                score += SCORE_WEIGHTS["expensive_operator"]
-            elif f["code"] == "UNBOUNDED_RESULT":
-                score += SCORE_WEIGHTS["unbounded_result"]
-            elif f["code"] == "WIDE_PROJECTION":
-                score += SCORE_WEIGHTS["wide_projection"]
-            elif f["code"] == "RAW_CONTAINS_SCAN":
-                score += SCORE_WEIGHTS["raw_scan"]
-            elif f["code"] == "SORT_BEFORE_FILTER":
-                score += SCORE_WEIGHTS["sort_before_filter"]
-            elif f["code"] == "MISSING_SELECTIVE_FILTER":
-                score += SCORE_WEIGHTS["missing_filter"]
-        if has_selective:
-            score += SCORE_WEIGHTS["early_predicate"]
-        if bounds and max(bounds) <= min(max_rows, 100):
-            score += SCORE_WEIGHTS["small_bound"]
-        if _PROJECT_RE.search(stripped) and not re.search(
-            r"\b(body|resource|attributes|\$raw)\b", stripped, re.IGNORECASE
-        ):
-            score += SCORE_WEIGHTS["narrow_projection"]
-        score = max(0, min(100, score))
+        score = _compute_score(findings, has_selective, bounds, max_rows, stripped)
 
         findings.sort(key=lambda f: (FINDING_ORDER.get(f["code"], 999), f["message"]))
         recommendations = [f["recommendation"] for f in findings if f.get("recommendation")]

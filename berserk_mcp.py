@@ -3586,8 +3586,8 @@ def _handle_discovery(name, arguments):
     return None
 
 
-def _handle_parser_factory(name, arguments):
-    """Parser-factory / diagnostic tools. Returns (text, is_error) or None."""
+def _handle_parser_core(name, arguments):
+    """Parser-factory tools: detect, generate, review. Returns (text, is_error) or None."""
     if name == "detect_new_sources":
         since = arguments.get("since") or "24h ago"
         auto_queue = arguments.get("auto_queue") is True
@@ -3650,73 +3650,78 @@ def _handle_parser_factory(name, arguments):
                 f"[{gb.get('provider', '?')}/{gb.get('model', '?')} @ {gb.get('ts', '?')}]"
             )
         return "Generated queries:\n" + "\n".join(lines), False
+    return None
 
-    if name == "validate_kql":
-        kql = arguments.get("kql")
-        if not kql:
-            return "missing required 'kql'", True
-        since = arguments.get("since") or "15m ago"
-        mode = str(arguments.get("mode") or "static").strip().lower()
-        if mode not in {"static", "live"}:
-            return "mode must be 'static' or 'live'", True
-        use_schema = arguments.get("use_schema", True) is not False
-        report = _validate_user_kql(
-            str(kql),
-            since,
-            use_schema=use_schema,
-            allow_refresh_schema=(mode == "live"),
-        )
-        if mode == "live":
-            if not KQL_LIVE_VALIDATION:
-                return (
-                    "live validation is disabled; set BERSERK_MCP_KQL_LIVE_VALIDATION=1 "
-                    "to allow validate_kql mode=live.",
-                    True,
-                )
-            if any(f.get("severity") == "error" for f in report.get("findings", [])):
-                return json.dumps(report, indent=2), True
-            budget = _window_budget(TOOL_BUDGET_SECONDS if TOOL_BUDGET_SECONDS > 0 else DEFAULT_TIMEOUT, since)
-            argv = ["-P", PROFILE, "search", str(kql), "--since", since]
-            if KQL_STATS_MODE != "off":
-                argv.append("--stats")
-            start = time.monotonic()
-            with _query_semaphore_slot(budget) as acquired:
-                if not acquired:
-                    return "Local MCP query queue is full; retry later or narrow the time window.", True
-                out, err = run_bzrk(argv, timeout=budget)
-            duration_ms = int((time.monotonic() - start) * 1000)
-            stats = kql_validation.parse_cli_stats(out if not err else "")
-            runtime = {
-                "duration_ms": duration_ms,
-                "timed_out": bool(err and str(out).lower().startswith("bzrk timed out")),
-                "rows_returned": stats.get("rows_returned"),
-                "rows_processed": stats.get("rows_processed"),
-                "bytes_scanned": stats.get("bytes_scanned"),
-                "engine_stats": stats.get("engine_stats", {}),
-                "stats_available": stats.get("stats_available", False),
-                "budget_seconds": budget,
-                "budget_compatible": not err,
-            }
-            report["runtime"] = runtime
-            if not stats.get("stats_available"):
-                report.setdefault("findings", []).append(
-                    {
-                        "code": "STATS_UNAVAILABLE",
-                        "severity": "info",
-                        "message": "Engine statistics were unavailable or unrecognized; duration was measured locally.",
-                        "location": "runtime",
-                        "recommendation": "",
-                    }
-                )
-            if err:
-                report["runtime_error"] = _fence_untrusted(out)
-            # `out` is already fenced above before being assigned into
-            # report; the taint tracker can't follow it through the
-            # dict-field write and json.dumps, but the fencing genuinely
-            # happened.
-            return json.dumps(report, indent=2), bool(err)  # nosemgrep: unfenced-bzrk-output-reaches-return
-        return json.dumps(report, indent=2), False
 
+def _handle_validate_kql(arguments):
+    """Handle the validate_kql tool. Returns (text, is_error)."""
+    kql = arguments.get("kql")
+    if not kql:
+        return "missing required 'kql'", True
+    since = arguments.get("since") or "15m ago"
+    mode = str(arguments.get("mode") or "static").strip().lower()
+    if mode not in {"static", "live"}:
+        return "mode must be 'static' or 'live'", True
+    use_schema = arguments.get("use_schema", True) is not False
+    report = _validate_user_kql(
+        str(kql),
+        since,
+        use_schema=use_schema,
+        allow_refresh_schema=(mode == "live"),
+    )
+    if mode == "live":
+        if not KQL_LIVE_VALIDATION:
+            return (
+                "live validation is disabled; set BERSERK_MCP_KQL_LIVE_VALIDATION=1 to allow validate_kql mode=live.",
+                True,
+            )
+        if any(f.get("severity") == "error" for f in report.get("findings", [])):
+            return json.dumps(report, indent=2), True
+        budget = _window_budget(TOOL_BUDGET_SECONDS if TOOL_BUDGET_SECONDS > 0 else DEFAULT_TIMEOUT, since)
+        argv = ["-P", PROFILE, "search", str(kql), "--since", since]
+        if KQL_STATS_MODE != "off":
+            argv.append("--stats")
+        start = time.monotonic()
+        with _query_semaphore_slot(budget) as acquired:
+            if not acquired:
+                return "Local MCP query queue is full; retry later or narrow the time window.", True
+            out, err = run_bzrk(argv, timeout=budget)
+        duration_ms = int((time.monotonic() - start) * 1000)
+        stats = kql_validation.parse_cli_stats(out if not err else "")
+        runtime = {
+            "duration_ms": duration_ms,
+            "timed_out": bool(err and str(out).lower().startswith("bzrk timed out")),
+            "rows_returned": stats.get("rows_returned"),
+            "rows_processed": stats.get("rows_processed"),
+            "bytes_scanned": stats.get("bytes_scanned"),
+            "engine_stats": stats.get("engine_stats", {}),
+            "stats_available": stats.get("stats_available", False),
+            "budget_seconds": budget,
+            "budget_compatible": not err,
+        }
+        report["runtime"] = runtime
+        if not stats.get("stats_available"):
+            report.setdefault("findings", []).append(
+                {
+                    "code": "STATS_UNAVAILABLE",
+                    "severity": "info",
+                    "message": "Engine statistics were unavailable or unrecognized; duration was measured locally.",
+                    "location": "runtime",
+                    "recommendation": "",
+                }
+            )
+        if err:
+            report["runtime_error"] = _fence_untrusted(out)
+        # `out` is already fenced above before being assigned into
+        # report; the taint tracker can't follow it through the
+        # dict-field write and json.dumps, but the fencing genuinely
+        # happened.
+        return json.dumps(report, indent=2), bool(err)  # nosemgrep: unfenced-bzrk-output-reaches-return
+    return json.dumps(report, indent=2), False
+
+
+def _handle_diagnostic_tools(name, arguments):
+    """Diagnostic tools: anomalies, investigation, forecast, drift, similarity. Returns (text, is_error) or None."""
     if name == "detect_anomalies":
         service = str(arguments.get("service") or "").strip()
         if service and not _valid_interpolated_name(service):
@@ -3811,9 +3816,14 @@ def _handle_parser_factory(name, arguments):
             "forecast date is inferred:\n" + _fence_untrusted(out)
         ), False
 
-    if name == "model_drift_check":
-        import model_drift
+    return _handle_drift_and_similarity(name, arguments)
 
+
+def _handle_model_drift(name, arguments):
+    """model_drift_check and model_drift_history. Returns (text, is_error) or None."""
+    import model_drift
+
+    if name == "model_drift_check":
         model = str(arguments.get("model") or "").strip()
         if model and not _valid_model_id(model):
             return "invalid model id (allowed: letters, digits, '.', '_', '-', '/')", True
@@ -3828,27 +3838,12 @@ def _handle_parser_factory(name, arguments):
         try:
             grouped = model_drift.group_by_model(out)
         except model_drift.BzrkResultParseError as exc:
-            # A parse failure is not "no data" -- reporting it as an error
-            # rather than silently returning "no canary results" is the
-            # same fix as --drift-report's below (see run_canary_pass's
-            # neighbor branch); found by Codex backtest, 2026-09-02.
             return _fence_untrusted(f"could not read canary results: {exc}"), True
         lines = []
         for model_name, series in grouped.items():
             verdict = model_drift.classify(series)
-            # The model name arrives from stored telemetry, so it is
-            # attacker-influenceable in the same way host names are in
-            # forecast_capacity -- fence it before returning it to a model.
             fenced = _fence_untrusted(model_name, inline=True)
             line = f"{fenced}: {verdict['verdict']} ({verdict['confidence']}) — {verdict['reason']}"
-            # The tool's own description promises "provider fingerprint
-            # status" regardless of verdict -- classify() correctly keeps
-            # the verdict "stable" when only the fingerprint moved (that's
-            # mechanism 2 vs mechanism 3 staying separate, by design), but
-            # nothing previously surfaced the fingerprint status itself in
-            # that case. Fingerprint values are stored telemetry too, so
-            # fence them the same as status/model (found by Codex
-            # backtest, 2026-09-02).
             if verdict["fingerprint_values"]:
                 fp_text = ", ".join(
                     f"{k}={_fence_untrusted(v[-1], inline=True)}"
@@ -3859,8 +3854,6 @@ def _handle_parser_factory(name, arguments):
         return f"Model drift (window {since}):\n" + "\n".join(lines), False
 
     if name == "model_drift_history":
-        import model_drift
-
         model = str(arguments.get("model") or "").strip()
         if not model or not _valid_model_id(model):
             return "model is required (allowed: letters, digits, '.', '_', '-', '/')", True
@@ -3883,16 +3876,6 @@ def _handle_parser_factory(name, arguments):
         for row in series_data:
             ts = row.get("timestamp", "?")
             acc = row.get("tool_accuracy", "?")
-            # status and the fingerprint fields all arrive from stored
-            # telemetry, the same untrusted-data boundary as the model
-            # name above, which is already fenced -- status was not
-            # (found by Codex review, 2026-09-02), and the fingerprint
-            # history the tool's own description promises was not
-            # rendered at all (found by Codex backtest, 2026-09-02).
-            # timestamp and accuracy are safe: timestamp is Berserk's own
-            # native column, not an attribute value, and accuracy is cast
-            # through toreal() in series_kql, so it can only ever be
-            # numeric or null.
             status = _fence_untrusted(row.get("status", "?"), inline=True)
             line = f"  {ts}: accuracy={acc}, status={status}"
             for key in ("behavioral_fingerprint", "provider_metadata_fingerprint"):
@@ -3902,6 +3885,14 @@ def _handle_parser_factory(name, arguments):
             lines.append(line)
         return "\n".join(lines), False
 
+    return None
+
+
+def _handle_drift_and_similarity(name, arguments):
+    """Model drift and semantic similarity tools. Returns (text, is_error) or None."""
+    result = _handle_model_drift(name, arguments)
+    if result is not None:
+        return result
     if name == "find_similar":
         description = str(arguments.get("description") or "").strip()
         if not description:
@@ -3939,15 +3930,21 @@ def _handle_parser_factory(name, arguments):
     return None
 
 
-def _handle_validated(name, arguments):
-    """Tools needing input validation or extra calls. Returns (text, is_error) or None."""
+def _handle_parser_factory(name, arguments):
+    """Parser-factory / diagnostic tools. Returns (text, is_error) or None."""
+    result = _handle_parser_core(name, arguments)
+    if result is not None:
+        return result
+    if name == "validate_kql":
+        return _handle_validate_kql(arguments)
+    return _handle_diagnostic_tools(name, arguments)
+
+
+def _handle_query_tools(name, arguments):
+    """Schema, service query, trace, and search tools. Returns (text, is_error) or None."""
     if name == "self_check":
         results = _run_doctor_checks()
         code = _doctor_exit_code(results)
-        # is_err only on "broken" (2) -- a "degraded" report (1, e.g. an
-        # optional integration unreachable) is a successful, informative
-        # call, not a failed one; it shouldn't trip fail-cooldown/retry
-        # handling meant for genuine tool-call failures.
         return json.dumps({"checks": results, "exit_code": code}, indent=2, sort_keys=True), code == 2
     if name == "schema":
         return do_schema()
@@ -3957,17 +3954,8 @@ def _handle_validated(name, arguments):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "1h ago"
         svc_str = str(svc) if svc else None
-        # Two perspectives: fieldstats (type/cardinality/representative values)
-        # and a tiny structural sample. The sample keeps raw values out of the
-        # inventory result while still showing which signal families exist.
         out1, e1 = bzrk_search(q_discover_fieldstats(svc_str), since)
         out2, e2 = bzrk_search(q_discover_sample(svc_str), since)
-        # Fence both unconditionally, not gated on that half's own error
-        # flag -- round-3 review found gating on e1/e2 individually left the
-        # OTHER half unfenced whenever only one of the two calls failed
-        # (round 2 finding 4's same lesson: err doesn't reliably indicate
-        # "no real content", so let _fence_untrusted's own content check
-        # decide, on every path, every time).
         fenced1 = _fence_untrusted(out1)
         fenced2 = _fence_untrusted(out2)
         return f"== resource fieldstats ==\n{fenced1}\n\n== sample rows ==\n{fenced2}", (e1 and e2)
@@ -3998,28 +3986,19 @@ def _handle_validated(name, arguments):
         since = arguments.get("since") or "6h ago"
         out, err = bzrk_search_json(q_soc_timeline(str(svc)), since)
         return _fence_untrusted(out), err
+    return _handle_search_tools(name, arguments)
+
+
+def _handle_search_tools(name, arguments):
+    """Trace, search, find_tool, and claude_search. Returns (text, is_error) or None."""
     if name == "trace_analyze":
         trace_id = arguments.get("trace_id")
         if not trace_id:
             return "missing required 'trace_id'", True
         if len(str(trace_id)) > MAX_TRACE_ID_CHARS or not _TRACE_ID_RE.fullmatch(str(trace_id)):
             return "invalid trace_id (allowed: letters and digits only)", True
-        # No time window on either half: a trace_id already scopes the query
-        # tightly, and the trace could be older than any reasonable default
-        # `since`. Two perspectives, like discover_schema: the span tree, then
-        # any logs sharing the same trace_id — treated as a failure only if
-        # BOTH halves fail, since a trace can legitimately have no logs.
         out1, e1 = bzrk_search(q_trace_analyze(str(trace_id)), "30d ago")
         out2, e2 = bzrk_search_json(q_trace_logs(str(trace_id)), "30d ago")
-        # Both halves fenced unconditionally (round 2 finding 4: err doesn't
-        # reliably indicate "no real content"). The span tree's own query
-        # (q_trace_analyze) projects span_name and service -- both
-        # attacker-influenceable free-text fields, not purely structural
-        # trace/span ids -- so it needs the same treatment as the
-        # correlated-logs half. A prior comment here incorrectly claimed
-        # spans were "structural, never fenced"; found wrong via a Semgrep
-        # taint-tracking rule (.semgrep/fence-untrusted-data.yml) flagging
-        # this exact line after 4+ review rounds missed it.
         out1 = _fence_untrusted(out1)
         out2 = _fence_untrusted(out2)
         return f"== spans ==\n{out1}\n\n== correlated logs ==\n{out2}", (e1 and e2)
@@ -4035,13 +4014,6 @@ def _handle_validated(name, arguments):
                 return _format_validation_rejection(report), True
             if KQL_VALIDATION_MODE == "warn":
                 warning = _format_validation_warnings(report)
-        # Always JSON: whether table-mode clips a wide `body`/`$raw` column
-        # depends on the calling process's terminal-width detection, not on
-        # anything visible in the KQL text -- confirmed empirically (see PR
-        # description) that identical queries clip under the real deployment
-        # path but not in a local interactive shell. Static detection from
-        # the query shape can't be trusted either direction, so arbitrary
-        # user KQL always gets full-fidelity output.
         out, err = bzrk_search_json(str(kql), since)
         if err:
             return _fence_untrusted(out), err
@@ -4082,6 +4054,11 @@ def _handle_validated(name, arguments):
         agent = arguments.get("agent") or "claude-code"
         out, err = bzrk_search_json(q_cc_search(str(term), agent), since)
         return _fence_untrusted(out), err
+    return None
+
+
+def _handle_analytics_tools(name, arguments):
+    """Claude analytics tools (loop, model-fit, burn, quota, cost, session, workflow). Returns (text, is_error) or None."""
     if name == "claude_loop_check":
         since = arguments.get("since") or "6h ago"
         if not valid_since(since):
@@ -4118,7 +4095,12 @@ def _handle_validated(name, arguments):
         if not valid_since(since):
             return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
         return _wrap_analytics(agent_analytics.claude_workflow_insights(since))
-    if name in {
+    return None
+
+
+def _handle_finops_tools(name, arguments):
+    """FinOps tools (spend, feature cost, economics, efficiency, recommendations, dashboard). Returns (text, is_error) or None."""
+    if name not in {
         "claude_spend_overview",
         "claude_feature_cost",
         "claude_project_economics",
@@ -4128,74 +4110,85 @@ def _handle_validated(name, arguments):
         "claude_management_report",
         "claude_generate_dashboard",
     }:
-        default_since = (
-            "7d ago"
-            if name
-            in {
-                "claude_spend_overview",
-                "claude_efficiency_insights",
-            }
-            else "90d ago"
-        )
-        if name == "claude_harness_recommendations":
-            default_since = "14d ago"
-        if name == "claude_optimization_impact":
-            default_since = "30d ago"
-        since = arguments.get("since") or default_since
-        if not valid_since(since):
-            return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
-        filters = {
-            key: str(arguments.get(key) or "").strip()
-            for key in ("team", "project", "repository", "feature", "agent", "harness", "model")
-            if arguments.get(key)
+        return None
+    default_since = (
+        "7d ago"
+        if name
+        in {
+            "claude_spend_overview",
+            "claude_efficiency_insights",
         }
-        if name == "claude_spend_overview":
-            try:
-                limit = int(arguments.get("limit", 20))
-            except (TypeError, ValueError):
-                return "limit must be an integer between 1 and 100", True
-            if not 1 <= limit <= 100:
-                return "limit must be an integer between 1 and 100", True
-            return ai_finops.spend_overview(
-                since,
-                group_by=arguments.get("group_by") or "day",
-                filters=filters,
-                limit=limit,
-            )
-        if name == "claude_feature_cost":
-            return ai_finops.feature_cost(arguments.get("feature_id"), since)
-        if name == "claude_project_economics":
-            return ai_finops.project_economics(arguments.get("project_id"), since)
-        if name == "claude_efficiency_insights":
-            return ai_finops.efficiency_insights(since, filters=filters)
-        if name == "claude_harness_recommendations":
-            return ai_finops.harness_recommendations(since, filters=filters)
-        if name == "claude_optimization_impact":
-            return ai_finops.optimization_impact(
-                str(arguments.get("agent_profile") or ""),
-                str(arguments.get("before_harness") or ""),
-                str(arguments.get("after_harness") or ""),
-                since=since,
-                project=str(arguments.get("project") or ""),
-            )
-        if name == "claude_management_report":
-            scope = str(arguments.get("scope") or "portfolio")
-            identifier = str(arguments.get("identifier") or "")
-            if scope in {"feature", "project"} and not identifier:
-                return f"{scope} scope requires 'identifier'", True
-            return ai_finops.management_report(scope, identifier, since)
-        return ai_finops.generate_dashboard(
-            dashboard=str(arguments.get("dashboard") or "portfolio"),
-            identifier=str(arguments.get("identifier") or ""),
-            since=since,
-            fmt=str(arguments.get("format") or "markdown"),
-            filename=str(arguments.get("filename") or ""),
+        else "90d ago"
+    )
+    if name == "claude_harness_recommendations":
+        default_since = "14d ago"
+    if name == "claude_optimization_impact":
+        default_since = "30d ago"
+    since = arguments.get("since") or default_since
+    if not valid_since(since):
+        return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
+    filters = {
+        key: str(arguments.get(key) or "").strip()
+        for key in ("team", "project", "repository", "feature", "agent", "harness", "model")
+        if arguments.get(key)
+    }
+    if name == "claude_spend_overview":
+        try:
+            limit = int(arguments.get("limit", 20))
+        except (TypeError, ValueError):
+            return "limit must be an integer between 1 and 100", True
+        if not 1 <= limit <= 100:
+            return "limit must be an integer between 1 and 100", True
+        return ai_finops.spend_overview(
+            since,
+            group_by=arguments.get("group_by") or "day",
+            filters=filters,
+            limit=limit,
         )
-    return None
+    if name == "claude_feature_cost":
+        return ai_finops.feature_cost(arguments.get("feature_id"), since)
+    if name == "claude_project_economics":
+        return ai_finops.project_economics(arguments.get("project_id"), since)
+    if name == "claude_efficiency_insights":
+        return ai_finops.efficiency_insights(since, filters=filters)
+    if name == "claude_harness_recommendations":
+        return ai_finops.harness_recommendations(since, filters=filters)
+    if name == "claude_optimization_impact":
+        return ai_finops.optimization_impact(
+            str(arguments.get("agent_profile") or ""),
+            str(arguments.get("before_harness") or ""),
+            str(arguments.get("after_harness") or ""),
+            since=since,
+            project=str(arguments.get("project") or ""),
+        )
+    if name == "claude_management_report":
+        scope = str(arguments.get("scope") or "portfolio")
+        identifier = str(arguments.get("identifier") or "")
+        if scope in {"feature", "project"} and not identifier:
+            return f"{scope} scope requires 'identifier'", True
+        return ai_finops.management_report(scope, identifier, since)
+    return ai_finops.generate_dashboard(
+        dashboard=str(arguments.get("dashboard") or "portfolio"),
+        identifier=str(arguments.get("identifier") or ""),
+        since=since,
+        fmt=str(arguments.get("format") or "markdown"),
+        filename=str(arguments.get("filename") or ""),
+    )
 
 
-def _handle_tail(name, arguments):
-    """Tail tools: recommendation decisions, secret scan, ingestion advisor, CanonLoom. Returns (text, is_error) or None."""
+def _handle_validated(name, arguments):
+    """Tools needing input validation or extra calls. Returns (text, is_error) or None."""
+    result = _handle_query_tools(name, arguments)
+    if result is not None:
+        return result
+    result = _handle_analytics_tools(name, arguments)
+    if result is not None:
+        return result
+    return _handle_finops_tools(name, arguments)
+
+
+def _handle_tail_core(name, arguments):
+    """Recommendation decisions, secret scan, ingestion advisor. Returns (text, is_error) or None."""
     if name == "claude_record_recommendation_decision":
         return ai_finops.record_recommendation_decision(
             arguments.get("recommendation_id"),
@@ -4233,8 +4226,11 @@ def _handle_tail(name, arguments):
             check_gap=check_gap,
             since=since,
         )
+    return None
 
-    # ── CanonLoom knowledge-pipeline tools ────────────────────────────────────
+
+def _handle_canonloom(name, arguments):
+    """CanonLoom knowledge-pipeline tools. Returns (text, is_error) or None."""
     if name == "canonloom_run_pipeline":
         url = str(arguments.get("url", "")).strip()
         if not url:
@@ -4299,6 +4295,14 @@ def _handle_tail(name, arguments):
         qs = "?" + "&".join(params) if params else ""
         return _canonloom_call(f"/telemetry/runs{qs}", "GET")
     return None
+
+
+def _handle_tail(name, arguments):
+    """Tail tools: recommendation decisions, secret scan, ingestion advisor, CanonLoom. Returns (text, is_error) or None."""
+    result = _handle_tail_core(name, arguments)
+    if result is not None:
+        return result
+    return _handle_canonloom(name, arguments)
 
 
 def _handle_call_uncached(name, arguments):
@@ -4973,59 +4977,61 @@ def dispatch(req):
         return _jsonrpc_error(-32603, "Internal error", id_)
 
 
-def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE_LEGACY):
-    """Dispatch a validated request envelope to the appropriate handler."""
+def _dispatch_discover(params, id_, mode):
+    """Handle server/discover. Returns response."""
+    if mode != PROTOCOL_MODE_MODERN:
+        if _modern_mcp_enabled() and _request_meta(params) is None:
+            return _jsonrpc_error(-32602, "Invalid params", id_)
+        requested = _requested_protocol_version(params)
+        if _modern_mcp_enabled() and requested and requested not in SUPPORTED_PROTOCOL_VERSIONS:
+            return _jsonrpc_unsupported_protocol(id_, requested)
+        if _modern_mcp_enabled() and requested != MCP_PROTOCOL_MODERN:
+            return _jsonrpc_error(-32602, "Invalid params", id_)
+        return _jsonrpc_error(-32601, "Method not found", id_)
+    if set(params) - {"_meta"}:
+        return _jsonrpc_error(-32602, "Invalid params", id_)
+    if not _valid_modern_meta(params):
+        return _jsonrpc_error(-32602, "Invalid params", id_)
+    return _jsonrpc_result(id_, _discover_result())
 
-    def _reply(result):
-        if is_notification:
-            return None
-        return _jsonrpc_result(id_, result)
 
+def _dispatch_tasks(method, params, id_, mode):
+    """Handle tasks/get and tasks/cancel. Returns response."""
+    if mode != PROTOCOL_MODE_MODERN:
+        return _jsonrpc_error(-32601, "Method not found", id_)
+    if set(params) - {"_meta", "taskId", "id"}:
+        return _jsonrpc_error(-32602, "Invalid params", id_)
+    if not _valid_modern_meta(params):
+        return _jsonrpc_error(-32602, "Invalid params", id_)
+    task_id = _task_id_from_params(params)
+    if task_id is None:
+        return _jsonrpc_error(-32602, "Invalid params", id_)
+    record = _task_lookup(task_id)
+    if record is None:
+        return _jsonrpc_error(-32602, "Unknown task", id_)
+    if method == "tasks/cancel":
+        with _TASK_LOCK:
+            current = _TASKS.get(task_id)
+            if current is None or current.get("role") != ACTIVE_ROLE:
+                return _jsonrpc_error(-32602, "Unknown task", id_)
+            if current.get("status") in {"pending", "running"}:
+                current["status"] = "cancelled"
+                current["updated_ts"] = _task_now()
+                current["updated_at"] = now_iso()
+            record = dict(current)
+    return _jsonrpc_result(id_, _task_result(record))
+
+
+def _dispatch_protocol(method, params, id_, is_notification, mode):
+    """Handle MCP protocol methods (discover, tasks, initialize, ping). Returns response or NOT_MATCHED."""
     if method == "server/discover":
         if is_notification:
             return None
-        if mode != PROTOCOL_MODE_MODERN:
-            if _modern_mcp_enabled() and _request_meta(params) is None:
-                return _jsonrpc_error(-32602, "Invalid params", id_)
-            requested = _requested_protocol_version(params)
-            if _modern_mcp_enabled() and requested and requested not in SUPPORTED_PROTOCOL_VERSIONS:
-                return _jsonrpc_unsupported_protocol(id_, requested)
-            if _modern_mcp_enabled() and requested != MCP_PROTOCOL_MODERN:
-                return _jsonrpc_error(-32602, "Invalid params", id_)
-            return _jsonrpc_error(-32601, "Method not found", id_)
-        if set(params) - {"_meta"}:
-            return _jsonrpc_error(-32602, "Invalid params", id_)
-        if not _valid_modern_meta(params):
-            return _jsonrpc_error(-32602, "Invalid params", id_)
-        return _jsonrpc_result(id_, _discover_result())
-
+        return _dispatch_discover(params, id_, mode)
     if method in {"tasks/get", "tasks/cancel"}:
         if is_notification:
             return None
-        if mode != PROTOCOL_MODE_MODERN:
-            return _jsonrpc_error(-32601, "Method not found", id_)
-        if set(params) - {"_meta", "taskId", "id"}:
-            return _jsonrpc_error(-32602, "Invalid params", id_)
-        if not _valid_modern_meta(params):
-            return _jsonrpc_error(-32602, "Invalid params", id_)
-        task_id = _task_id_from_params(params)
-        if task_id is None:
-            return _jsonrpc_error(-32602, "Invalid params", id_)
-        record = _task_lookup(task_id)
-        if record is None:
-            return _jsonrpc_error(-32602, "Unknown task", id_)
-        if method == "tasks/cancel":
-            with _TASK_LOCK:
-                current = _TASKS.get(task_id)
-                if current is None or current.get("role") != ACTIVE_ROLE:
-                    return _jsonrpc_error(-32602, "Unknown task", id_)
-                if current.get("status") in {"pending", "running"}:
-                    current["status"] = "cancelled"
-                    current["updated_ts"] = _task_now()
-                    current["updated_at"] = now_iso()
-                record = dict(current)
-        return _jsonrpc_result(id_, _task_result(record))
-
+        return _dispatch_tasks(method, params, id_, mode)
     if method == "initialize":
         if is_notification:
             return None
@@ -5050,92 +5056,92 @@ def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE
     if method == "notifications/initialized":
         if not is_notification:
             return _jsonrpc_error(-32600, "Invalid Request", id_)
-        if params:
-            return None
         return None
     if method == "ping":
         if params:
             if is_notification:
                 return None
             return _jsonrpc_error(-32602, "Invalid params", id_)
-        return _reply({})
-    if method == "tools/list":
-        # MCP permits request metadata on paginated list operations. Codex
-        # includes a progressToken in this envelope even for the initial,
-        # unpaginated tools/list request. We do not paginate, so only an empty
-        # cursor is accepted, but standard metadata must remain transparent.
-        if set(params) - {"_meta", "cursor"}:
-            if is_notification:
-                return None
-            return _jsonrpc_error(-32602, "Invalid params", id_)
-        if "_meta" in params and not isinstance(params["_meta"], dict):
-            if is_notification:
-                return None
-            return _jsonrpc_error(-32602, "Invalid params", id_)
-        if params.get("cursor") is not None:
-            if is_notification:
-                return None
-            return _jsonrpc_error(-32602, "Invalid params", id_)
+        if is_notification:
+            return None
+        return _jsonrpc_result(id_, {})
+
+    return "NOT_MATCHED"
+
+
+def _dispatch_tools_list(params, id_, is_notification, mode):
+    """Handle tools/list. Returns response or None."""
+    if set(params) - {"_meta", "cursor"}:
+        if is_notification:
+            return None
+        return _jsonrpc_error(-32602, "Invalid params", id_)
+    if "_meta" in params and not isinstance(params["_meta"], dict):
+        if is_notification:
+            return None
+        return _jsonrpc_error(-32602, "Invalid params", id_)
+    if params.get("cursor") is not None:
+        if is_notification:
+            return None
+        return _jsonrpc_error(-32602, "Invalid params", id_)
+    if mode == PROTOCOL_MODE_MODERN and not _valid_modern_meta(params):
+        if is_notification:
+            return None
+        return _jsonrpc_error(-32602, "Invalid params", id_)
+    if is_notification:
+        return None
+    return _jsonrpc_result(id_, _tool_list_result(mode))
+
+
+def _dispatch_tools_call(params, id_, mode):
+    """Handle tools/call (never a notification). Returns response."""
+    if mode == PROTOCOL_MODE_MODERN and not _valid_modern_meta(params):
+        return _jsonrpc_error(-32602, "Invalid params", id_)
+    name = params.get("name")
+    if not name or not isinstance(name, str):
+        return _jsonrpc_error(-32602, "Invalid params", id_)
+    arguments = params.get("arguments")
+    if arguments is not None and not isinstance(arguments, dict):
+        return _jsonrpc_error(-32602, "Invalid params", id_)
+    arguments = arguments or {}
+    _normalize_since_arg(arguments)
+    matched_tool = next((t for t in TOOLS + MGMT_TOOLS if t["name"] == name), None)
+    if matched_tool is None and name.startswith("saved__"):
+        matched_tool = next((t for t in _saved_query_tools() if t["name"] == name), None)
+    if matched_tool is not None and not tool_visible(matched_tool):
+        text, is_err = "unknown tool: " + name, True
+    else:
         if mode == PROTOCOL_MODE_MODERN:
-            if not _valid_modern_meta(params):
-                if is_notification:
-                    return None
-                return _jsonrpc_error(-32602, "Invalid params", id_)
-            return _reply(_tool_list_result(mode))
-        return _reply(_tool_list_result(mode))
+            input_required = _modern_preflight_input_required(name, arguments)
+            if input_required is not None:
+                return _jsonrpc_result(id_, input_required)
+            if name in _TASK_ELIGIBLE_TOOLS and arguments.get("as_task") is True and _client_supports_tasks(params):
+                task_args = dict(arguments)
+                task_args.pop("as_task", None)
+                task_result = _create_task(name, task_args, mode)
+                if task_result is None:
+                    return _jsonrpc_error(-32000, "Task limit reached", id_)
+                return _jsonrpc_result(id_, task_result)
+        text, is_err = handle_call(name, arguments)
+    text = secret_scan.apply_output_filter(
+        text,
+        mode=REDACT_MODE,
+        include_entropy=REDACT_ENTROPY,
+        pii_types=REDACT_PII_TYPES,
+    )
+    return _jsonrpc_result(id_, _tool_call_result(name, text, is_err, mode))
+
+
+def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE_LEGACY):
+    """Dispatch a validated request envelope to the appropriate handler."""
+    result = _dispatch_protocol(method, params, id_, is_notification, mode)
+    if result != "NOT_MATCHED":
+        return result
+    if method == "tools/list":
+        return _dispatch_tools_list(params, id_, is_notification, mode)
     if method == "tools/call":
         if is_notification:
             return None
-        if mode == PROTOCOL_MODE_MODERN and not _valid_modern_meta(params):
-            return _jsonrpc_error(-32602, "Invalid params", id_)
-        name = params.get("name")
-        if not name or not isinstance(name, str):
-            return _jsonrpc_error(-32602, "Invalid params", id_)
-        arguments = params.get("arguments")
-        if arguments is not None and not isinstance(arguments, dict):
-            return _jsonrpc_error(-32602, "Invalid params", id_)
-        arguments = arguments or {}
-        # Normalize before the modern preflight check below inspects `since`
-        # -- it runs before handle_call() and must see the same canonical
-        # value handle_call's own normalization would produce, or an
-        # unbounded natural-language window can skip the expensive-query
-        # confirmation its canonical spelling would have triggered.
-        _normalize_since_arg(arguments)
-        # F-008: tools/list already filters by role; tools/call must enforce
-        # the SAME predicate, or a client can invoke a tool that was never
-        # supposed to be visible in this role's lane just by naming it
-        # directly. A role-hidden tool is treated exactly like an unknown
-        # one (same message, same isError=true) -- it doesn't leak that a
-        # tool with that name exists but is merely hidden. saved__* tools
-        # are projected, not static, so they aren't in TOOLS + MGMT_TOOLS --
-        # look them up the same way tools/list built them, so one predicate
-        # (tool_visible) governs both static and projected tools.
-        matched_tool = next((t for t in TOOLS + MGMT_TOOLS if t["name"] == name), None)
-        if matched_tool is None and name.startswith("saved__"):
-            matched_tool = next((t for t in _saved_query_tools() if t["name"] == name), None)
-        if matched_tool is not None and not tool_visible(matched_tool):
-            text, is_err = "unknown tool: " + name, True
-        else:
-            if mode == PROTOCOL_MODE_MODERN:
-                input_required = _modern_preflight_input_required(name, arguments)
-                if input_required is not None:
-                    return _jsonrpc_result(id_, input_required)
-                if name in _TASK_ELIGIBLE_TOOLS and arguments.get("as_task") is True and _client_supports_tasks(params):
-                    task_args = dict(arguments)
-                    task_args.pop("as_task", None)
-                    task_result = _create_task(name, task_args, mode)
-                    if task_result is None:
-                        return _jsonrpc_error(-32000, "Task limit reached", id_)
-                    return _jsonrpc_result(id_, task_result)
-            text, is_err = handle_call(name, arguments)
-        text = secret_scan.apply_output_filter(
-            text,
-            mode=REDACT_MODE,
-            include_entropy=REDACT_ENTROPY,
-            pii_types=REDACT_PII_TYPES,
-        )
-        return _jsonrpc_result(id_, _tool_call_result(name, text, is_err, mode))
-
+        return _dispatch_tools_call(params, id_, mode)
     if is_notification:
         return None
     return _jsonrpc_error(-32601, "Method not found", id_)

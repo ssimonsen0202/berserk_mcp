@@ -85,19 +85,7 @@ def _credential_type(match):
     return key
 
 
-def _candidate_matches(text, include_entropy, pii_types):
-    for secret_type, pattern in _SECRET_PATTERNS:
-        for match in pattern.finditer(text):
-            yield match.start(), match.end(), secret_type
-    for match in _GENERIC_CREDENTIAL.finditer(text):
-        yield match.start(), match.end(), _credential_type(match)
-
-    if include_entropy:
-        for match in _ENTROPY_TOKEN.finditer(text):
-            value = match.group(0)
-            if _entropy(value) >= 4.0:
-                yield match.start(), match.end(), "high_entropy"
-
+def _pii_matches(text, pii_types):
     if "email" in pii_types:
         for match in _EMAIL.finditer(text):
             yield match.start(), match.end(), "email"
@@ -126,6 +114,20 @@ def _candidate_matches(text, include_entropy, pii_types):
         if pii_type in pii_types:
             for match in pattern.finditer(text):
                 yield match.start(), match.end(), pii_type
+
+
+def _candidate_matches(text, include_entropy, pii_types):
+    for secret_type, pattern in _SECRET_PATTERNS:
+        for match in pattern.finditer(text):
+            yield match.start(), match.end(), secret_type
+    for match in _GENERIC_CREDENTIAL.finditer(text):
+        yield match.start(), match.end(), _credential_type(match)
+    if include_entropy:
+        for match in _ENTROPY_TOKEN.finditer(text):
+            value = match.group(0)
+            if _entropy(value) >= 4.0:
+                yield match.start(), match.end(), "high_entropy"
+    yield from _pii_matches(text, pii_types)
 
 
 MAX_REDACT_CHARS = 1_000_000

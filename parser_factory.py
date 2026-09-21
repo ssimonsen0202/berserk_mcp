@@ -618,6 +618,81 @@ def _q_metric_sample(source):
     )
 
 
+def _profile_service_source(source, kind, since):
+    """Profile a service-kind source via fieldstats + sample queries.
+    Returns (parts_dict, errors_list) on success, or (None, error_text) if
+    redaction fails and profiling must abort."""
+    parts = {}
+    errors = []
+
+    stats_out, stats_err = _bzrk_search(_q_fieldstats(source, kind), since)
+    if stats_err:
+        errors.append(f"fieldstats: {_safe_diag_text(stats_out)}")
+    else:
+        try:
+            parts["fieldstats_excerpt"] = _safe_excerpt(stats_out, GETSCHEMA_EXCERPT_CAP)
+        except (RuntimeError, TypeError) as exc:
+            return None, f"redaction failed for fieldstats: {type(exc).__name__}"
+        stats_keys = _parse_fieldstats_keys(stats_out)
+        if stats_keys:
+            parts["resource_keys"] = stats_keys
+    sample_out, sample_err = _bzrk_search(_q_discover_sample(source), since)
+    if sample_err:
+        errors.append(f"sample: {_safe_diag_text(sample_out)}")
+    else:
+        sample_keys = _sample_resource_keys(sample_out)
+        if sample_keys:
+            parts["resource_keys"] = sample_keys
+        # SEC-001: this is real telemetry row content -- the one field
+        # in this profile most likely to carry an actual credential or
+        # PII, since discover_sample projects raw resource/attributes/
+        # body. Redact before it's capped, persisted below, or embedded
+        # in an outbound LLM prompt by generate_parser_for.
+        try:
+            parts["sample_excerpt"] = _safe_excerpt(sample_out, SAMPLE_EXCERPT_CAP)
+        except (RuntimeError, TypeError) as exc:
+            return None, f"redaction failed for sample: {type(exc).__name__}"
+
+    # Older/alternate renderers may not display the bag-key array. Keep
+    # the compact keys query as a compatibility fallback, but do not pay
+    # for it when the structural sample already answered the question.
+    if "resource_keys" not in parts:
+        keys_out, keys_err = _bzrk_search(_q_discover_keys(source), since)
+        if keys_err:
+            errors.append(f"keys: {_safe_diag_text(keys_out)}")
+        else:
+            parts["resource_keys_raw"] = keys_out
+
+    return parts, errors
+
+
+def _profile_metric_source(source, kind, since):
+    """Profile a metric-kind source via fieldstats + sample queries.
+    Returns (parts_dict, errors_list) on success, or (None, error_text) if
+    redaction fails and profiling must abort."""
+    parts = {}
+    errors = []
+
+    stats_out, stats_err = _bzrk_search(_q_fieldstats(source, kind), since)
+    if stats_err:
+        errors.append(f"fieldstats: {_safe_diag_text(stats_out)}")
+    else:
+        try:
+            parts["fieldstats_excerpt"] = _safe_excerpt(stats_out, GETSCHEMA_EXCERPT_CAP)
+        except (RuntimeError, TypeError) as exc:
+            return None, f"redaction failed for fieldstats: {type(exc).__name__}"
+    sample_out, sample_err = _bzrk_search(_q_metric_sample(source), since)
+    if sample_err:
+        errors.append(f"sample: {_safe_diag_text(sample_out)}")
+    else:
+        try:
+            parts["sample_excerpt"] = _safe_excerpt(sample_out, SAMPLE_EXCERPT_CAP)
+        except (RuntimeError, TypeError) as exc:
+            return None, f"redaction failed for sample: {type(exc).__name__}"
+
+    return parts, errors
+
+
 def build_source_profile(source, kind, since):
     """Profile a source via getschema + keys/sample queries. Returns
     (profile_dict, None) or (None, error_text)."""
@@ -627,64 +702,13 @@ def build_source_profile(source, kind, since):
     source = str(source)
     if len(source) > 128 or not re.fullmatch(r"[A-Za-z0-9._-]+", source):
         return None, "invalid source name (allowed: letters, digits, '.', '_', '-')"
-    parts = {}
-    errors = []
 
     if kind == "service":
-        stats_out, stats_err = _bzrk_search(_q_fieldstats(source, kind), since)
-        if stats_err:
-            errors.append(f"fieldstats: {_safe_diag_text(stats_out)}")
-        else:
-            try:
-                parts["fieldstats_excerpt"] = _safe_excerpt(stats_out, GETSCHEMA_EXCERPT_CAP)
-            except (RuntimeError, TypeError) as exc:
-                return None, f"redaction failed for fieldstats: {type(exc).__name__}"
-            stats_keys = _parse_fieldstats_keys(stats_out)
-            if stats_keys:
-                parts["resource_keys"] = stats_keys
-        sample_out, sample_err = _bzrk_search(_q_discover_sample(source), since)
-        if sample_err:
-            errors.append(f"sample: {_safe_diag_text(sample_out)}")
-        else:
-            sample_keys = _sample_resource_keys(sample_out)
-            if sample_keys:
-                parts["resource_keys"] = sample_keys
-            # SEC-001: this is real telemetry row content -- the one field
-            # in this profile most likely to carry an actual credential or
-            # PII, since discover_sample projects raw resource/attributes/
-            # body. Redact before it's capped, persisted below, or embedded
-            # in an outbound LLM prompt by generate_parser_for.
-            try:
-                parts["sample_excerpt"] = _safe_excerpt(sample_out, SAMPLE_EXCERPT_CAP)
-            except (RuntimeError, TypeError) as exc:
-                return None, f"redaction failed for sample: {type(exc).__name__}"
-
-        # Older/alternate renderers may not display the bag-key array. Keep
-        # the compact keys query as a compatibility fallback, but do not pay
-        # for it when the structural sample already answered the question.
-        if "resource_keys" not in parts:
-            keys_out, keys_err = _bzrk_search(_q_discover_keys(source), since)
-            if keys_err:
-                errors.append(f"keys: {_safe_diag_text(keys_out)}")
-            else:
-                parts["resource_keys_raw"] = keys_out
+        parts, errors = _profile_service_source(source, kind, since)
     else:
-        stats_out, stats_err = _bzrk_search(_q_fieldstats(source, kind), since)
-        if stats_err:
-            errors.append(f"fieldstats: {_safe_diag_text(stats_out)}")
-        else:
-            try:
-                parts["fieldstats_excerpt"] = _safe_excerpt(stats_out, GETSCHEMA_EXCERPT_CAP)
-            except (RuntimeError, TypeError) as exc:
-                return None, f"redaction failed for fieldstats: {type(exc).__name__}"
-        sample_out, sample_err = _bzrk_search(_q_metric_sample(source), since)
-        if sample_err:
-            errors.append(f"sample: {_safe_diag_text(sample_out)}")
-        else:
-            try:
-                parts["sample_excerpt"] = _safe_excerpt(sample_out, SAMPLE_EXCERPT_CAP)
-            except (RuntimeError, TypeError) as exc:
-                return None, f"redaction failed for sample: {type(exc).__name__}"
+        parts, errors = _profile_metric_source(source, kind, since)
+    if parts is None:
+        return None, errors
 
     schema_out, schema_err = _cached_getschema(since)
     if schema_err:
@@ -784,6 +808,106 @@ def _hash_keys(keys):
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
+def _check_drift(live_services, known_services, baseline, since):
+    """Detect services whose resource-key shape changed since the baseline.
+    Mutates `baseline` in place (updates each drifted/known service's
+    keys_hash) and returns the list of drifted service names."""
+    drifted_services = []
+    # One grouped scan replaces one round trip per known service.
+    keys_out, keys_err = _bzrk_search(_q_discover_keys_batch(), since)
+    if not keys_err:
+        grouped_keys = _parse_batch_resource_keys(keys_out)
+        # Compatibility with an older renderer/test double that
+        # returns the ungrouped `key n` shape even for the batch
+        # request. Apply that one key set to each live service rather
+        # than silently discarding drift information.
+        legacy_keys = _safe_resource_keys(keys_out) if not grouped_keys else []
+        for svc in sorted(live_services & known_services):
+            keys = grouped_keys.get(svc, legacy_keys)
+            new_hash = _hash_keys(keys)
+            old_hash = baseline.get("services", {}).get(svc, {}).get("keys_hash")
+            if old_hash and old_hash != new_hash:
+                drifted_services.append(svc)
+            if svc in baseline.get("services", {}):
+                baseline["services"][svc]["keys_hash"] = new_hash
+    return drifted_services
+
+
+def _auto_queue_new(
+    new_services,
+    drifted_services,
+    baseline,
+    discovery_queue_path,
+    load_json_list,
+    save_json_list,
+    active_role,
+):
+    """Enqueue newly-discovered/drifted services onto the discovery queue,
+    up to the per-run cap. Mutates `baseline` in place (seeds first_seen for
+    any queued service not already known) and returns the list of service
+    names actually queued this run."""
+    queued = []
+    to_queue = (new_services + drifted_services)[:MAX_AUTOQUEUE_PER_RUN]
+    if to_queue and discovery_queue_path is not None:
+        with _FileLock(discovery_queue_path):
+            queue = load_json_list(discovery_queue_path)
+            for svc in to_queue:
+                rb = "drift-detect" if svc in drifted_services else "auto-detect"
+                _enqueue_job(queue, svc, "service", rb, active_role)
+                queued.append(svc)
+                if svc not in baseline["services"]:
+                    baseline["services"][svc] = {"first_seen": _now_iso()}
+            queue = queue[-500:]
+            save_json_list(discovery_queue_path, queue)
+    return queued
+
+
+def _format_discovery_summary(
+    is_first_run,
+    live_services,
+    live_metrics,
+    new_services,
+    new_metrics,
+    drifted_services,
+    queued,
+    svc_err,
+    met_err,
+):
+    """Render the human-readable summary string for a detect_new_sources run."""
+    if is_first_run:
+        return f"baseline initialized with {len(live_services)} services, {len(live_metrics)} metrics (queued nothing)"
+
+    warnings = []
+    if svc_err:
+        warnings.append("(services query failed — services dimension skipped)")
+    if met_err:
+        warnings.append("(metrics query failed — metrics dimension skipped)")
+
+    if not new_services and not new_metrics and not drifted_services:
+        if warnings:
+            return "No new sources " + " ".join(warnings)
+        return "No new sources."
+
+    lines = []
+    if warnings:
+        lines.extend(warnings)
+    if new_services:
+        lines.append(f"new_services ({len(new_services)}): " + ", ".join(new_services))
+    if drifted_services:
+        lines.append(f"drifted_services ({len(drifted_services)}): " + ", ".join(drifted_services))
+    if new_metrics:
+        lines.append(f"new_metrics ({len(new_metrics)}) recorded, not queued (infra)")
+    if queued:
+        deferred = (len(new_services) + len(drifted_services)) - len(queued)
+        lines.append(
+            f"queued {len(queued)} service(s) this run (cap {MAX_AUTOQUEUE_PER_RUN})"
+            + (f", {deferred} deferred to next run" if deferred > 0 else "")
+            + ": "
+            + ", ".join(queued)
+        )
+    return "\n".join(lines)
+
+
 def detect_new_sources(
     since="24h ago",
     auto_queue=False,
@@ -836,23 +960,7 @@ def detect_new_sources(
         drifted_services = []
 
         if check_drift and not is_first_run and live_services is not None:
-            # One grouped scan replaces one round trip per known service.
-            keys_out, keys_err = _bzrk_search(_q_discover_keys_batch(), since)
-            if not keys_err:
-                grouped_keys = _parse_batch_resource_keys(keys_out)
-                # Compatibility with an older renderer/test double that
-                # returns the ungrouped `key n` shape even for the batch
-                # request. Apply that one key set to each live service rather
-                # than silently discarding drift information.
-                legacy_keys = _safe_resource_keys(keys_out) if not grouped_keys else []
-                for svc in sorted(live_services & known_services):
-                    keys = grouped_keys.get(svc, legacy_keys)
-                    new_hash = _hash_keys(keys)
-                    old_hash = baseline.get("services", {}).get(svc, {}).get("keys_hash")
-                    if old_hash and old_hash != new_hash:
-                        drifted_services.append(svc)
-                    if svc in baseline.get("services", {}):
-                        baseline["services"][svc]["keys_hash"] = new_hash
+            drifted_services = _check_drift(live_services, known_services, baseline, since)
 
         baseline.setdefault("services", {})
         baseline.setdefault("metrics", {})
@@ -869,18 +977,15 @@ def detect_new_sources(
                     if svc not in baseline["services"]:
                         baseline["services"][svc] = {"first_seen": _now_iso()}
         else:
-            to_queue = (new_services + drifted_services)[:MAX_AUTOQUEUE_PER_RUN]
-            if to_queue and discovery_queue_path is not None:
-                with _FileLock(discovery_queue_path):
-                    queue = load_json_list(discovery_queue_path)
-                    for svc in to_queue:
-                        rb = "drift-detect" if svc in drifted_services else "auto-detect"
-                        _enqueue_job(queue, svc, "service", rb, active_role)
-                        queued.append(svc)
-                        if svc not in baseline["services"]:
-                            baseline["services"][svc] = {"first_seen": _now_iso()}
-                    queue = queue[-500:]
-                    save_json_list(discovery_queue_path, queue)
+            queued = _auto_queue_new(
+                new_services,
+                drifted_services,
+                baseline,
+                discovery_queue_path,
+                load_json_list,
+                save_json_list,
+                active_role,
+            )
 
         if len(baseline["services"]) > MAX_BASELINE_ENTRIES:
             baseline["services"] = dict(list(baseline["services"].items())[-MAX_BASELINE_ENTRIES:])
@@ -889,38 +994,17 @@ def detect_new_sources(
 
         save_json_dict(_known_sources_path(), baseline)
 
-    if is_first_run:
-        return f"baseline initialized with {len(live_services)} services, {len(live_metrics)} metrics (queued nothing)"
-
-    warnings = []
-    if svc_err:
-        warnings.append("(services query failed — services dimension skipped)")
-    if met_err:
-        warnings.append("(metrics query failed — metrics dimension skipped)")
-
-    if not new_services and not new_metrics and not drifted_services:
-        if warnings:
-            return "No new sources " + " ".join(warnings)
-        return "No new sources."
-
-    lines = []
-    if warnings:
-        lines.extend(warnings)
-    if new_services:
-        lines.append(f"new_services ({len(new_services)}): " + ", ".join(new_services))
-    if drifted_services:
-        lines.append(f"drifted_services ({len(drifted_services)}): " + ", ".join(drifted_services))
-    if new_metrics:
-        lines.append(f"new_metrics ({len(new_metrics)}) recorded, not queued (infra)")
-    if queued:
-        deferred = (len(new_services) + len(drifted_services)) - len(queued)
-        lines.append(
-            f"queued {len(queued)} service(s) this run (cap {MAX_AUTOQUEUE_PER_RUN})"
-            + (f", {deferred} deferred to next run" if deferred > 0 else "")
-            + ": "
-            + ", ".join(queued)
-        )
-    return "\n".join(lines)
+    return _format_discovery_summary(
+        is_first_run,
+        live_services,
+        live_metrics,
+        new_services,
+        new_metrics,
+        drifted_services,
+        queued,
+        svc_err,
+        met_err,
+    )
 
 
 def _enqueue_job(queue, target, kind, requested_by, active_role):
@@ -1159,67 +1243,10 @@ def validate_generated_query(q):
     return True, None, warning
 
 
-def generate_parser_for(job):
-    """Run the full generation pipeline for one discovery job.
-    Returns (report_dict, ok_bool)."""
-    try:
-        source = job["source"]
-        kind = job["kind"]
-    except (KeyError, TypeError) as e:
-        return _bound_report(
-            {
-                "status": "needs_human",
-                "reason": f"malformed job entry: missing {e}",
-            }
-        ), False
-    role_hint = job.get("role_hint") or ""
-
-    # F-005: one monotonic deadline spans the whole job -- profiling, model
-    # discovery, every provider call, query verification, and retries -- not
-    # just each individual HTTP call's own timeout.
-    deadline = time.monotonic() + JOB_DEADLINE_SECONDS
-
-    profile, err = build_source_profile(source, kind, "24h ago")
-    if err:
-        return _bound_report(
-            {
-                "status": "needs_human",
-                "reason": f"profiling failed: {err}",
-            }
-        ), False
-
-    if time.monotonic() >= deadline:
-        return _bound_report(
-            {
-                "status": "needs_human",
-                "reason": f"job deadline ({JOB_DEADLINE_SECONDS}s) exceeded during profiling",
-            }
-        ), False
-
-    schema_context = ""
-    schema_hash = ""
-    schema_status = ""
-    if _schema_context_provider is not None:
-        try:
-            schema_context, schema_hash, schema_status = _schema_context_provider()
-        except Exception as e:
-            schema_context = f"(schema context unavailable: {type(e).__name__})"
-            schema_status = "unavailable"
-
-    user_prompt_base = (
-        KQL_IDIOMS + "\n\n"
-        "Confirmed schema context for this Berserk cluster:\n"
-        f"{schema_context}\n\n"
-        "Generated KQL must use only confirmed fields, must preserve explicit bounds "
-        "and narrow projections, and must pass static validation before execution.\n\n"
-        f"Source: {source} (kind={kind})\n"
-        f"Target role: {role_hint or 'none specified'}\n"
-        f"Resource keys: {', '.join(profile['resource_keys']) or '(none discovered)'}\n"
-        f"{_fence_sample_data(profile.get('fieldstats_excerpt', ''))}\n\n"
-        f"{_fence_sample_data(profile['getschema_excerpt'])}\n\n"
-        f"{_fence_sample_data(profile['sample_excerpt'])}\n"
-    )
-
+def _run_provider_ladder(user_prompt_base, deadline, source):
+    """Run the provider retry ladder for parser generation. Returns
+    (validated_queries, used_provider, used_model, last_errors, warnings,
+    budget_exhausted, attempts_used)."""
     last_errors = []
     used_provider = None
     used_model = None
@@ -1286,22 +1313,23 @@ def generate_parser_for(job):
         if provider_failed_immediately:
             continue
 
-    if not validated_queries:
-        reason = (
-            "job deadline exceeded"
-            if time.monotonic() >= deadline
-            else "attempt budget exhausted"
-            if budget_exhausted
-            else "all providers exhausted"
-        )
-        return _bound_report(
-            {
-                "status": "needs_human",
-                "reason": reason,
-                "last_errors": last_errors,
-            }
-        ), False
+    return validated_queries, used_provider, used_model, last_errors, warnings, budget_exhausted, attempts_used
 
+
+def _persist_validated_queries(
+    validated_queries,
+    source,
+    kind,
+    used_provider,
+    used_model,
+    schema_hash,
+    schema_status,
+    warnings,
+    role_hint,
+    attempts_used,
+):
+    """Persist validated generated queries and update schema knowledge with
+    the verified query names. Returns (report_dict, ok_bool)."""
     saved_names = []
     for q in validated_queries:
         entry = {
@@ -1365,3 +1393,104 @@ def generate_parser_for(job):
     # dict directly -- warnings/queries_saved live there, not at the
     # top level of the {"status", "report"} envelope.
     return {"status": "done", "report": _bound_report(report)}, True
+
+
+def generate_parser_for(job):
+    """Run the full generation pipeline for one discovery job.
+    Returns (report_dict, ok_bool)."""
+    try:
+        source = job["source"]
+        kind = job["kind"]
+    except (KeyError, TypeError) as e:
+        return _bound_report(
+            {
+                "status": "needs_human",
+                "reason": f"malformed job entry: missing {e}",
+            }
+        ), False
+    role_hint = job.get("role_hint") or ""
+
+    # F-005: one monotonic deadline spans the whole job -- profiling, model
+    # discovery, every provider call, query verification, and retries -- not
+    # just each individual HTTP call's own timeout.
+    deadline = time.monotonic() + JOB_DEADLINE_SECONDS
+
+    profile, err = build_source_profile(source, kind, "24h ago")
+    if err:
+        return _bound_report(
+            {
+                "status": "needs_human",
+                "reason": f"profiling failed: {err}",
+            }
+        ), False
+
+    if time.monotonic() >= deadline:
+        return _bound_report(
+            {
+                "status": "needs_human",
+                "reason": f"job deadline ({JOB_DEADLINE_SECONDS}s) exceeded during profiling",
+            }
+        ), False
+
+    schema_context = ""
+    schema_hash = ""
+    schema_status = ""
+    if _schema_context_provider is not None:
+        try:
+            schema_context, schema_hash, schema_status = _schema_context_provider()
+        except Exception as e:
+            schema_context = f"(schema context unavailable: {type(e).__name__})"
+            schema_status = "unavailable"
+
+    user_prompt_base = (
+        KQL_IDIOMS + "\n\n"
+        "Confirmed schema context for this Berserk cluster:\n"
+        f"{schema_context}\n\n"
+        "Generated KQL must use only confirmed fields, must preserve explicit bounds "
+        "and narrow projections, and must pass static validation before execution.\n\n"
+        f"Source: {source} (kind={kind})\n"
+        f"Target role: {role_hint or 'none specified'}\n"
+        f"Resource keys: {', '.join(profile['resource_keys']) or '(none discovered)'}\n"
+        f"{_fence_sample_data(profile.get('fieldstats_excerpt', ''))}\n\n"
+        f"{_fence_sample_data(profile['getschema_excerpt'])}\n\n"
+        f"{_fence_sample_data(profile['sample_excerpt'])}\n"
+    )
+
+    (
+        validated_queries,
+        used_provider,
+        used_model,
+        last_errors,
+        warnings,
+        budget_exhausted,
+        attempts_used,
+    ) = _run_provider_ladder(user_prompt_base, deadline, source)
+
+    if not validated_queries:
+        reason = (
+            "job deadline exceeded"
+            if time.monotonic() >= deadline
+            else "attempt budget exhausted"
+            if budget_exhausted
+            else "all providers exhausted"
+        )
+        return _bound_report(
+            {
+                "status": "needs_human",
+                "reason": reason,
+                "last_errors": last_errors,
+            }
+        ), False
+
+    return _persist_validated_queries(
+        validated_queries,
+        source,
+        kind,
+        used_provider,
+        used_model,
+        schema_hash,
+        schema_status,
+        warnings,
+        role_hint,
+        attempts_used,
+    )

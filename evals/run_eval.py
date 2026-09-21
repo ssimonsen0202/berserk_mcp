@@ -279,73 +279,90 @@ def call_anthropic_multi_turn(api_key, model, system, prior_messages, tools, too
     return _anthropic_messages_call(api_key, model, system, prior_messages, tools, tool_choice)
 
 
+# Keyword-routing table for _mock_route, in priority order. Each entry is
+# (condition, result) where both are callables of (p, host, cc_agent) ->
+# bool / str. A table-driven dispatch keeps _mock_route's own cyclomatic
+# complexity low (it's just a loop) while each condition/result lambda is
+# its own trivially-simple callable -- this is a pure structural refactor
+# of the original if/elif chain, entry order and semantics unchanged.
+_MOCK_ROUTES = [
+    (lambda p, host, cc: "exact phrase" in p or "exact log" in p or "exact term" in p, lambda p, host, cc: "search"),
+    (lambda p, host, cc: "show" in p and "log" in p and "service" in p, lambda p, host, cc: "logs_for_service"),
+    (
+        lambda p, host, cc: "forecast" in p or ("capacity" in p and "trend" in p),
+        lambda p, host, cc: "forecast_capacity",
+    ),
+    (lambda p, host, cc: "similar" in p or "meaning" in p, lambda p, host, cc: "find_similar"),
+    (lambda p, host, cc: "anomal" in p or "abnormal" in p, lambda p, host, cc: "detect_anomalies"),
+    (lambda p, host, cc: "saved" in p and ("list" in p or "what" in p), lambda p, host, cc: "list_saved"),
+    (lambda p, host, cc: "save" in p, lambda p, host, cc: "save_query"),
+    (lambda p, host, cc: "kql" in p or "query:" in p, lambda p, host, cc: "search"),
+    (lambda p, host, cc: "schema" in p or "tables" in p or "columns" in p, lambda p, host, cc: "schema"),
+    (
+        lambda p, host, cc: "cost per successful outcome" in p or "harness configuration" in p,
+        lambda p, host, cc: "claude_efficiency_insights",
+    ),
+    (
+        lambda p, host, cc: "token burn" in p or "burn breakdown" in p,
+        lambda p, host, cc: "claude_token_burn",
+    ),
+    (
+        lambda p, host, cc: ("breaks" in p and "tool" in p) or ("burning" in p and "token" in p),
+        lambda p, host, cc: "claude_workflow_insights",
+    ),
+    (
+        lambda p, host, cc: cc and ("hotspot" in p or "efficiently" in p or ("keep" in p and "fail" in p)),
+        lambda p, host, cc: "claude_workflow_insights",
+    ),
+    (
+        lambda p, host, cc: cc and "loop" in p,
+        lambda p, host, cc: "claude_session_deep_dive" if any(ch.isdigit() for ch in p) else "claude_loop_check",
+    ),
+    (lambda p, host, cc: cc and "error" in p, lambda p, host, cc: "claude_errors"),
+    (lambda p, host, cc: cc and ("tool" in p and "use" in p), lambda p, host, cc: "claude_tools"),
+    (lambda p, host, cc: cc and "session" in p, lambda p, host, cc: "claude_sessions"),
+    (
+        lambda p, host, cc: cc and ("search" in p or ("find" in p and "word" in p)),
+        lambda p, host, cc: "claude_search",
+    ),
+    (lambda p, host, cc: cc, lambda p, host, cc: "claude_recent"),
+    (lambda p, host, cc: "healthy" in p or "rollback signal" in p, lambda p, host, cc: "sre_service_health"),
+    (lambda p, host, cc: "log" in p, lambda p, host, cc: "logs_for_service"),
+    (
+        lambda p, host, cc: "root cause" in p or "causing" in p or ("investigat" in p and "error" in p),
+        lambda p, host, cc: "investigate_error_rate",
+    ),
+    (
+        lambda p, host, cc: "climbing" in p or "burning error budget" in p or "rollback first" in p,
+        lambda p, host, cc: "sre_error_rate",
+    ),
+    (lambda p, host, cc: "error" in p, lambda p, host, cc: "errors_by_service"),
+    (lambda p, host, cc: "cpu" in p, lambda p, host, cc: "host_cpu" if host else "top_cpu"),
+    (lambda p, host, cc: "memory" in p or "ram" in p, lambda p, host, cc: "host_memory" if host else "top_memory"),
+    (lambda p, host, cc: "service" in p, lambda p, host, cc: "list_services"),
+    (lambda p, host, cc: host, lambda p, host, cc: "list_hosts"),
+    (lambda p, host, cc: True, lambda p, host, cc: "list_containers"),
+]
+
+
+def _mock_route(p, host):
+    """Keyword-routing logic for call_mock, extracted to a module-level
+    function so its complexity is measured independently of call_mock.
+    Walks _MOCK_ROUTES in order and returns the first matching result."""
+    cc_agent = "claude" in p or "codex" in p
+    for condition, result in _MOCK_ROUTES:
+        if condition(p, host, cc_agent):
+            return result(p, host, cc_agent)
+    return "list_containers"  # unreachable: the last table entry always matches
+
+
 def call_mock(user, tools):
     """A dumb keyword router — no network. Proves the harness + scoring, and gives a
     'can a regex beat this?' baseline to compare real models against."""
     p = user.lower()
     host = any(w in p for w in ("host", "vm", "machine", "node"))
-
-    def pick():
-        if "exact phrase" in p or "exact log" in p or "exact term" in p:
-            return "search"
-        if "show" in p and "log" in p and "service" in p:
-            return "logs_for_service"
-        if "forecast" in p or ("capacity" in p and "trend" in p):
-            return "forecast_capacity"
-        if "similar" in p or "meaning" in p:
-            return "find_similar"
-        if "anomal" in p or "abnormal" in p:
-            return "detect_anomalies"
-        if "saved" in p and ("list" in p or "what" in p):
-            return "list_saved"
-        if "save" in p:
-            return "save_query"
-        if "kql" in p or "query:" in p:
-            return "search"
-        if "schema" in p or "tables" in p or "columns" in p:
-            return "schema"
-        if "cost per successful outcome" in p or "harness configuration" in p:
-            return "claude_efficiency_insights"
-        if "token burn" in p or "burn breakdown" in p:
-            return "claude_token_burn"
-        if ("breaks" in p and "tool" in p) or ("burning" in p and "token" in p):
-            return "claude_workflow_insights"
-        cc_agent = "claude" in p or "codex" in p
-        if cc_agent and ("hotspot" in p or "efficiently" in p or ("keep" in p and "fail" in p)):
-            return "claude_workflow_insights"
-        if cc_agent and "loop" in p:
-            return "claude_session_deep_dive" if any(ch.isdigit() for ch in p) else "claude_loop_check"
-        if cc_agent and "error" in p:
-            return "claude_errors"
-        if cc_agent and ("tool" in p and "use" in p):
-            return "claude_tools"
-        if cc_agent and "session" in p:
-            return "claude_sessions"
-        if cc_agent and ("search" in p or ("find" in p and "word" in p)):
-            return "claude_search"
-        if cc_agent:
-            return "claude_recent"
-        if "healthy" in p or "rollback signal" in p:
-            return "sre_service_health"
-        if "log" in p:
-            return "logs_for_service"
-        if "root cause" in p or "causing" in p or ("investigat" in p and "error" in p):
-            return "investigate_error_rate"
-        if "climbing" in p or "burning error budget" in p or "rollback first" in p:
-            return "sre_error_rate"
-        if "error" in p:
-            return "errors_by_service"
-        if "cpu" in p:
-            return "host_cpu" if host else "top_cpu"
-        if "memory" in p or "ram" in p:
-            return "host_memory" if host else "top_memory"
-        if "service" in p:
-            return "list_services"
-        if host:
-            return "list_hosts"
-        return "list_containers"
-
-    return pick(), {}, 0.0, {}
+    result = _mock_route(p, host)
+    return result, {}, 0.0, {}
 
 
 # ---------- multi-turn fixtures (issue #75) ----------
@@ -626,6 +643,67 @@ def _run_tier_policy(args_ns, cases):
     print(f"\nsaved: evals/results/{out_path.name}")
 
 
+def _build_backend_runners(args_ns, tools, system):
+    """Build the (run_one, run_multi_turn) callables for the requested
+    backend, plus a display label. Extracted from main() to keep its
+    McCabe complexity down; behavior is unchanged."""
+    backend = args_ns.backend
+    if backend in ("openai", "ollama", "lmstudio"):
+        oa_tools = to_openai_tools(tools)
+        if args_ns.with_foreign_tools:
+            import foreign_tools_fixture
+
+            oa_tools = oa_tools + foreign_tools_fixture.to_openai_foreign_tools()
+        base = (
+            args_ns.base_url
+            or {
+                "openai": "https://api.openai.com/v1",
+                "ollama": "http://127.0.0.1:11434/v1",
+                "lmstudio": "http://127.0.0.1:1234/v1",
+            }[backend]
+        )
+        key_env = args_ns.key_env or ("OPENAI_API_KEY" if backend == "openai" else "")
+        key = os.environ.get(key_env, "") if key_env else ""
+        tc = args_ns.tool_choice or ("required" if backend == "openai" else "auto")
+
+        def run_one(user):
+            return call_openai_compatible(base, key, args_ns.model, system, user, oa_tools, tc)
+
+        def run_multi_turn(prior_messages):
+            return call_openai_compatible_multi_turn(base, key, args_ns.model, system, prior_messages, oa_tools, tc)
+    elif backend == "anthropic":
+        an_tools = to_anthropic_tools(tools)
+        if args_ns.with_foreign_tools:
+            import foreign_tools_fixture
+
+            an_tools = an_tools + foreign_tools_fixture.to_anthropic_foreign_tools()
+        key = os.environ.get(args_ns.key_env or "ANTHROPIC_API_KEY", "")
+        if not key:
+            sys.exit("ANTHROPIC_API_KEY not set in environment.")
+        tc = {"type": "any"}
+
+        def run_one(user):
+            return call_anthropic(key, args_ns.model, system, user, an_tools, tc)
+
+        def run_multi_turn(prior_messages):
+            return call_anthropic_multi_turn(key, args_ns.model, system, prior_messages, an_tools, tc)
+    else:  # mock
+
+        def run_one(user):
+            return call_mock(user, tools)
+
+        def run_multi_turn(prior_messages):
+            # A keyword matcher has no way to extract a value out of the
+            # fenced tool-result text -- an honest, always-wrong floor,
+            # not a harness limitation. Multi-turn cases are never added
+            # to the mock-gated router_cases.jsonl / ci_gate.py file, so
+            # this never affects the CI accuracy threshold.
+            return None, {}, 0.0, {}
+
+    label = f"{backend}:{args_ns.model or 'mock'}"
+    return run_one, run_multi_turn, label
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cases", help="router_cases.jsonl")
@@ -693,65 +771,12 @@ def main():
         instructions or "Use the provided tools to answer."
     ) + "\nChoose exactly one tool call that best answers the user's question."
 
-    backend = args_ns.backend
-    if backend in ("openai", "ollama", "lmstudio"):
-        oa_tools = to_openai_tools(tools)
-        if args_ns.with_foreign_tools:
-            import foreign_tools_fixture
-
-            oa_tools = oa_tools + foreign_tools_fixture.to_openai_foreign_tools()
-        base = (
-            args_ns.base_url
-            or {
-                "openai": "https://api.openai.com/v1",
-                "ollama": "http://127.0.0.1:11434/v1",
-                "lmstudio": "http://127.0.0.1:1234/v1",
-            }[backend]
-        )
-        key_env = args_ns.key_env or ("OPENAI_API_KEY" if backend == "openai" else "")
-        key = os.environ.get(key_env, "") if key_env else ""
-        tc = args_ns.tool_choice or ("required" if backend == "openai" else "auto")
-
-        def run_one(user):
-            return call_openai_compatible(base, key, args_ns.model, system, user, oa_tools, tc)
-
-        def run_multi_turn(prior_messages):
-            return call_openai_compatible_multi_turn(base, key, args_ns.model, system, prior_messages, oa_tools, tc)
-    elif backend == "anthropic":
-        an_tools = to_anthropic_tools(tools)
-        if args_ns.with_foreign_tools:
-            import foreign_tools_fixture
-
-            an_tools = an_tools + foreign_tools_fixture.to_anthropic_foreign_tools()
-        key = os.environ.get(args_ns.key_env or "ANTHROPIC_API_KEY", "")
-        if not key:
-            sys.exit("ANTHROPIC_API_KEY not set in environment.")
-        tc = {"type": "any"}
-
-        def run_one(user):
-            return call_anthropic(key, args_ns.model, system, user, an_tools, tc)
-
-        def run_multi_turn(prior_messages):
-            return call_anthropic_multi_turn(key, args_ns.model, system, prior_messages, an_tools, tc)
-    else:  # mock
-
-        def run_one(user):
-            return call_mock(user, tools)
-
-        def run_multi_turn(prior_messages):
-            # A keyword matcher has no way to extract a value out of the
-            # fenced tool-result text -- an honest, always-wrong floor,
-            # not a harness limitation. Multi-turn cases are never added
-            # to the mock-gated router_cases.jsonl / ci_gate.py file, so
-            # this never affects the CI accuracy threshold.
-            return None, {}, 0.0, {}
-
-    label = f"{backend}:{args_ns.model or 'mock'}"
+    run_one, run_multi_turn, label = _build_backend_runners(args_ns, tools, system)
     print(f"\n=== berserk-mcp router eval — {label} ({len(cases)} cases × {args_ns.repeats}) ===\n")
     print(f"{'case':<22}{'expected':<20}{'got':<20}{'tool':<6}{'arg':<5}{'ms':>7}")
     print("-" * 80)
 
-    is_anthropic = backend == "anthropic"
+    is_anthropic = args_ns.backend == "anthropic"
     rows, tool_hits, arg_hits, lat = [], 0, 0, []
     total = 0
     for case in cases:
@@ -813,7 +838,7 @@ def main():
     stamp = time.strftime("%Y%m%d-%H%M%S")
     safe = label.replace(":", "_").replace("/", "_")
     report = {
-        "backend": backend,
+        "backend": args_ns.backend,
         "model": args_ns.model,
         "repeats": args_ns.repeats,
         "tool_accuracy": tool_hits / total,
@@ -824,7 +849,7 @@ def main():
     (outdir / f"{safe}-{stamp}.json").write_text(json.dumps(report, indent=2))
     print(f"\nsaved: evals/results/{safe}-{stamp}.json")
     append_to_ledger(
-        backend=backend,
+        backend=args_ns.backend,
         model=args_ns.model,
         cases_path=args_ns.cases,
         tool_count=len(tools),
