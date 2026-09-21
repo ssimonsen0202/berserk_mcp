@@ -118,14 +118,23 @@ Lane answers "which job function?". They compose; neither replaces the other.
 TIER_SMALL = "small"
 TIER_DEEP = "deep"
 
-_DEEP_TIER_TOOLS = frozenset({
-    "search", "validate_kql", "save_query",
-    "generate_parser", "review_generated", "run_discovery_worker",
-    "suggest_ingestion", "self_check",
-    "canonloom_run_pipeline", "canonloom_list_artifacts",
-    "canonloom_get_artifact", "canonloom_freshness_report",
-    "canonloom_run_history",
-})
+_DEEP_TIER_TOOLS = frozenset(
+    {
+        "search",
+        "validate_kql",
+        "save_query",
+        "generate_parser",
+        "review_generated",
+        "run_discovery_worker",
+        "suggest_ingestion",
+        "self_check",
+        "canonloom_run_pipeline",
+        "canonloom_list_artifacts",
+        "canonloom_get_artifact",
+        "canonloom_freshness_report",
+        "canonloom_run_history",
+    }
+)
 ```
 
 Rationale for each inclusion:

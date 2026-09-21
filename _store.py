@@ -72,31 +72,46 @@ def _windows_api():
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
     advapi32.OpenProcessToken.argtypes = [
-        wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE),
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
     ]
     advapi32.OpenProcessToken.restype = wintypes.BOOL
     advapi32.GetTokenInformation.argtypes = [
-        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
         ctypes.POINTER(wintypes.DWORD),
     ]
     advapi32.GetTokenInformation.restype = wintypes.BOOL
     advapi32.ConvertSidToStringSidW.argtypes = [
-        ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR),
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.LPWSTR),
     ]
     advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
     advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
-        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p),
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
         ctypes.POINTER(wintypes.DWORD),
     ]
     advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
     advapi32.GetSecurityDescriptorDacl.argtypes = [
-        ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL),
-        ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.BOOL),
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
     ]
     advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
     advapi32.SetNamedSecurityInfoW.argtypes = [
-        wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD, ctypes.c_void_p,
-        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+        wintypes.LPWSTR,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
     ]
     advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
 
@@ -126,9 +141,7 @@ def _windows_current_user_sid():
         if not needed.value:
             raise ctypes.WinError(ctypes.get_last_error())
         buffer = ctypes.create_string_buffer(needed.value)
-        if not advapi32.GetTokenInformation(
-            token, 1, buffer, needed.value, ctypes.byref(needed)
-        ):
+        if not advapi32.GetTokenInformation(token, 1, buffer, needed.value, ctypes.byref(needed)):
             raise ctypes.WinError(ctypes.get_last_error())
         token_user = ctypes.cast(buffer, ctypes.POINTER(TOKEN_USER)).contents
         sid_text = wintypes.LPWSTR()
@@ -158,15 +171,22 @@ def _restrict_acl_windows(path):
         dacl_defaulted = wintypes.BOOL()
         dacl = ctypes.c_void_p()
         if not advapi32.GetSecurityDescriptorDacl(
-            descriptor, ctypes.byref(dacl_present), ctypes.byref(dacl),
+            descriptor,
+            ctypes.byref(dacl_present),
+            ctypes.byref(dacl),
             ctypes.byref(dacl_defaulted),
         ):
             raise ctypes.WinError(ctypes.get_last_error())
         if not dacl_present.value or not dacl.value:
             raise OSError("generated Windows security descriptor has no DACL")
         result = advapi32.SetNamedSecurityInfoW(
-            str(path), 1, 0x00000004 | 0x80000000,
-            None, None, dacl, None,
+            str(path),
+            1,
+            0x00000004 | 0x80000000,
+            None,
+            None,
+            dacl,
+            None,
         )
         if result:
             raise OSError(result, ctypes.FormatError(result))
@@ -205,22 +225,32 @@ def windows_private_dacl(path):
         ]
 
     advapi32.GetNamedSecurityInfoW.argtypes = [
-        wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD,
-        ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p),
-        ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p),
+        wintypes.LPWSTR,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
         ctypes.POINTER(ctypes.c_void_p),
     ]
     advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
     advapi32.GetAclInformation.argtypes = [
-        ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_int,
     ]
     advapi32.GetAclInformation.restype = wintypes.BOOL
     advapi32.GetAce.argtypes = [
-        ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
     ]
     advapi32.GetAce.restype = wintypes.BOOL
     advapi32.GetSecurityDescriptorControl.argtypes = [
-        ctypes.c_void_p, ctypes.POINTER(wintypes.WORD),
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.WORD),
         ctypes.POINTER(wintypes.DWORD),
     ]
     advapi32.GetSecurityDescriptorControl.restype = wintypes.BOOL
@@ -228,22 +258,24 @@ def windows_private_dacl(path):
     dacl = ctypes.c_void_p()
     descriptor = ctypes.c_void_p()
     result = advapi32.GetNamedSecurityInfoW(
-        str(path), 1, 0x00000004,
-        None, None, ctypes.byref(dacl), None, ctypes.byref(descriptor),
+        str(path),
+        1,
+        0x00000004,
+        None,
+        None,
+        ctypes.byref(dacl),
+        None,
+        ctypes.byref(descriptor),
     )
     if result:
         raise OSError(result, ctypes.FormatError(result))
     try:
         control = wintypes.WORD()
         revision = wintypes.DWORD()
-        if not advapi32.GetSecurityDescriptorControl(
-            descriptor, ctypes.byref(control), ctypes.byref(revision)
-        ):
+        if not advapi32.GetSecurityDescriptorControl(descriptor, ctypes.byref(control), ctypes.byref(revision)):
             raise ctypes.WinError(ctypes.get_last_error())
         info = ACL_SIZE_INFORMATION()
-        if not advapi32.GetAclInformation(
-            dacl, ctypes.byref(info), ctypes.sizeof(info), 2
-        ):
+        if not advapi32.GetAclInformation(dacl, ctypes.byref(info), ctypes.sizeof(info), 2):
             raise ctypes.WinError(ctypes.get_last_error())
         if info.AceCount != 1 or not (control.value & 0x1000):
             return False
@@ -253,9 +285,7 @@ def windows_private_dacl(path):
         ace = ctypes.cast(ace_pointer, ctypes.POINTER(ACCESS_ALLOWED_ACE)).contents
         if ace.Header.AceType != 0 or ace.Mask != 0x001F01FF:
             return False
-        sid_pointer = ctypes.c_void_p(
-            ace_pointer.value + ACCESS_ALLOWED_ACE.SidStart.offset
-        )
+        sid_pointer = ctypes.c_void_p(ace_pointer.value + ACCESS_ALLOWED_ACE.SidStart.offset)
         sid_text = wintypes.LPWSTR()
         if not advapi32.ConvertSidToStringSidW(sid_pointer, ctypes.byref(sid_text)):
             raise ctypes.WinError(ctypes.get_last_error())
@@ -276,7 +306,9 @@ def restrict_private_path(path, logger=None):
             return True
         except Exception as exc:  # Windows ACL failure must not corrupt the write
             _warn_once(
-                f"could not restrict Windows ACL ({type(exc).__name__})", safe, logger,
+                f"could not restrict Windows ACL ({type(exc).__name__})",
+                safe,
+                logger,
             )
             return False
     os.chmod(safe, 0o700 if safe.is_dir() else 0o600)
@@ -337,19 +369,12 @@ class FileLock:
     risk is documented in SECURITY.md; these critical sections must stay short.
     """
 
-    def __init__(self, target_path, *, stale_seconds=None, timeout_seconds=None,
-                 retry_interval=None):
+    def __init__(self, target_path, *, stale_seconds=None, timeout_seconds=None, retry_interval=None):
         self.lock_path = str(target_path) + ".lock"
         self._fd = None
-        self.stale_seconds = (
-            LOCK_STALE_SECONDS if stale_seconds is None else float(stale_seconds)
-        )
-        self.timeout_seconds = (
-            LOCK_TIMEOUT_SECONDS if timeout_seconds is None else float(timeout_seconds)
-        )
-        self.retry_interval = (
-            LOCK_RETRY_INTERVAL if retry_interval is None else float(retry_interval)
-        )
+        self.stale_seconds = LOCK_STALE_SECONDS if stale_seconds is None else float(stale_seconds)
+        self.timeout_seconds = LOCK_TIMEOUT_SECONDS if timeout_seconds is None else float(timeout_seconds)
+        self.retry_interval = LOCK_RETRY_INTERVAL if retry_interval is None else float(retry_interval)
 
     def __enter__(self):
         deadline = time.monotonic() + self.timeout_seconds
@@ -357,7 +382,9 @@ class FileLock:
         while True:
             try:
                 self._fd = os.open(
-                    self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600,
+                    self.lock_path,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    0o600,
                 )
                 os.write(self._fd, str(os.getpid()).encode("ascii"))
                 if os.name == "nt":
@@ -372,15 +399,13 @@ class FileLock:
                 except OSError:
                     if time.monotonic() >= deadline:
                         raise TimeoutError(
-                            f"could not acquire lock {self.lock_path} within "
-                            f"{self.timeout_seconds:g}s"
+                            f"could not acquire lock {self.lock_path} within {self.timeout_seconds:g}s"
                         ) from None
                     time.sleep(self.retry_interval)
                     continue
                 if time.monotonic() >= deadline:
                     raise TimeoutError(
-                        f"could not acquire lock {self.lock_path} within "
-                        f"{self.timeout_seconds:g}s"
+                        f"could not acquire lock {self.lock_path} within {self.timeout_seconds:g}s"
                     ) from None
                 time.sleep(self.retry_interval)
 
@@ -395,9 +420,7 @@ class FileLock:
 
 def unique_tmp_path(safe):
     safe = validate_store_path(safe)
-    return safe.with_name(
-        f".{safe.name}.{os.getpid()}.{threading.get_ident()}.{secrets.token_hex(4)}.tmp"
-    )
+    return safe.with_name(f".{safe.name}.{os.getpid()}.{threading.get_ident()}.{secrets.token_hex(4)}.tmp")
 
 
 def atomic_replace(tmp, safe):
@@ -442,8 +465,7 @@ def atomic_write_text(path, text, *, private=True, logger=None, purpose="output"
     return safe
 
 
-def atomic_write_json(path, value, *, private=True, logger=None, purpose="store",
-                      sort_keys=False):
+def atomic_write_json(path, value, *, private=True, logger=None, purpose="store", sort_keys=False):
     return atomic_write_text(
         path,
         json.dumps(value, indent=2, sort_keys=sort_keys) + "\n",

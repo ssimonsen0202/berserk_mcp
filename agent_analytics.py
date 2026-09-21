@@ -4,6 +4,7 @@ This module is stdlib-only and configured by berserk_mcp.py at import time.
 It does not import berserk_mcp directly, which keeps tests simple and avoids
 cycles. The public functions return text suitable for MCP tool output.
 """
+
 from collections import Counter, defaultdict
 from datetime import datetime
 import json
@@ -25,9 +26,7 @@ _TOKENS_OUT_ATTR = os.environ.get("BERSERK_MCP_TOKENS_OUT_ATTR", "claude.tokens_
 # Path segments that mark "inside a project" for cost attribution; the
 # directory immediately before the first marker is taken as the project name.
 _PROJECT_MARKERS = frozenset(
-    p.strip() for p in os.environ.get(
-        "BERSERK_MCP_PROJECT_MARKERS", "src,tests,lib,pkg"
-    ).split(",") if p.strip()
+    p.strip() for p in os.environ.get("BERSERK_MCP_PROJECT_MARKERS", "src,tests,lib,pkg").split(",") if p.strip()
 )
 
 MODEL_TIERS = {
@@ -115,15 +114,10 @@ def _json_records(parsed):
         tables = parsed.get("Tables")
         if isinstance(tables, list) and tables and isinstance(tables[0], dict):
             table = tables[0]
-            columns = [
-                c.get("name") for c in (table.get("schema") or {}).get("columns", [])
-                if isinstance(c, dict)
-            ]
+            columns = [c.get("name") for c in (table.get("schema") or {}).get("columns", []) if isinstance(c, dict)]
             rows = table.get("rows")
             if columns and isinstance(rows, list):
-                return [
-                    dict(zip(columns, row)) for row in rows if isinstance(row, list)
-                ]
+                return [dict(zip(columns, row)) for row in rows if isinstance(row, list)]
         for key in ("rows", "data", "results", "records"):
             if isinstance(parsed.get(key), list):
                 return parsed[key]
@@ -269,13 +263,15 @@ def _calls_for_events(events):
         err = ev.get("err") == "true"
         ts = ev.get("ts", "")
         for tool in _tool_names(ev.get("tools")):
-            calls.append({
-                "tool": tool,
-                "target": target,
-                "key": f"{tool}({target})",
-                "err": err,
-                "ts": ts,
-            })
+            calls.append(
+                {
+                    "tool": tool,
+                    "target": target,
+                    "key": f"{tool}({target})",
+                    "err": err,
+                    "ts": ts,
+                }
+            )
     return calls
 
 
@@ -301,7 +297,7 @@ def _oscillation_count(seq):
     count = 0
     for size in (2, 3):
         for i in range(max(0, len(seq) - (size * 2) + 1)):
-            if seq[i:i + size] == seq[i + size:i + (size * 2)]:
+            if seq[i : i + size] == seq[i + size : i + (size * 2)]:
                 count += 1
     return count
 
@@ -334,19 +330,21 @@ def analyze_loop_events(events):
         else:
             verdict = "healthy"
 
-        reports.append({
-            "session_id": session,
-            "total_tool_calls": total,
-            "distinct_tool_calls": distinct,
-            "repetition_ratio": repetition_ratio,
-            "top_repeated_call": top_call,
-            "top_repeated_count": top_count,
-            "error_retry_count": error_retries,
-            "oscillation_count": osc,
-            "verdict": verdict,
-            "duration_seconds": _duration_seconds(session_events),
-            "models": sorted({ev.get("model", "") for ev in session_events if ev.get("model")}),
-        })
+        reports.append(
+            {
+                "session_id": session,
+                "total_tool_calls": total,
+                "distinct_tool_calls": distinct,
+                "repetition_ratio": repetition_ratio,
+                "top_repeated_call": top_call,
+                "top_repeated_count": top_count,
+                "error_retry_count": error_retries,
+                "oscillation_count": osc,
+                "verdict": verdict,
+                "duration_seconds": _duration_seconds(session_events),
+                "models": sorted({ev.get("model", "") for ev in session_events if ev.get("model")}),
+            }
+        )
     return reports
 
 
@@ -417,9 +415,7 @@ def analyze_model_fit_events(events):
             continue
         # _events_query uses an unordered bounded take; preserve the prior
         # "latest observed model" behavior explicitly at the consumer.
-        ordered_events = sorted(
-            session_events, key=lambda ev: str(ev.get("ts", ""))
-        )
+        ordered_events = sorted(session_events, key=lambda ev: str(ev.get("ts", "")))
         models = [ev.get("model", "") for ev in ordered_events if ev.get("model")]
         model = models[-1] if models else ""
         tier = _model_tier(model)
@@ -433,16 +429,18 @@ def analyze_model_fit_events(events):
         else:
             verdict = "ok"
             rationale = "model tier roughly matches observed complexity"
-        reports.append({
-            "session_id": session,
-            "model": model or "unknown",
-            "model_tier": tier,
-            "complexity": bucket,
-            "verdict": verdict,
-            "rationale": rationale,
-            "loop_verdict": loop_report["verdict"],
-            "tool_calls": loop_report["total_tool_calls"],
-        })
+        reports.append(
+            {
+                "session_id": session,
+                "model": model or "unknown",
+                "model_tier": tier,
+                "complexity": bucket,
+                "verdict": verdict,
+                "rationale": rationale,
+                "loop_verdict": loop_report["verdict"],
+                "tool_calls": loop_report["total_tool_calls"],
+            }
+        )
     return reports
 
 
@@ -463,8 +461,7 @@ def claude_model_fit(since="6h ago", _events=None):
     for r in reports:
         sid = _fence(_redact(r["session_id"]))
         lines.append(
-            "- {sid}: tier={model_tier}, complexity={complexity}, "
-            "verdict={verdict}; {rationale}".format(sid=sid, **r)
+            "- {sid}: tier={model_tier}, complexity={complexity}, verdict={verdict}; {rationale}".format(sid=sid, **r)
         )
     return "\n".join(lines), False
 
@@ -512,13 +509,11 @@ def analyze_token_burn_events(events):
     for session, session_events in sorted(by_session.items()):
         billed_events = _collapse_by_message(session_events)
         body_chars = sum(
-            _nonnegative_int(ev.get("body_chars")) or len(str(ev.get("body") or ""))
-            for ev in session_events
+            _nonnegative_int(ev.get("body_chars")) or len(str(ev.get("body") or "")) for ev in session_events
         )
         has_exact_usage = any(ev.get("has_token_usage") for ev in billed_events)
         exact_tokens = sum(
-            _nonnegative_int(ev.get("tokens_in")) + _nonnegative_int(ev.get("tokens_out"))
-            for ev in billed_events
+            _nonnegative_int(ev.get("tokens_in")) + _nonnegative_int(ev.get("tokens_out")) for ev in billed_events
         )
         token_count = exact_tokens if has_exact_usage else int(math.ceil(body_chars / 4.0))
         calls = _calls_for_events(session_events)
@@ -527,19 +522,21 @@ def analyze_token_burn_events(events):
         progress_units = distinct_tools + files_touched
         burn_per_progress = token_count / float(max(1, progress_units))
         loop_verdict = loop_by_session.get(session, {}).get("verdict", "healthy")
-        reports.append({
-            "session_id": session,
-            "tokens": token_count,
-            "token_source": "exact" if has_exact_usage else "estimated",
-            "body_chars": body_chars,
-            "tool_calls": len(calls),
-            "distinct_tools": distinct_tools,
-            "files_touched": files_touched,
-            "progress_units": progress_units,
-            "burn_per_progress": burn_per_progress,
-            "loop_verdict": loop_verdict,
-            "verdict": "normal-burn",
-        })
+        reports.append(
+            {
+                "session_id": session,
+                "tokens": token_count,
+                "token_source": "exact" if has_exact_usage else "estimated",
+                "body_chars": body_chars,
+                "tool_calls": len(calls),
+                "distinct_tools": distinct_tools,
+                "files_touched": files_touched,
+                "progress_units": progress_units,
+                "burn_per_progress": burn_per_progress,
+                "loop_verdict": loop_verdict,
+                "verdict": "normal-burn",
+            }
+        )
 
     if reports:
         high_burn_count = max(1, int(math.ceil(len(reports) * 0.1)))
@@ -547,15 +544,11 @@ def analyze_token_burn_events(events):
             reports,
             key=lambda r: (-r["burn_per_progress"], r["session_id"]),
         )
-        high_burn_sessions = {
-            r["session_id"] for r in ranked[:high_burn_count] if r["tokens"] > 0
-        }
+        high_burn_sessions = {r["session_id"] for r in ranked[:high_burn_count] if r["tokens"] > 0}
         for report in reports:
             if report["session_id"] in high_burn_sessions:
                 report["verdict"] = (
-                    "high-burn + likely-looping"
-                    if report["loop_verdict"] == "likely-looping"
-                    else "high-burn"
+                    "high-burn + likely-looping" if report["loop_verdict"] == "likely-looping" else "high-burn"
                 )
     return reports
 
@@ -658,8 +651,7 @@ def analyze_cost_daily(rows):
         est = _nonnegative_int(r.get("body_chars_sum")) // 4
         tokens = exact if exact > 0 else est
         source = "exact" if exact > 0 else "estimated"
-        slot = by_day.setdefault(day, {"day": day, "tokens": 0, "source": source,
-                                       "events": 0, "errors": 0})
+        slot = by_day.setdefault(day, {"day": day, "tokens": 0, "source": source, "events": 0, "errors": 0})
         slot["tokens"] += tokens
         if source == "estimated" and slot["tokens"] == tokens:
             slot["source"] = "estimated"
@@ -671,9 +663,7 @@ def analyze_cost_daily(rows):
 
     days = sorted(by_day.values(), key=lambda d: d["day"])
     if len(days) < 3:
-        return {"days": days, "models": models,
-                "verdict": "insufficient-data", "slope_pct_per_day": 0.0,
-                "r2": None}
+        return {"days": days, "models": models, "verdict": "insufficient-data", "slope_pct_per_day": 0.0, "r2": None}
 
     ys = [d["tokens"] for d in days]
     n = len(ys)
@@ -690,9 +680,7 @@ def analyze_cost_daily(rows):
         verdict = "burn-declining"
     else:
         verdict = "burn-flat"
-    return {"days": days, "models": models,
-            "verdict": verdict, "slope_pct_per_day": round(slope_pct, 1),
-            "r2": None}
+    return {"days": days, "models": models, "verdict": verdict, "slope_pct_per_day": round(slope_pct, 1), "r2": None}
 
 
 def total_tokens_estimate(since="5h ago", _events=None):
@@ -788,8 +776,10 @@ def claude_cost_report(since="7d ago", group_by="day"):
         for group in _message_groups(events):
             ev = group[0]
             tokens = (
-                _nonnegative_int(ev.get("tokens_in")) + _nonnegative_int(ev.get("tokens_out"))
-            ) if ev.get("has_token_usage") else len(ev.get("body", "")) // 4
+                (_nonnegative_int(ev.get("tokens_in")) + _nonnegative_int(ev.get("tokens_out")))
+                if ev.get("has_token_usage")
+                else len(ev.get("body", "")) // 4
+            )
             project = "(unattributed)"
             for tgt in _file_targets(group):
                 inferred = _infer_project(tgt)
@@ -799,8 +789,7 @@ def claude_cost_report(since="7d ago", group_by="day"):
             slot = by_project.setdefault(project, {"tokens": 0, "events": 0})
             slot["tokens"] += tokens
             slot["events"] += 1
-        lines = [f"Claude Code cost by project (most recent {len(events)} events; "
-                 f"window {since}):"]
+        lines = [f"Claude Code cost by project (most recent {len(events)} events; window {since}):"]
         for name in sorted(by_project, key=lambda k: -by_project[k]["tokens"]):
             s = by_project[name]
             lines.append(f"- {_fence(_redact(name))}: ~{s['tokens']} tokens across {s['events']} events")
@@ -830,15 +819,18 @@ def claude_cost_report(since="7d ago", group_by="day"):
         rep["slope_pct_per_day"] = round(slope_pct, 1)
         rep["r2"] = trend["r2"]
     trend_marker = f", R²={rep['r2']:.2f}" if rep.get("r2") is not None else ""
-    lines = [f"Claude Code cost report ({since}): verdict={rep['verdict']} "
-             f"(slope {rep['slope_pct_per_day']:+.1f}%/day{trend_marker})"]
+    lines = [
+        f"Claude Code cost report ({since}): verdict={rep['verdict']} "
+        f"(slope {rep['slope_pct_per_day']:+.1f}%/day{trend_marker})"
+    ]
     if group_by == "model":
         for model in sorted(rep["models"], key=lambda k: -rep["models"][k]):
             lines.append(f"- {_fence(_redact(model))}: ~{rep['models'][model]} tokens")
     else:
         for d in rep["days"]:
-            lines.append(f"- {d['day']}: ~{d['tokens']} tokens ({d['source']}), "
-                         f"{d['events']} events, {d['errors']} errors")
+            lines.append(
+                f"- {d['day']}: ~{d['tokens']} tokens ({d['source']}), {d['events']} events, {d['errors']} errors"
+            )
     return "\n".join(lines), False
 
 
@@ -888,19 +880,20 @@ def analyze_session_events(events):
             phases[-1]["errors"] += err
             phases[-1]["last_ts"] = ts
         else:
-            phases.append({"tool": tool, "count": 1, "errors": err,
-                           "first_ts": ts, "last_ts": ts})
+            phases.append({"tool": tool, "count": 1, "errors": err, "first_ts": ts, "last_ts": ts})
     billed_events = _collapse_by_message(events)
-    exact = sum(_nonnegative_int(ev.get("tokens_in")) + _nonnegative_int(ev.get("tokens_out"))
-                for ev in billed_events if ev.get("has_token_usage"))
+    exact = sum(
+        _nonnegative_int(ev.get("tokens_in")) + _nonnegative_int(ev.get("tokens_out"))
+        for ev in billed_events
+        if ev.get("has_token_usage")
+    )
     if exact > 0:
         burn = {"tokens": exact, "source": "exact"}
     else:
-        burn = {"tokens": sum(
-                    _nonnegative_int(ev.get("body_chars")) or len(ev.get("body", ""))
-                    for ev in events
-                ) // 4,
-                "source": "estimated"}
+        burn = {
+            "tokens": sum(_nonnegative_int(ev.get("body_chars")) or len(ev.get("body", "")) for ev in events) // 4,
+            "source": "estimated",
+        }
     loops = analyze_loop_events(events)
     loop_verdict = loops[0]["verdict"] if loops else "no-tool-calls"
     return {"phases": phases, "gaps": gaps, "burn": burn, "loop": loop_verdict}
@@ -918,8 +911,10 @@ def claude_session_deep_dive(session_id, since="24h ago"):
     if not events:
         return f"No data for session {sid} in this window.", False
     rep = analyze_session_events(events)
-    lines = [f"Session {sid} deep dive ({since}): loop={rep['loop']}, "
-             f"~{rep['burn']['tokens']} tokens ({rep['burn']['source']})"]
+    lines = [
+        f"Session {sid} deep dive ({since}): loop={rep['loop']}, "
+        f"~{rep['burn']['tokens']} tokens ({rep['burn']['source']})"
+    ]
     for p in rep["phases"]:
         marker = f", {p['errors']} errors" if p["errors"] else ""
         lines.append(f"- {p['first_ts']} {_fence(_redact(p['tool']))} x{p['count']}{marker}")
@@ -941,20 +936,18 @@ def analyze_workflow_events(events):
         stamps = [str(ev.get("ts", "")) for ev in sess_events]
         # Equal timestamps have no meaningful ordering; preserve the source
         # order for ties (some forwarders batch several events at one stamp).
-        if len(set(stamps)) == len(stamps) and any(
-            left > right for left, right in zip(stamps, stamps[1:])
-        ):
+        if len(set(stamps)) == len(stamps) and any(left > right for left, right in zip(stamps, stamps[1:])):
             sess_events = sorted(sess_events, key=lambda ev: str(ev.get("ts", "")))
         tools = []
         for ev in sess_events:
             tools.extend(_tool_names(ev.get("tools")))
         for size in (2, 3):
             for i in range(len(tools) - size + 1):
-                pattern = "→".join(tools[i:i + size])
+                pattern = "→".join(tools[i : i + size])
                 seq_counts[pattern] = seq_counts.get(pattern, 0) + 1
-    sequences = [{"pattern": p, "count": c}
-                 for p, c in sorted(seq_counts.items(), key=lambda kv: -kv[1])[:10]
-                 if c >= 2]
+    sequences = [
+        {"pattern": p, "count": c} for p, c in sorted(seq_counts.items(), key=lambda kv: -kv[1])[:10] if c >= 2
+    ]
 
     call_stats = {}
     for call in _calls_for_events(events):
@@ -962,21 +955,26 @@ def analyze_workflow_events(events):
         slot["calls"] += 1
         if call["err"]:
             slot["errors"] += 1
-    hotspots = [{"key": k, "errors": v["errors"], "calls": v["calls"]}
-                for k, v in sorted(call_stats.items(), key=lambda kv: -kv[1]["errors"])
-                if v["errors"] >= 2][:10]
+    hotspots = [
+        {"key": k, "errors": v["errors"], "calls": v["calls"]}
+        for k, v in sorted(call_stats.items(), key=lambda kv: -kv[1]["errors"])
+        if v["errors"] >= 2
+    ][:10]
 
     burn_rank = []
     for session, sess_events in by_session.items():
-        exact = sum(_nonnegative_int(ev.get("tokens_in")) + _nonnegative_int(ev.get("tokens_out"))
-                    for ev in sess_events if ev.get("has_token_usage"))
-        tokens = exact if exact > 0 else sum(
-            _nonnegative_int(ev.get("body_chars")) or len(ev.get("body", ""))
+        exact = sum(
+            _nonnegative_int(ev.get("tokens_in")) + _nonnegative_int(ev.get("tokens_out"))
             for ev in sess_events
-        ) // 4
+            if ev.get("has_token_usage")
+        )
+        tokens = (
+            exact
+            if exact > 0
+            else sum(_nonnegative_int(ev.get("body_chars")) or len(ev.get("body", "")) for ev in sess_events) // 4
+        )
         targets = max(1, len(_file_targets(sess_events)))
-        burn_rank.append({"session": session,
-                          "tokens_per_target": tokens // targets})
+        burn_rank.append({"session": session, "tokens_per_target": tokens // targets})
     burn_rank.sort(key=lambda r: -r["tokens_per_target"])
     decile = max(1, len(burn_rank) // 10)
     inefficient = burn_rank[:decile] if len(burn_rank) >= 3 else []

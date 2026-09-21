@@ -76,10 +76,16 @@ import investigation as inv  # noqa: E402
 def bzrk_json_table(columns, rows):
     """Build the exact bzrk --json shape agent_analytics._json_records
     parses: {"Tables": [{"schema": {"columns": [...]}, "rows": [[...]]}]}."""
-    return json.dumps({"Tables": [{
-        "schema": {"columns": [{"name": c} for c in columns]},
-        "rows": rows,
-    }]})
+    return json.dumps(
+        {
+            "Tables": [
+                {
+                    "schema": {"columns": [{"name": c} for c in columns]},
+                    "rows": rows,
+                }
+            ]
+        }
+    )
 
 
 class RunJsonTest(unittest.TestCase):
@@ -90,9 +96,13 @@ class RunJsonTest(unittest.TestCase):
         def fake_search(kql, since):
             self.calls.append((kql, since))
             return bzrk_json_table(["service", "errors"], [["checkout", 23]]), False
+
         inv.configure(
-            bzrk_search=fake_search, since_hours=lambda s: 1.0,
-            q_errors="Q1", q_soc_log_spike="Q2", q_trace_find_errors="Q3",
+            bzrk_search=fake_search,
+            since_hours=lambda s: 1.0,
+            q_errors="Q1",
+            q_soc_log_spike="Q2",
+            q_trace_find_errors="Q3",
         )
         rows, err = inv._run_json("Q1", "1h ago")
         self.assertIsNone(err)
@@ -103,7 +113,9 @@ class RunJsonTest(unittest.TestCase):
         inv.configure(
             bzrk_search=lambda kql, since: ("bzrk timed out", True),
             since_hours=lambda s: 1.0,
-            q_errors="Q1", q_soc_log_spike="Q2", q_trace_find_errors="Q3",
+            q_errors="Q1",
+            q_soc_log_spike="Q2",
+            q_trace_find_errors="Q3",
         )
         rows, err = inv._run_json("Q1", "1h ago")
         self.assertIsNone(rows)
@@ -113,7 +125,9 @@ class RunJsonTest(unittest.TestCase):
         inv.configure(
             bzrk_search=lambda kql, since: ("not json at all", False),
             since_hours=lambda s: 1.0,
-            q_errors="Q1", q_soc_log_spike="Q2", q_trace_find_errors="Q3",
+            q_errors="Q1",
+            q_soc_log_spike="Q2",
+            q_trace_find_errors="Q3",
         )
         rows, err = inv._run_json("Q1", "1h ago")
         self.assertIsNone(rows)
@@ -130,7 +144,9 @@ class RunJsonTest(unittest.TestCase):
         inv.configure(
             bzrk_search=lambda kql, since: ("(no rows)", False),
             since_hours=lambda s: 1.0,
-            q_errors="Q1", q_soc_log_spike="Q2", q_trace_find_errors="Q3",
+            q_errors="Q1",
+            q_soc_log_spike="Q2",
+            q_trace_find_errors="Q3",
         )
         rows, err = inv._run_json("Q1", "1h ago")
         self.assertIsNone(err)
@@ -160,6 +176,7 @@ cycles (same convention as agent_analytics.py and parser_factory.py).
 
 Design: docs/investigation-decision-tree-implementation-spec.md
 """
+
 import json
 
 import agent_analytics
@@ -241,8 +258,11 @@ Expected: PASS (3 tests)
 class StartNodeTest(unittest.TestCase):
     def setUp(self):
         inv.configure(
-            bzrk_search=self._search, since_hours=lambda s: 1.0,
-            q_errors="Q_ERRORS", q_soc_log_spike="Q_SPIKE", q_trace_find_errors="Q_TRACE",
+            bzrk_search=self._search,
+            since_hours=lambda s: 1.0,
+            q_errors="Q_ERRORS",
+            q_soc_log_spike="Q_SPIKE",
+            q_trace_find_errors="Q_TRACE",
         )
         self.responses = {}
 
@@ -251,8 +271,7 @@ class StartNodeTest(unittest.TestCase):
 
     def test_normal_rate_concludes(self):
         # 5 errors over a 1h window = 5/60 per-minute, below the 10/min gate.
-        self.responses["Q_ERRORS"] = (
-            bzrk_json_table(["service", "errors"], [["checkout", 5]]), False)
+        self.responses["Q_ERRORS"] = (bzrk_json_table(["service", "errors"], [["checkout", 5]]), False)
         text, is_error, next_node = inv.run_error_rate_node("start", "1h ago", None)
         self.assertFalse(is_error)
         self.assertIsNone(next_node)
@@ -260,14 +279,13 @@ class StartNodeTest(unittest.TestCase):
 
     def test_elevated_rate_advances_to_check_log_spike(self):
         # 700 errors over 1h = ~11.7/min, above the 10/min gate.
-        self.responses["Q_ERRORS"] = (
-            bzrk_json_table(["service", "errors"], [["checkout", 700], ["auth", 3]]), False)
+        self.responses["Q_ERRORS"] = (bzrk_json_table(["service", "errors"], [["checkout", 700], ["auth", 3]]), False)
         text, is_error, next_node = inv.run_error_rate_node("start", "1h ago", None)
         self.assertFalse(is_error)
         self.assertEqual(next_node, "check_log_spike")
         self.assertIn("checkout", text)
         self.assertIn("check_log_spike", text)
-        self.assertIn("service=\"checkout\"", text)
+        self.assertIn('service="checkout"', text)
 
     def test_no_rows_concludes_nothing_to_investigate(self):
         self.responses["Q_ERRORS"] = ("(no rows)", False)
@@ -297,10 +315,9 @@ def _node_start(since):
     rows, err = _run_json(_q_errors, since)
     if err is not None:
         return (
-            f"Checked: errors_by_service (since={since}) — FAILED\n"
-            f"Error: {err}\n"
-            f"Investigation halted at start.",
-            True, None,
+            f"Checked: errors_by_service (since={since}) — FAILED\nError: {err}\nInvestigation halted at start.",
+            True,
+            None,
         )
     if not rows:
         return (
@@ -308,7 +325,8 @@ def _node_start(since):
             f"Result: no errors\n"
             f"Investigation complete.\n"
             f"Verdict: no errors in window, nothing to investigate.",
-            False, None,
+            False,
+            None,
         )
     top = max(rows, key=lambda r: _as_int(r.get("errors")))
     service = str(top.get("service") or "(unknown)")
@@ -323,17 +341,19 @@ def _node_start(since):
             f"Threshold: >{ERROR_RATE_INVESTIGATE_PER_MIN}/min to investigate\n"
             f"Investigation complete.\n"
             f"Verdict: error rate normal, no further checks.",
-            False, None,
+            False,
+            None,
         )
     return (
         f"Checked: errors_by_service (since={since})\n"
         f"Result: {count} errors for service {service!r} (~{rate:.1f}/min)\n"
         f"Threshold: >{ERROR_RATE_INVESTIGATE_PER_MIN}/min investigate\n"
         f"Branch: investigate (elevated)\n"
-        f"Next: call investigate_error_rate(node=\"check_log_spike\", "
-        f"since={since!r}, service=\"{service}\") to continue, or stop "
+        f'Next: call investigate_error_rate(node="check_log_spike", '
+        f'since={since!r}, service="{service}") to continue, or stop '
         f"here if this is enough.",
-        False, "check_log_spike",
+        False,
+        "check_log_spike",
     )
 
 
@@ -352,8 +372,9 @@ def run_error_rate_node(node, since, service):
         return _node_start(since)
     return (
         f"Unknown node {node!r}. Call investigate_error_rate with no "
-        f"node argument (or node=\"start\") to begin a new investigation.",
-        True, None,
+        f'node argument (or node="start") to begin a new investigation.',
+        True,
+        None,
     )
 ```
 
@@ -387,8 +408,11 @@ git commit -m "feat: investigation.py module + start node (issue #24)"
 class CheckLogSpikeNodeTest(unittest.TestCase):
     def setUp(self):
         inv.configure(
-            bzrk_search=self._search, since_hours=lambda s: 1.0,
-            q_errors="Q_ERRORS", q_soc_log_spike="Q_SPIKE", q_trace_find_errors="Q_TRACE",
+            bzrk_search=self._search,
+            since_hours=lambda s: 1.0,
+            q_errors="Q_ERRORS",
+            q_soc_log_spike="Q_SPIKE",
+            q_trace_find_errors="Q_TRACE",
         )
         self.responses = {}
 
@@ -409,42 +433,37 @@ class CheckLogSpikeNodeTest(unittest.TestCase):
         # 20 > 2 * SPIKE_MULTIPLIER (3), so this is a spike.
         hits = [2] * 55 + [20] * 5
         self.responses["Q_SPIKE"] = self._spike_response("checkout", hits)
-        text, is_error, next_node = inv.run_error_rate_node(
-            "check_log_spike", "1h ago", "checkout")
+        text, is_error, next_node = inv.run_error_rate_node("check_log_spike", "1h ago", "checkout")
         self.assertFalse(is_error)
         self.assertEqual(next_node, "check_traces")
         self.assertIn("check_traces", text)
-        self.assertIn("service=\"checkout\"", text)
+        self.assertIn('service="checkout"', text)
 
     def test_no_spike_concludes_with_manual_review_recommendation(self):
         hits = [2] * 60  # flat, no spike
         self.responses["Q_SPIKE"] = self._spike_response("checkout", hits)
-        text, is_error, next_node = inv.run_error_rate_node(
-            "check_log_spike", "1h ago", "checkout")
+        text, is_error, next_node = inv.run_error_rate_node("check_log_spike", "1h ago", "checkout")
         self.assertFalse(is_error)
         self.assertIsNone(next_node)
         self.assertIn("manual review", text.lower())
 
     def test_service_not_present_in_series_halts(self):
         self.responses["Q_SPIKE"] = self._spike_response("auth", [1] * 60)
-        text, is_error, next_node = inv.run_error_rate_node(
-            "check_log_spike", "1h ago", "checkout")
+        text, is_error, next_node = inv.run_error_rate_node("check_log_spike", "1h ago", "checkout")
         self.assertTrue(is_error)
         self.assertIsNone(next_node)
         self.assertIn("no log-volume data", text.lower())
 
     def test_insufficient_buckets_halts(self):
         self.responses["Q_SPIKE"] = self._spike_response("checkout", [1, 2, 3])
-        text, is_error, next_node = inv.run_error_rate_node(
-            "check_log_spike", "1h ago", "checkout")
+        text, is_error, next_node = inv.run_error_rate_node("check_log_spike", "1h ago", "checkout")
         self.assertTrue(is_error)
         self.assertIsNone(next_node)
         self.assertIn("insufficient", text.lower())
 
     def test_backend_failure_halts(self):
         self.responses["Q_SPIKE"] = ("bzrk timed out", True)
-        text, is_error, next_node = inv.run_error_rate_node(
-            "check_log_spike", "1h ago", "checkout")
+        text, is_error, next_node = inv.run_error_rate_node("check_log_spike", "1h ago", "checkout")
         self.assertTrue(is_error)
         self.assertIsNone(next_node)
         self.assertIn("FAILED", text)
@@ -464,9 +483,9 @@ _MIN_SPIKE_BUCKETS = _RECENT_BUCKET_COUNT * 2  # need real baseline, not just re
 def _node_check_log_spike(since, service):
     if not service:
         return (
-            "check_log_spike requires service (pass the value the start "
-            "node's response gave you).",
-            True, None,
+            "check_log_spike requires service (pass the value the start node's response gave you).",
+            True,
+            None,
         )
     rows, err = _run_json(_q_soc_log_spike, since)
     if err is not None:
@@ -475,8 +494,9 @@ def _node_check_log_spike(since, service):
             f"Error: {err}\n"
             f"Investigation halted at check_log_spike. The error-rate "
             f"elevation from the previous step is still valid; this "
-            f"step's result is unknown, not \"no spike.\"",
-            True, None,
+            f'step\'s result is unknown, not "no spike."',
+            True,
+            None,
         )
     row = next((r for r in rows if str(r.get("service")) == service), None)
     if row is None:
@@ -485,7 +505,8 @@ def _node_check_log_spike(since, service):
             f"No log-volume data for service={service!r} in this window "
             f"— FAILED\n"
             f"Investigation halted at check_log_spike.",
-            True, None,
+            True,
+            None,
         )
     hits = row.get("hits")
     if not isinstance(hits, list) or len(hits) < _MIN_SPIKE_BUCKETS:
@@ -494,16 +515,14 @@ def _node_check_log_spike(since, service):
             f"Result: insufficient buckets for service={service!r} to "
             f"assess a spike (need >= {_MIN_SPIKE_BUCKETS}) — FAILED\n"
             f"Investigation halted at check_log_spike.",
-            True, None,
+            True,
+            None,
         )
     recent = hits[-_RECENT_BUCKET_COUNT:]
     baseline = hits[:-_RECENT_BUCKET_COUNT]
     recent_mean = sum(recent) / len(recent)
     baseline_mean = sum(baseline) / len(baseline)
-    is_spike = (
-        recent_mean > 0 if baseline_mean == 0
-        else recent_mean > baseline_mean * _SPIKE_MULTIPLIER
-    )
+    is_spike = recent_mean > 0 if baseline_mean == 0 else recent_mean > baseline_mean * _SPIKE_MULTIPLIER
     if not is_spike:
         return (
             f"Checked: soc_log_spike (since={since})\n"
@@ -513,16 +532,18 @@ def _node_check_log_spike(since, service):
             f"Investigation complete.\n"
             f"Verdict: error rate elevated for {service!r} but no "
             f"correlated log-volume spike; recommend manual review.",
-            False, None,
+            False,
+            None,
         )
     return (
         f"Checked: soc_log_spike (since={since})\n"
         f"Result: service={service!r} recent volume {recent_mean:.1f}/min "
         f"vs baseline {baseline_mean:.1f}/min — spike confirmed\n"
         f"Branch: correlated spike\n"
-        f"Next: call investigate_error_rate(node=\"check_traces\", "
-        f"since={since!r}, service=\"{service}\") to continue.",
-        False, "check_traces",
+        f'Next: call investigate_error_rate(node="check_traces", '
+        f'since={since!r}, service="{service}") to continue.',
+        False,
+        "check_traces",
     )
 ```
 
@@ -536,8 +557,9 @@ def run_error_rate_node(node, since, service):
         return _node_check_log_spike(since, service)
     return (
         f"Unknown node {node!r}. Call investigate_error_rate with no "
-        f"node argument (or node=\"start\") to begin a new investigation.",
-        True, None,
+        f'node argument (or node="start") to begin a new investigation.',
+        True,
+        None,
     )
 ```
 
@@ -571,8 +593,11 @@ git commit -m "feat: investigation.py check_log_spike node (issue #24)"
 class CheckTracesNodeTest(unittest.TestCase):
     def setUp(self):
         inv.configure(
-            bzrk_search=self._search, since_hours=lambda s: 1.0,
-            q_errors="Q_ERRORS", q_soc_log_spike="Q_SPIKE", q_trace_find_errors="Q_TRACE",
+            bzrk_search=self._search,
+            since_hours=lambda s: 1.0,
+            q_errors="Q_ERRORS",
+            q_soc_log_spike="Q_SPIKE",
+            q_trace_find_errors="Q_TRACE",
         )
         self.responses = {}
 
@@ -590,10 +615,8 @@ class CheckTracesNodeTest(unittest.TestCase):
             ["t2", "GET /cart", "2026-08-28T00:01:00Z", "checkout"],
             ["t3", "POST /pay", "2026-08-28T00:02:00Z", "auth"],
         ]
-        self.responses["Q_TRACE"] = bzrk_json_table(
-            ["trace_id", "span_name", "timestamp", "service"], rows), False
-        text, is_error, next_node = inv.run_error_rate_node(
-            "check_traces", "1h ago", "checkout")
+        self.responses["Q_TRACE"] = bzrk_json_table(["trace_id", "span_name", "timestamp", "service"], rows), False
+        text, is_error, next_node = inv.run_error_rate_node("check_traces", "1h ago", "checkout")
         self.assertFalse(is_error)
         self.assertIsNone(next_node)
         self.assertIn("2 failing", text)
@@ -602,10 +625,8 @@ class CheckTracesNodeTest(unittest.TestCase):
 
     def test_no_matching_traces_concludes_with_ingestion_gap_hypothesis(self):
         rows = [["t1", "GET /health", "2026-08-28T00:00:00Z", "other-service"]]
-        self.responses["Q_TRACE"] = bzrk_json_table(
-            ["trace_id", "span_name", "timestamp", "service"], rows), False
-        text, is_error, next_node = inv.run_error_rate_node(
-            "check_traces", "1h ago", "checkout")
+        self.responses["Q_TRACE"] = bzrk_json_table(["trace_id", "span_name", "timestamp", "service"], rows), False
+        text, is_error, next_node = inv.run_error_rate_node("check_traces", "1h ago", "checkout")
         self.assertFalse(is_error)
         self.assertIsNone(next_node)
         self.assertIn("no failing traces", text.lower())
@@ -613,8 +634,7 @@ class CheckTracesNodeTest(unittest.TestCase):
 
     def test_backend_failure_halts(self):
         self.responses["Q_TRACE"] = ("bzrk timed out", True)
-        text, is_error, next_node = inv.run_error_rate_node(
-            "check_traces", "1h ago", "checkout")
+        text, is_error, next_node = inv.run_error_rate_node("check_traces", "1h ago", "checkout")
         self.assertTrue(is_error)
         self.assertIsNone(next_node)
 ```
@@ -633,17 +653,16 @@ _MAX_EXAMPLE_TRACES = 3
 def _node_check_traces(since, service):
     if not service:
         return (
-            "check_traces requires service (pass the value the previous "
-            "step's response gave you).",
-            True, None,
+            "check_traces requires service (pass the value the previous step's response gave you).",
+            True,
+            None,
         )
     rows, err = _run_json(_q_trace_find_errors, since)
     if err is not None:
         return (
-            f"Checked: trace_find_errors (since={since}) — FAILED\n"
-            f"Error: {err}\n"
-            f"Investigation halted at check_traces.",
-            True, None,
+            f"Checked: trace_find_errors (since={since}) — FAILED\nError: {err}\nInvestigation halted at check_traces.",
+            True,
+            None,
         )
     matching = [r for r in rows if str(r.get("service")) == service]
     if not matching:
@@ -655,12 +674,10 @@ def _node_check_traces(since, service):
             f"confirmed for {service!r}, but no failing traces found — "
             f"investigate ingestion lag or a non-trace-instrumented "
             f"failure path.",
-            False, None,
+            False,
+            None,
         )
-    examples = "; ".join(
-        f"{r.get('span_name')} ({r.get('trace_id')})"
-        for r in matching[:_MAX_EXAMPLE_TRACES]
-    )
+    examples = "; ".join(f"{r.get('span_name')} ({r.get('trace_id')})" for r in matching[:_MAX_EXAMPLE_TRACES])
     return (
         f"Checked: trace_find_errors (since={since})\n"
         f"Result: {len(matching)} failing traces found for "
@@ -670,7 +687,8 @@ def _node_check_traces(since, service):
         f"confirmed, {len(matching)} failing traces found for "
         f"{service!r} — root cause is likely in {service!r}'s own "
         f"request path, not a downstream dependency.",
-        False, None,
+        False,
+        None,
     )
 ```
 
@@ -686,8 +704,9 @@ def run_error_rate_node(node, since, service):
         return _node_check_traces(since, service)
     return (
         f"Unknown node {node!r}. Call investigate_error_rate with no "
-        f"node argument (or node=\"start\") to begin a new investigation.",
-        True, None,
+        f'node argument (or node="start") to begin a new investigation.',
+        True,
+        None,
     )
 ```
 
@@ -719,8 +738,11 @@ git commit -m "feat: investigation.py check_traces node, tree complete (issue #2
 class FullWalkTest(unittest.TestCase):
     def setUp(self):
         inv.configure(
-            bzrk_search=self._search, since_hours=lambda s: 1.0,
-            q_errors="Q_ERRORS", q_soc_log_spike="Q_SPIKE", q_trace_find_errors="Q_TRACE",
+            bzrk_search=self._search,
+            since_hours=lambda s: 1.0,
+            q_errors="Q_ERRORS",
+            q_soc_log_spike="Q_SPIKE",
+            q_trace_find_errors="Q_TRACE",
         )
         self.responses = {}
 
@@ -728,15 +750,15 @@ class FullWalkTest(unittest.TestCase):
         return self.responses[kql]
 
     def test_full_walk_elevated_spike_traces_found(self):
-        self.responses["Q_ERRORS"] = (
-            bzrk_json_table(["service", "errors"], [["checkout", 700]]), False)
-        self.responses["Q_SPIKE"] = (
-            bzrk_json_table(["service", "hits"], [["checkout", [2] * 55 + [20] * 5]]), False)
+        self.responses["Q_ERRORS"] = (bzrk_json_table(["service", "errors"], [["checkout", 700]]), False)
+        self.responses["Q_SPIKE"] = (bzrk_json_table(["service", "hits"], [["checkout", [2] * 55 + [20] * 5]]), False)
         self.responses["Q_TRACE"] = (
             bzrk_json_table(
                 ["trace_id", "span_name", "timestamp", "service"],
                 [["t1", "POST /checkout", "2026-08-28T00:00:00Z", "checkout"]],
-            ), False)
+            ),
+            False,
+        )
 
         text1, err1, next1 = inv.run_error_rate_node("start", "1h ago", None)
         self.assertFalse(err1)
@@ -752,10 +774,8 @@ class FullWalkTest(unittest.TestCase):
         self.assertIn("root cause is likely", text3)
 
     def test_full_walk_elevated_but_no_spike_early_exit(self):
-        self.responses["Q_ERRORS"] = (
-            bzrk_json_table(["service", "errors"], [["checkout", 700]]), False)
-        self.responses["Q_SPIKE"] = (
-            bzrk_json_table(["service", "hits"], [["checkout", [5] * 60]]), False)
+        self.responses["Q_ERRORS"] = (bzrk_json_table(["service", "errors"], [["checkout", 700]]), False)
+        self.responses["Q_SPIKE"] = (bzrk_json_table(["service", "hits"], [["checkout", [5] * 60]]), False)
 
         _, err1, next1 = inv.run_error_rate_node("start", "1h ago", None)
         self.assertFalse(err1)
@@ -777,21 +797,35 @@ class DisplayFormatIndependenceTest(unittest.TestCase):
         # different display text if a fixed tool changed its formatting
         # (different key order, extra whitespace) but carry the same
         # decision-relevant value. Branch outcome must be identical.
-        variant_a = json.dumps({"Tables": [{
-            "schema": {"columns": [{"name": "service"}, {"name": "errors"}]},
-            "rows": [["checkout", 700]],
-        }]})
-        variant_b = json.dumps({"Tables": [{
-            "schema": {"columns": [{"name": "errors"}, {"name": "service"}]},
-            "rows": [[700, "checkout"]],
-        }]}, indent=4)  # different formatting, different column order
+        variant_a = json.dumps(
+            {
+                "Tables": [
+                    {
+                        "schema": {"columns": [{"name": "service"}, {"name": "errors"}]},
+                        "rows": [["checkout", 700]],
+                    }
+                ]
+            }
+        )
+        variant_b = json.dumps(
+            {
+                "Tables": [
+                    {
+                        "schema": {"columns": [{"name": "errors"}, {"name": "service"}]},
+                        "rows": [[700, "checkout"]],
+                    }
+                ]
+            },
+            indent=4,
+        )  # different formatting, different column order
 
         for variant in (variant_a, variant_b):
             with self.subTest(variant=variant[:30]):
                 inv.configure(
                     bzrk_search=lambda kql, since, v=variant: (v, False),
                     since_hours=lambda s: 1.0,
-                    q_errors="Q_ERRORS", q_soc_log_spike="Q_SPIKE",
+                    q_errors="Q_ERRORS",
+                    q_soc_log_spike="Q_SPIKE",
                     q_trace_find_errors="Q_TRACE",
                 )
                 _, is_error, next_node = inv.run_error_rate_node("start", "1h ago", None)
@@ -841,10 +875,14 @@ class InvestigateErrorRateTest(unittest.TestCase):
         bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: (out, err)
 
     def test_start_node_dispatches_and_returns_text(self):
-        doc = {"Tables": [{
-            "schema": {"columns": [{"name": "service"}, {"name": "errors"}]},
-            "rows": [["checkout", 5]],
-        }]}
+        doc = {
+            "Tables": [
+                {
+                    "schema": {"columns": [{"name": "service"}, {"name": "errors"}]},
+                    "rows": [["checkout", 5]],
+                }
+            ]
+        }
         self._mock_bzrk(json.dumps(doc))
         text, err = bm.handle_call("investigate_error_rate", {})
         self.assertFalse(err, text)
@@ -852,8 +890,7 @@ class InvestigateErrorRateTest(unittest.TestCase):
 
     def test_unknown_node_is_reported_as_error(self):
         self._mock_bzrk("(no rows)")
-        text, err = bm.handle_call(
-            "investigate_error_rate", {"node": "not_a_real_node"})
+        text, err = bm.handle_call("investigate_error_rate", {"node": "not_a_real_node"})
         self.assertTrue(err)
         self.assertIn("unknown node", text.lower())
 ```
@@ -890,7 +927,30 @@ investigation.configure(
   `sre_error_rate` entry in the tools list and add this one right after it)**
 
 ```python
-{"name": "investigate_error_rate", "roles": ["sre"], "description": "Fixed decision-tree investigation for an elevated error rate: checks errors_by_service, and if elevated, walks correlated log-volume spike and failing-trace checks — one hop per call, reproducible, no agent-authored composition. Start with no arguments (or node='start'); each response tells you the next call to make.", "inputSchema": {"type": "object", "properties": dict({"node": {"type": "string", "description": "which hop to run; omit or 'start' to begin a new investigation"}, "service": {"type": "string", "maxLength": MAX_INTERPOLATED_NAME_CHARS, "description": "required for node='check_log_spike'/'check_traces' — the service name the previous step's response gave you"}}, **_since())}},
+(
+    {
+        "name": "investigate_error_rate",
+        "roles": ["sre"],
+        "description": "Fixed decision-tree investigation for an elevated error rate: checks errors_by_service, and if elevated, walks correlated log-volume spike and failing-trace checks — one hop per call, reproducible, no agent-authored composition. Start with no arguments (or node='start'); each response tells you the next call to make.",
+        "inputSchema": {
+            "type": "object",
+            "properties": dict(
+                {
+                    "node": {
+                        "type": "string",
+                        "description": "which hop to run; omit or 'start' to begin a new investigation",
+                    },
+                    "service": {
+                        "type": "string",
+                        "maxLength": MAX_INTERPOLATED_NAME_CHARS,
+                        "description": "required for node='check_log_spike'/'check_traces' — the service name the previous step's response gave you",
+                    },
+                },
+                **_since(),
+            ),
+        },
+    },
+)
 ```
 
 - [ ] **Step 5: Add the TITLES entry**

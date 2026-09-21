@@ -101,9 +101,13 @@ class IngestionAdvisorMcpTest(unittest.TestCase):
         bm.REDACT_MODE = self.orig_mode
 
     def test_mcp_gap_check_runs_service_and_metric_inventories(self):
-        text, err = bm.handle_call("suggest_ingestion", {
-            "role_or_usecase": "soc/endpoint-identity", "check_gap": True,
-        })
+        text, err = bm.handle_call(
+            "suggest_ingestion",
+            {
+                "role_or_usecase": "soc/endpoint-identity",
+                "check_gap": True,
+            },
+        )
         self.assertFalse(err)
         self.assertIn("[present] AWS CloudTrail", text)
         self.assertEqual(len(self.calls), 2)
@@ -128,9 +132,13 @@ class IngestionAdvisorMcpTest(unittest.TestCase):
             for role in ("all", "sre", "soc", "claude", "ops"):
                 with self.subTest(role=role):
                     bm.ACTIVE_ROLE = role
-                    response = bm.dispatch({
-                        "jsonrpc": "2.0", "id": 1, "method": "tools/list",
-                    })
+                    response = bm.dispatch(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "tools/list",
+                        }
+                    )
                     names = {tool["name"] for tool in response["result"]["tools"]}
                     self.assertIn("suggest_ingestion", names)
         finally:

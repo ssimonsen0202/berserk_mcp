@@ -5,6 +5,7 @@ file-reading/offset/POST wrapper -- also get direct tests here (a manual live
 smoke test against real ~/.codex data caught the happy path but missed the
 partial-line, failed-POST, and dry-run state-mutation bugs a real reviewer
 found; those paths are exercised explicitly below now)."""
+
 import json
 import sys
 import tempfile
@@ -22,14 +23,23 @@ def _line(type_, payload):
 
 class ParseCodexLineTest(unittest.TestCase):
     def test_token_count_event_extracts_usage_fields(self):
-        rec = ca.parse_codex_line(_line("event_msg", {
-            "type": "token_count",
-            "info": {"last_token_usage": {
-                "input_tokens": 25821, "cached_input_tokens": 11008,
-                "output_tokens": 264, "total_tokens": 26085,
-            }},
-            "rate_limits": {"primary": {"used_percent": 82.0}},
-        }))
+        rec = ca.parse_codex_line(
+            _line(
+                "event_msg",
+                {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 25821,
+                            "cached_input_tokens": 11008,
+                            "output_tokens": 264,
+                            "total_tokens": 26085,
+                        }
+                    },
+                    "rate_limits": {"primary": {"used_percent": 82.0}},
+                },
+            )
+        )
         self.assertEqual(rec["type"], "token_count")
         self.assertEqual(rec["input_tokens"], 25821)
         self.assertEqual(rec["cached_input_tokens"], 11008)
@@ -38,29 +48,54 @@ class ParseCodexLineTest(unittest.TestCase):
         self.assertEqual(rec["quota_used_percent"], 82.0)
 
     def test_token_count_event_without_rate_limits_omits_quota_field(self):
-        rec = ca.parse_codex_line(_line("event_msg", {
-            "type": "token_count",
-            "info": {"last_token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}},
-        }))
+        rec = ca.parse_codex_line(
+            _line(
+                "event_msg",
+                {
+                    "type": "token_count",
+                    "info": {"last_token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}},
+                },
+            )
+        )
         self.assertNotIn("quota_used_percent", rec)
 
     def test_function_call_extracts_tool_name(self):
-        rec = ca.parse_codex_line(_line("response_item", {
-            "type": "function_call", "name": "spawn_agent", "arguments": "{}",
-        }))
+        rec = ca.parse_codex_line(
+            _line(
+                "response_item",
+                {
+                    "type": "function_call",
+                    "name": "spawn_agent",
+                    "arguments": "{}",
+                },
+            )
+        )
         self.assertEqual(rec["type"], "tool_call")
         self.assertEqual(rec["tool_names"], "spawn_agent")
 
     def test_function_call_output_is_a_tool_result_record(self):
-        rec = ca.parse_codex_line(_line("response_item", {
-            "type": "function_call_output", "call_id": "call_123", "output": "{\"ok\":true}",
-        }))
+        rec = ca.parse_codex_line(
+            _line(
+                "response_item",
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": '{"ok":true}',
+                },
+            )
+        )
         self.assertEqual(rec["type"], "tool_result")
 
     def test_user_message_extracts_role_and_text(self):
-        rec = ca.parse_codex_line(_line("event_msg", {
-            "type": "user_message", "message": "how do I connect codex to claude code",
-        }))
+        rec = ca.parse_codex_line(
+            _line(
+                "event_msg",
+                {
+                    "type": "user_message",
+                    "message": "how do I connect codex to claude code",
+                },
+            )
+        )
         self.assertEqual(rec["type"], "user")
         self.assertEqual(rec["body"], "how do I connect codex to claude code")
 
@@ -123,7 +158,13 @@ class RedactTest(unittest.TestCase):
 
 
 def _token_count_line():
-    return _line("event_msg", {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}})
+    return _line(
+        "event_msg",
+        {
+            "type": "token_count",
+            "info": {"last_token_usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}},
+        },
+    )
 
 
 class ProcessFileTest(unittest.TestCase):

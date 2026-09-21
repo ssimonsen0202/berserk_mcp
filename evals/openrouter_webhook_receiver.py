@@ -91,9 +91,7 @@ def extract_spans(payload):
     """Flatten an OTLP/JSON resourceSpans payload into one dict per span."""
     rows = []
     for resource_span in payload.get("resourceSpans") or []:
-        resource_attrs = _attrs_to_dict(
-            (resource_span.get("resource") or {}).get("attributes")
-        )
+        resource_attrs = _attrs_to_dict((resource_span.get("resource") or {}).get("attributes"))
         service_name = resource_attrs.get("service.name")
         for scope_span in resource_span.get("scopeSpans") or []:
             for span in scope_span.get("spans") or []:
@@ -185,13 +183,17 @@ def spans_to_berserk_payload(payload, redact=default_redact):
                 records.append(span_to_log_record(span, redact=redact))
         if not records:
             continue
-        resource_logs.append({
-            "resource": resource,
-            "scopeLogs": [{
-                "scope": {"name": "openrouter-webhook-forwarder", "version": "1"},
-                "logRecords": records,
-            }],
-        })
+        resource_logs.append(
+            {
+                "resource": resource,
+                "scopeLogs": [
+                    {
+                        "scope": {"name": "openrouter-webhook-forwarder", "version": "1"},
+                        "logRecords": records,
+                    }
+                ],
+            }
+        )
     if not resource_logs:
         return None
     return {"resourceLogs": resource_logs}
@@ -204,7 +206,10 @@ def post_to_berserk(endpoint, payload, timeout=10, opener=urllib.request.urlopen
     have already completed by the time this is called."""
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        endpoint, data=data, headers={"Content-Type": "application/json"}, method="POST",
+        endpoint,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
     try:
         with opener(req, timeout=timeout) as resp:

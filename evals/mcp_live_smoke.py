@@ -11,6 +11,7 @@ Examples:
   python evals/mcp_live_smoke.py --server-command berserk-mcp --since "30d ago"
   python evals/mcp_live_smoke.py --json-out /tmp/berserk-mcp-live-smoke.json
 """
+
 import argparse
 import json
 import os
@@ -169,7 +170,9 @@ def classify_validation(label, response):
             return "FAIL", "known-good static validation returned an MCP error"
         return "PASS", "known-good query did not error"
     if label in ("validate_kql_semicolon", "validate_kql_source_operator"):
-        blocked = any(word in text for word in ("invalid", "reject", "error", "semicolon", "source-introducing", "union"))
+        blocked = any(
+            word in text for word in ("invalid", "reject", "error", "semicolon", "source-introducing", "union")
+        )
         if blocked or result_is_error(response):
             return "PASS", "unsafe query was rejected or reported invalid"
         return "FAIL", "unsafe query did not appear to be rejected"
@@ -232,12 +235,14 @@ def main():
             exit_code = 1
         for label, name, args in READ_ONLY_CALLS:
             if name not in names:
-                report["checks"].append({
-                    "label": label,
-                    "tool": name,
-                    "status": "SKIP",
-                    "reason": "tool not visible",
-                })
+                report["checks"].append(
+                    {
+                        "label": label,
+                        "tool": name,
+                        "status": "SKIP",
+                        "reason": "tool not visible",
+                    }
+                )
                 continue
             call_args = dict(args)
             if ns.since and "since" in call_args:
@@ -253,15 +258,17 @@ def main():
                 status, reason = "FAIL", str(exc)[:300]
             if status == "FAIL":
                 exit_code = 1
-            report["checks"].append({
-                "label": label,
-                "tool": name,
-                "arguments": call_args,
-                "status": status,
-                "reason": reason,
-                "elapsed_seconds": round(elapsed, 3),
-                "is_error": result_is_error(response) if isinstance(response, dict) else True,
-            })
+            report["checks"].append(
+                {
+                    "label": label,
+                    "tool": name,
+                    "arguments": call_args,
+                    "status": status,
+                    "reason": reason,
+                    "elapsed_seconds": round(elapsed, 3),
+                    "is_error": result_is_error(response) if isinstance(response, dict) else True,
+                }
+            )
     finally:
         client.close()
 

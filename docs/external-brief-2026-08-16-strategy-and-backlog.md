@@ -290,8 +290,7 @@ rule are the mitigations. Version bump + changelog note required.
 **Gap.** `since` appears on 51 of 59 tools. Its schema (`:1472-1473`) is:
 
 ```python
-{"since": {"type": "string",
-           "description": "Time window e.g. '15m ago', '1h ago', '2d ago'."}}
+{"since": {"type": "string", "description": "Time window e.g. '15m ago', '1h ago', '2d ago'."}}
 ```
 
 No `pattern`, no `enum`, no `examples`, no `default`. The only `pattern` in the whole

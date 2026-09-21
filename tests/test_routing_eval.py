@@ -7,6 +7,7 @@ and returns plausible output, proving the tool descriptions are unambiguous enou
 Each test is named after the prompt intent. The "expected tool" is what the model should call.
 Run with BERSERK_MCP_ROLE=sre / soc / claude to verify lane-specific routing works.
 """
+
 import sys
 import tempfile
 import unittest
@@ -116,11 +117,14 @@ class SRERoutingEval(RoutingEvalBase):
     # --- save then reuse pattern ---
     def test_save_then_run_saved(self):
         # "save this query so I can reuse it"
-        bm.handle_call("save_query", {
-            "name": "my_sre_check",
-            "description": "custom SRE check",
-            "kql": "default | take 5",
-        })
+        bm.handle_call(
+            "save_query",
+            {
+                "name": "my_sre_check",
+                "description": "custom SRE check",
+                "kql": "default | take 5",
+            },
+        )
         text, err = bm.handle_call("run_saved", {"name": "my_sre_check"})
         self.assertFalse(err)
 

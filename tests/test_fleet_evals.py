@@ -35,7 +35,7 @@ class FleetEvalPureTest(unittest.TestCase):
         self.assertEqual(result["legitimate_retry_delay"], 0)
 
     def test_latency_recommendation_rule(self):
-        self.assertEqual(latency_eval.percentile([1, 2, 3, 4], .95), 4)
+        self.assertEqual(latency_eval.percentile([1, 2, 3, 4], 0.95), 4)
 
 
 if __name__ == "__main__":

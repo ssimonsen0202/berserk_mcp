@@ -9,6 +9,7 @@ Examples:
   BERSERK_MCP_ROLE=claude python evals/ai_finops_data_quality.py
   python evals/ai_finops_data_quality.py --json-out /tmp/finops-dq.json
 """
+
 import argparse
 import json
 import os
@@ -190,26 +191,30 @@ def main():
                 if status == "FAIL":
                     exit_code = 1
                 nums = extract_numbers(text)
-                reason = (text.replace("\n", " ")[:300] if text.strip() else "empty result")
-                report["calls"].append({
-                    "label": label,
-                    "tool": tool,
-                    "arguments": call_args,
-                    "status": status,
-                    "reason": reason,
-                    "elapsed_seconds": round(time.time() - t0, 3),
-                    "numeric_values_seen": len(nums),
-                })
+                reason = text.replace("\n", " ")[:300] if text.strip() else "empty result"
+                report["calls"].append(
+                    {
+                        "label": label,
+                        "tool": tool,
+                        "arguments": call_args,
+                        "status": status,
+                        "reason": reason,
+                        "elapsed_seconds": round(time.time() - t0, 3),
+                        "numeric_values_seen": len(nums),
+                    }
+                )
             except Exception as exc:
                 exit_code = 1
-                report["calls"].append({
-                    "label": label,
-                    "tool": tool,
-                    "arguments": call_args,
-                    "status": "FAIL",
-                    "reason": str(exc)[:300],
-                    "elapsed_seconds": round(time.time() - t0, 3),
-                })
+                report["calls"].append(
+                    {
+                        "label": label,
+                        "tool": tool,
+                        "arguments": call_args,
+                        "status": "FAIL",
+                        "reason": str(exc)[:300],
+                        "elapsed_seconds": round(time.time() - t0, 3),
+                    }
+                )
     finally:
         client.close()
 

@@ -6,6 +6,7 @@ eval data in evals/run_ledger.jsonl (2026-09-03). Two must be found; the
 third is a documented structural miss (see the module docstring) and must
 stay a documented miss, not silently start passing or failing differently
 without someone noticing and updating the docs."""
+
 import io
 import sys
 import unittest
@@ -63,22 +64,23 @@ class GroundTruthCollisionsTest(unittest.TestCase):
         script's threshold. Tracked here so a future edit that pushes the
         ratio further doesn't go unnoticed, without hard-requiring a
         specific value that wording changes will keep nudging around."""
-        scores = tc.self_query_scores(
-            td.build_index(bm.TOOLS + bm.MGMT_TOOLS), bm.TOOLS + bm.MGMT_TOOLS, top_k=8
-        )
-        ratio = next((r for n, _s, r in scores["claude_workflow_insights"]
-                     if n == "claude_token_burn"), 0.0)
-        self.assertGreater(ratio, 0.3,
+        scores = tc.self_query_scores(td.build_index(bm.TOOLS + bm.MGMT_TOOLS), bm.TOOLS + bm.MGMT_TOOLS, top_k=8)
+        ratio = next((r for n, _s, r in scores["claude_workflow_insights"] if n == "claude_token_burn"), 0.0)
+        self.assertGreater(
+            ratio,
+            0.3,
             f"claude_workflow_insights/claude_token_burn description ratio "
             f"dropped to {ratio:.2f} -- if this keeps falling, confirm the "
             "reciprocal disambiguator on claude_token_burn is still present "
-            "and still doing the real protective work.")
+            "and still doing the real protective work.",
+        )
 
     def test_search_pair_found_and_isolated(self):
         self.assertTrue(_same_cluster(self.clusters, "claude_search", "search"))
         members = next(m for m, _w, _e in self.clusters if "claude_search" in m)
         self.assertEqual(
-            sorted(members), ["claude_search", "search"],
+            sorted(members),
+            ["claude_search", "search"],
             "claude_search/search should be an isolated pair, not merged into "
             "a larger cluster -- a bigger cluster here would mean the method "
             "is over-firing on this pair specifically.",
@@ -110,15 +112,20 @@ class NameTokenEdgesTest(unittest.TestCase):
         tools = bm.TOOLS + bm.MGMT_TOOLS
         index = td.build_index(tools)
         edges = tc.name_token_edges(index)
-        self.assertNotIn("claude", edges.values(),
-                          "'claude' must not be used as a collision edge -- "
-                          "it's a lane prefix, not a signal.")
+        self.assertNotIn(
+            "claude",
+            edges.values(),
+            "'claude' must not be used as a collision edge -- it's a lane prefix, not a signal.",
+        )
         per_tool, _doc_freq = index
         claude_tools = [n for n in per_tool if n.startswith("claude_")]
-        self.assertGreater(len(claude_tools), tc.MAX_NAME_TOKEN_SHARE,
-                            "test assumption: more claude_* tools than the "
-                            "share cutoff, so 'claude' as a name token must "
-                            "be excluded by MAX_NAME_TOKEN_SHARE")
+        self.assertGreater(
+            len(claude_tools),
+            tc.MAX_NAME_TOKEN_SHARE,
+            "test assumption: more claude_* tools than the "
+            "share cutoff, so 'claude' as a name token must "
+            "be excluded by MAX_NAME_TOKEN_SHARE",
+        )
 
     def test_sre_soc_over_firing_guard_still_fires(self):
         """SRE and SOC measured 95-96% real accuracy at full schema
@@ -131,14 +138,16 @@ class NameTokenEdgesTest(unittest.TestCase):
         clusters = _clusters()
         for role in ("sre", "soc"):
             with self.subTest(role=role):
-                count = tc.report(clusters, tools_by_name=tools_by_name,
-                                  role=role, file=io.StringIO())
-                self.assertGreater(count, 3,
+                count = tc.report(clusters, tools_by_name=tools_by_name, role=role, file=io.StringIO())
+                self.assertGreater(
+                    count,
+                    3,
                     f"role={role} previously over-fired (>3 clusters) against "
                     "a lane that measures 95-96% real accuracy -- if this "
                     "count dropped to <=3, the guard in tool_collisions.main() "
                     "would stop firing silently; that's a behavior change "
-                    "worth a human noticing, not passing quietly.")
+                    "worth a human noticing, not passing quietly.",
+                )
 
 
 if __name__ == "__main__":

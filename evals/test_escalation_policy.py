@@ -1,4 +1,5 @@
 """Unit tests for escalation_policy — pure logic, no network/I/O."""
+
 import sys
 import unittest
 from pathlib import Path
@@ -8,7 +9,6 @@ import escalation_policy as ep
 
 
 class TestShouldEscalate(unittest.TestCase):
-
     # ── no tool call → always escalate ────────────────────────────────────────
     def test_none_tool_escalates(self):
         d = ep.should_escalate(None, {})
@@ -29,6 +29,7 @@ class TestShouldEscalate(unittest.TestCase):
     # ── deep-only tools ────────────────────────────────────────────────────────
     def test_deep_only_tool_escalates(self):
         import escalation_policy as ep2
+
         orig = ep2.DEEP_ONLY_TOOLS
         ep2.DEEP_ONLY_TOOLS = frozenset({"my_synthesis_tool"})
         try:
@@ -75,7 +76,6 @@ class TestShouldEscalate(unittest.TestCase):
 
 
 class TestTierForCase(unittest.TestCase):
-
     def test_small_tier_label(self):
         self.assertEqual(ep.tier_for_case({"tier": "small"}), "small")
 

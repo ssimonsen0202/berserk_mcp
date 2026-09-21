@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Trace-replay simulator for the in-process result-cache TTL."""
+
 import argparse
 import json
 import random
@@ -20,11 +21,15 @@ def replay(trace, ttl):
         else:
             entries[key] = now
     calls = len(trace)
-    return {"ttl": ttl, "calls": calls, "hits": hits,
-            "hit_rate": hits / calls if calls else 0.0,
-            "cluster_calls_avoided": hits,
-            "median_staleness": sorted(staleness)[len(staleness) // 2] if staleness else 0.0,
-            "p95_staleness": sorted(staleness)[max(0, int(.95 * len(staleness)) - 1)] if staleness else 0.0}
+    return {
+        "ttl": ttl,
+        "calls": calls,
+        "hits": hits,
+        "hit_rate": hits / calls if calls else 0.0,
+        "cluster_calls_avoided": hits,
+        "median_staleness": sorted(staleness)[len(staleness) // 2] if staleness else 0.0,
+        "p95_staleness": sorted(staleness)[max(0, int(0.95 * len(staleness)) - 1)] if staleness else 0.0,
+    }
 
 
 def synthetic_trace(count=500, seed=20260723):
@@ -35,17 +40,20 @@ def synthetic_trace(count=500, seed=20260723):
     for _ in range(count):
         now += rng.expovariate(1 / 4.0)
         tool = rng.choice(tools)
-        trace.append({"ts": now, "tool": tool, "args_hash": "default" if rng.random() < .7 else str(rng.randrange(5))})
+        trace.append({"ts": now, "tool": tool, "args_hash": "default" if rng.random() < 0.7 else str(rng.randrange(5))})
     return trace
 
 
 def run(trace):
     rows = [replay(trace, ttl) for ttl in (0, 15, 30, 60, 120, 300)]
     maximum = max((r["hit_rate"] for r in rows), default=0)
-    acceptable = [r["ttl"] for r in rows if r["hit_rate"] >= .8 * maximum]
+    acceptable = [r["ttl"] for r in rows if r["hit_rate"] >= 0.8 * maximum]
     recommendation = min(acceptable) if acceptable else 0
-    return {"rows": rows, "recommendation_seconds": recommendation,
-            "rule": "smallest TTL achieving >=80% of maximum achievable hit rate"}
+    return {
+        "rows": rows,
+        "recommendation_seconds": recommendation,
+        "rule": "smallest TTL achieving >=80% of maximum achievable hit rate",
+    }
 
 
 def load_trace(path):

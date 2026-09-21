@@ -11,6 +11,7 @@ Escalation triggers (any one is sufficient):
 
 Policy constants are module-level so callers can override in tests.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -28,9 +29,9 @@ MAX_SMALL_RETRIES: int = 1
 
 @dataclass(frozen=True)
 class RoutingDecision:
-    handled_by: str           # "small" | "deep"
+    handled_by: str  # "small" | "deep"
     escalated: bool
-    reason: str               # human-readable explanation
+    reason: str  # human-readable explanation
 
 
 def should_escalate(

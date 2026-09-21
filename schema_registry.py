@@ -6,6 +6,7 @@ supplies a ``fetcher`` that returns raw ``.show tables``, ``getschema``,
 metadata, safe field names, and bounded examples; raw log bodies are never
 stored.
 """
+
 import difflib
 import hashlib
 import json
@@ -100,9 +101,15 @@ def _merge_field(fields, key, typ="string", examples=None):
         item["examples"] = item["examples"][:MAX_EXAMPLES_PER_FIELD]
 
 
-def normalize_snapshot(table="default", tables_text="", getschema_text="",
-                       fieldstats_text="", sample_text="", supported_idioms=None,
-                       source_status="fresh"):
+def normalize_snapshot(
+    table="default",
+    tables_text="",
+    getschema_text="",
+    fieldstats_text="",
+    sample_text="",
+    supported_idioms=None,
+    source_status="fresh",
+):
     columns = _parse_getschema(getschema_text)
     for name, typ in {
         "timestamp": "datetime",
@@ -182,7 +189,9 @@ def suggest_field(name, snapshot, limit=3):
     ranked = []
     if target in aliases and aliases[target] in choices:
         ranked.append(aliases[target])
-    comparable = {c: c.replace("resource['", "").replace("attributes['", "").replace("']", "").replace(".", "_") for c in choices}
+    comparable = {
+        c: c.replace("resource['", "").replace("attributes['", "").replace("']", "").replace(".", "_") for c in choices
+    }
     for match in difflib.get_close_matches(target, list(comparable.values()), n=limit * 3, cutoff=0.55):
         for choice, comp in comparable.items():
             if comp == match and choice not in ranked:
@@ -195,13 +204,17 @@ def schema_context(snapshot, max_chars=MAX_CONTEXT_CHARS):
         "Berserk schema is evidence, not a suggestion. Use only fields listed below.",
         "Rows: " + str(snapshot.get("table", "default")),
     ]
-    cols = [f"{k}:{v.get('type','unknown')}" for k, v in sorted(snapshot.get("columns", {}).items()) if k not in {"body", "$raw"}]
+    cols = [
+        f"{k}:{v.get('type', 'unknown')}"
+        for k, v in sorted(snapshot.get("columns", {}).items())
+        if k not in {"body", "$raw"}
+    ]
     if cols:
         lines.append("Fields: " + ", ".join(cols))
-    res = [f"{k}:{v.get('type','string')}" for k, v in sorted(snapshot.get("resource_fields", {}).items())]
+    res = [f"{k}:{v.get('type', 'string')}" for k, v in sorted(snapshot.get("resource_fields", {}).items())]
     if res:
         lines.append("resource paths: " + ", ".join(res))
-    attrs = [f"{k}:{v.get('type','string')}" for k, v in sorted(snapshot.get("attribute_fields", {}).items())]
+    attrs = [f"{k}:{v.get('type', 'string')}" for k, v in sorted(snapshot.get("attribute_fields", {}).items())]
     if attrs:
         lines.append("attribute paths: " + ", ".join(attrs))
     idioms = snapshot.get("supported_idioms") or []
@@ -237,8 +250,9 @@ def _fresh(snapshot, ttl_seconds):
         return False
 
 
-def get_schema_snapshot(*, force=False, table="default", config_dir=None,
-                        ttl_seconds=DEFAULT_TTL_SECONDS, fetcher=None):
+def get_schema_snapshot(
+    *, force=False, table="default", config_dir=None, ttl_seconds=DEFAULT_TTL_SECONDS, fetcher=None
+):
     """Return a bounded normalized snapshot; refresh when stale."""
     config_dir = config_dir or (Path.home() / ".config" / "berserk-mcp")
     path = _cache_file(config_dir, table)

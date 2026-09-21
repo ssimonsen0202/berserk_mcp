@@ -1482,13 +1482,14 @@ bzrk -P local search "default | where metric_name == 'system.network.io' \
 **2. Add the tool entry:**
 
 ```python
-TOOLS.append({
-    "name": "host_network",
-    "roles": ["sre"],          # omit to make visible to all lanes
-    "description": "Total network bytes (sum) per host. Per-HOST; for per-container "
-                   "network use `search` for now.",
-    "inputSchema": {"type": "object", "properties": _since()},
-})
+TOOLS.append(
+    {
+        "name": "host_network",
+        "roles": ["sre"],  # omit to make visible to all lanes
+        "description": "Total network bytes (sum) per host. Per-HOST; for per-container network use `search` for now.",
+        "inputSchema": {"type": "object", "properties": _since()},
+    }
+)
 TITLES["host_network"] = "Per-Host Network I/O"
 ```
 

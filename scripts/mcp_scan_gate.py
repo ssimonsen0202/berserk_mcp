@@ -107,11 +107,19 @@ def run_scanner(stderr_path, learned_store):
     mistake for a clean run.
     """
     cmd = [
-        "mcp-scanner", "--analyzers", "yara", "--raw",
-        "stdio", "--stdio-command", sys.executable,
-        "--stdio-arg", str(SERVER),
-        "--stdio-env", f"BERSERK_MCP_LEARNED_PATH={learned_store}",
-        "--stderr-file", str(stderr_path),
+        "mcp-scanner",
+        "--analyzers",
+        "yara",
+        "--raw",
+        "stdio",
+        "--stdio-command",
+        sys.executable,
+        "--stdio-arg",
+        str(SERVER),
+        "--stdio-env",
+        f"BERSERK_MCP_LEARNED_PATH={learned_store}",
+        "--stderr-file",
+        str(stderr_path),
     ]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO_ROOT)
@@ -121,26 +129,24 @@ def run_scanner(stderr_path, learned_store):
         raise RuntimeError(
             "mcp-scanner is not installed or not on PATH. Install it with: "
             "uv tool install --python 3.13 cisco-ai-mcp-scanner "
-            "(or pip install cisco-ai-mcp-scanner)") from exc
+            "(or pip install cisco-ai-mcp-scanner)"
+        ) from exc
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"mcp-scanner exited {proc.returncode}\n{proc.stderr[-2000:]}")
+        raise RuntimeError(f"mcp-scanner exited {proc.returncode}\n{proc.stderr[-2000:]}")
     try:
         records = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         raise RuntimeError(
-            f"mcp-scanner produced unparseable output: {exc}\n"
-            f"first 500 bytes: {proc.stdout[:500]!r}") from exc
+            f"mcp-scanner produced unparseable output: {exc}\nfirst 500 bytes: {proc.stdout[:500]!r}"
+        ) from exc
     if not isinstance(records, list) or not records:
-        raise RuntimeError(
-            "mcp-scanner returned no tool records -- treating as a failed "
-            "scan, not a clean one")
-    incomplete = [r.get("tool_name", "<unnamed>") for r in records
-                  if r.get("status") != "completed"]
+        raise RuntimeError("mcp-scanner returned no tool records -- treating as a failed scan, not a clean one")
+    incomplete = [r.get("tool_name", "<unnamed>") for r in records if r.get("status") != "completed"]
     if incomplete:
         raise RuntimeError(
             "these tools did not complete analysis, so their result is "
-            f"unknown rather than safe: {', '.join(sorted(incomplete))}")
+            f"unknown rather than safe: {', '.join(sorted(incomplete))}"
+        )
     # status == "completed" is NOT sufficient. Read mcpscanner's
     # core/scanner.py: an analyzer that raises is caught, logged via
     # logger.error, and the result is still returned with status="completed"
@@ -149,14 +155,14 @@ def run_scanner(stderr_path, learned_store):
     # produced a result. Raised by a Codex Security review 2026-09-06 as
     # "does the installed scanner serialize YARA analyzer exceptions as
     # completed and safe?" -- it does.
-    missing = [r.get("tool_name", "<unnamed>") for r in records
-               if "yara_analyzer" not in (r.get("findings") or {})]
+    missing = [r.get("tool_name", "<unnamed>") for r in records if "yara_analyzer" not in (r.get("findings") or {})]
     if missing:
         raise RuntimeError(
             "the yara analyzer produced no result for these tools, so they "
             "are unanalyzed rather than safe (an analyzer exception is "
             "logged but still reported as completed): "
-            f"{', '.join(sorted(missing))}")
+            f"{', '.join(sorted(missing))}"
+        )
     return records
 
 
@@ -209,19 +215,31 @@ def load_baseline():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--update-baseline", action="store_true",
-                    help="rewrite the baseline from the current scan; review "
-                         "the diff and add a reason for each new entry before "
-                         "committing it")
+    ap.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help="rewrite the baseline from the current scan; review "
+        "the diff and add a reason for each new entry before "
+        "committing it",
+    )
     args = ap.parse_args()
 
     stderr_path = REPO_ROOT / ".mcp-scan-stderr.log"
     tmpdir = tempfile.mkdtemp(prefix="mcp-scan-gate-")
     store = Path(tmpdir) / "learned.json"
-    store.write_text(json.dumps([{
-        "name": CANARY_NAME, "description": CANARY_DESCRIPTION,
-        "kql": "default | take 1", "origin": "user",
-    }]), encoding="utf-8")
+    store.write_text(
+        json.dumps(
+            [
+                {
+                    "name": CANARY_NAME,
+                    "description": CANARY_DESCRIPTION,
+                    "kql": "default | take 1",
+                    "origin": "user",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
     try:
         records = run_scanner(stderr_path, store)
     except RuntimeError as exc:
@@ -236,14 +254,15 @@ def main():
     # The canary must be flagged. If it is not, detection is not working and
     # every other "safe" verdict in this run is unevidenced.
     if CANARY_TOOL not in found:
-        print(f"FAIL: the poisoned canary ({CANARY_TOOL}) was NOT flagged. "
-              "Detection is not working, so the clean result for every other "
-              "tool is unevidenced. Check that the scanner's YARA rules "
-              "loaded and that saved queries still project into tools/list.",
-              file=sys.stderr)
+        print(
+            f"FAIL: the poisoned canary ({CANARY_TOOL}) was NOT flagged. "
+            "Detection is not working, so the clean result for every other "
+            "tool is unevidenced. Check that the scanner's YARA rules "
+            "loaded and that saved queries still project into tools/list.",
+            file=sys.stderr,
+        )
         return 1
-    print(f"canary check: {CANARY_TOOL} correctly flagged "
-          f"({found[CANARY_TOOL]['detail']})")
+    print(f"canary check: {CANARY_TOOL} correctly flagged ({found[CANARY_TOOL]['detail']})")
     found.pop(CANARY_TOOL)
 
     baseline = load_baseline()
@@ -265,12 +284,11 @@ def main():
             "accepted risk -- never to silence something real. "
             "description_sha256 binds the acceptance to the exact reviewed "
             "text: if the tool's description changes, the entry stops "
-            "matching and the finding returns for re-review.")
+            "matching and the finding returns for re-review."
+        )
         payload["accepted"] = entries
-        BASELINE_PATH.write_text(json.dumps(payload, indent=2) + "\n",
-                                 encoding="utf-8")
-        print(f"baseline rewritten with {len(found)} entries -- add a reason "
-              f"for each before committing")
+        BASELINE_PATH.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        print(f"baseline rewritten with {len(found)} entries -- add a reason for each before committing")
         return 0
 
     new = sorted(set(found) - set(baseline))
@@ -278,13 +296,13 @@ def main():
     # A baselined name whose description has since changed is NOT accepted:
     # the acceptance was granted to reviewed text, not to a name.
     changed = sorted(
-        name for name in (set(found) & set(baseline))
+        name
+        for name in (set(found) & set(baseline))
         if baseline[name].get("description_sha256")
         and baseline[name]["description_sha256"] != found[name]["fingerprint"]
     )
 
-    print(f"scanned {len(records)} tools; "
-          f"{len(found)} unsafe, {len(baseline)} accepted in baseline")
+    print(f"scanned {len(records)} tools; {len(found)} unsafe, {len(baseline)} accepted in baseline")
 
     if stale:
         # Not a failure: a finding disappearing is good news. But it means
@@ -300,16 +318,22 @@ def main():
             for name in new:
                 print(f"  - {name}: {found[name]['detail']}", file=sys.stderr)
         if changed:
-            print("\nFAIL: baselined tools whose description changed since it "
-                  "was reviewed -- the acceptance applied to the old text, "
-                  "not to the name:", file=sys.stderr)
+            print(
+                "\nFAIL: baselined tools whose description changed since it "
+                "was reviewed -- the acceptance applied to the old text, "
+                "not to the name:",
+                file=sys.stderr,
+            )
             for name in changed:
-                print(f"  - {name}: reviewed "
-                      f"{baseline[name]['description_sha256']}, now "
-                      f"{found[name]['fingerprint']}", file=sys.stderr)
-        print("\nIf these are genuine, fix them. If they are false positives, "
-              "run with --update-baseline and record a reason per entry.",
-              file=sys.stderr)
+                print(
+                    f"  - {name}: reviewed {baseline[name]['description_sha256']}, now {found[name]['fingerprint']}",
+                    file=sys.stderr,
+                )
+        print(
+            "\nIf these are genuine, fix them. If they are false positives, "
+            "run with --update-baseline and record a reason per entry.",
+            file=sys.stderr,
+        )
         return 1
 
     print("\nOK: no new findings")

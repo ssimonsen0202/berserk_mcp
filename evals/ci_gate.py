@@ -15,6 +15,7 @@ suite as it stood then (31 cases, mock backend measured 87.1%). Ratchet
 up as evals/router_cases.jsonl grows more targeted phrasings (issue #13's
 own Phase 2, tracked as the same issue).
 """
+
 import json
 import math
 import subprocess
@@ -41,7 +42,10 @@ def check_accuracy(results, min_accuracy=MIN_TOOL_ACCURACY):
     pct = accuracy * 100
     min_pct = min_accuracy * 100
     if accuracy < min_accuracy:
-        return False, f"router eval regression: tool-selection accuracy {pct:.1f}% is below the {min_pct:.0f}% CI threshold"
+        return (
+            False,
+            f"router eval regression: tool-selection accuracy {pct:.1f}% is below the {min_pct:.0f}% CI threshold",
+        )
     return True, f"router eval OK: {pct:.1f}% >= {min_pct:.0f}% threshold"
 
 
@@ -49,9 +53,10 @@ def _run_eval_and_load_results():
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     before = set(RESULTS_DIR.glob("mock_*.json"))
     result = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "evals" / "run_eval.py"),
-         "--backend", "mock", str(CASES_PATH)],
-        capture_output=True, text=True, timeout=120,
+        [sys.executable, str(REPO_ROOT / "evals" / "run_eval.py"), "--backend", "mock", str(CASES_PATH)],
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
     print(result.stdout)
     if result.stderr:

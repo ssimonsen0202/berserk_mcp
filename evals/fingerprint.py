@@ -15,6 +15,7 @@ proof the provider swapped the model. Temperature 0 is not guaranteed
 deterministic across providers -- batching and hardware nondeterminism can
 change output with no model change. Every caller must report it that way.
 """
+
 import hashlib
 import json
 import sys
@@ -64,8 +65,7 @@ def metadata_fingerprint(models_payload, model_id):
 
 def behavioral_fingerprint(completions):
     """Hash normalized completions for the fixed prompt set."""
-    canonical = json.dumps([_normalize(c) for c in completions],
-                           sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps([_normalize(c) for c in completions], sort_keys=True, separators=(",", ":"))
     return _hash(canonical)
 
 

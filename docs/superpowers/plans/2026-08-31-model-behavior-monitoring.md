@@ -75,6 +75,7 @@ Two further mismatches for the canary caller: `timeUnixNano` is hardcoded to *no
 ```python
 # tests/test_ai_finops.py
 
+
 class EmitOtlpRecordsOptionsTest(unittest.TestCase):
     def test_default_allowlist_unchanged(self):
         """Existing callers keep the FinOps allowlist and its filtering."""
@@ -98,10 +99,13 @@ class EmitOtlpRecordsOptionsTest(unittest.TestCase):
             captured["body"] = json.loads(body.decode("utf-8"))
             return 200
 
-        with mock.patch.object(ai_finops, "_otlp_endpoint", "https://example.invalid/v1/logs"), \
-             mock.patch.object(ai_finops._http, "post_bytes_status", fake_post):
+        with (
+            mock.patch.object(ai_finops, "_otlp_endpoint", "https://example.invalid/v1/logs"),
+            mock.patch.object(ai_finops._http, "post_bytes_status", fake_post),
+        ):
             ok = ai_finops.emit_otlp_records(
-                [{"eval.model": "m"}], "berserk-mcp-eval",
+                [{"eval.model": "m"}],
+                "berserk-mcp-eval",
                 scope_name="berserk-mcp.canary",
                 timestamp_ns=1234567890000000000,
                 allowed_keys={"eval.model"},
@@ -124,14 +128,37 @@ Extract the existing set to a module constant, then add the parameters:
 ```python
 # ai_finops.py — replace the hardcoded set inside _otlp_attributes
 
-_FINOPS_ATTRIBUTE_ALLOWLIST = frozenset({
-    "feature_id", "work_item_id", "project_id", "portfolio_id", "team_id",
-    "cost_center", "status", "planned_start", "planned_end",
-    "planned_hours", "planned_ai_budget_usd", "completion_pct", "repositories",
-    "branches", "pull_requests", "source_system", "source_record_id",
-    "source_updated_at", "worklog_id", "work_date", "hours", "actual_hours",
-    "recommendation_id", "decision", "owner_hash", "rationale_hash", "ts",
-})
+_FINOPS_ATTRIBUTE_ALLOWLIST = frozenset(
+    {
+        "feature_id",
+        "work_item_id",
+        "project_id",
+        "portfolio_id",
+        "team_id",
+        "cost_center",
+        "status",
+        "planned_start",
+        "planned_end",
+        "planned_hours",
+        "planned_ai_budget_usd",
+        "completion_pct",
+        "repositories",
+        "branches",
+        "pull_requests",
+        "source_system",
+        "source_record_id",
+        "source_updated_at",
+        "worklog_id",
+        "work_date",
+        "hours",
+        "actual_hours",
+        "recommendation_id",
+        "decision",
+        "owner_hash",
+        "rationale_hash",
+        "ts",
+    }
+)
 
 
 def _otlp_attributes(record, allowed=None):
@@ -156,8 +183,8 @@ def _otlp_attributes(record, allowed=None):
 ```python
 # ai_finops.py — emit_otlp_records signature and the two changed lines
 
-def emit_otlp_records(records, service_name, scope_name="berserk-mcp.ai-finops",
-                      timestamp_ns=None, allowed_keys=None):
+
+def emit_otlp_records(records, service_name, scope_name="berserk-mcp.ai-finops", timestamp_ns=None, allowed_keys=None):
     if not _otlp_endpoint or not records:
         return False
     # ... existing URL validation unchanged ...
@@ -167,19 +194,20 @@ def emit_otlp_records(records, service_name, scope_name="berserk-mcp.ai-finops",
     else:
         stamp = str(int(timestamp_ns))
     for record in records:
-        logs.append({
-            "timeUnixNano": stamp,
-            "body": {"stringValue": service_name},
-            "attributes": _otlp_attributes(record, allowed=allowed_keys),
-        })
+        logs.append(
+            {
+                "timeUnixNano": stamp,
+                "body": {"stringValue": service_name},
+                "attributes": _otlp_attributes(record, allowed=allowed_keys),
+            }
+        )
     payload = {
-        "resourceLogs": [{
-            "resource": {"attributes": [{
-                "key": "service.name", "value": {"stringValue": service_name}
-            }]},
-            "scopeLogs": [{"scope": {"name": scope_name},
-                           "logRecords": logs}],
-        }]
+        "resourceLogs": [
+            {
+                "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": service_name}}]},
+                "scopeLogs": [{"scope": {"name": scope_name}, "logRecords": logs}],
+            }
+        ]
     }
     # ... existing post unchanged ...
 ```
@@ -233,6 +261,7 @@ Add a note to the top of `evals/canary_cases.jsonl`'s companion documentation (n
 # evals/test_canary.py
 import json, sys, unittest
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import canary  # noqa: E402
 
@@ -254,10 +283,15 @@ class CaseSetVersionTest(unittest.TestCase):
 
 class BuildEvalRecordTest(unittest.TestCase):
     REPORT = {
-        "backend": "openai", "model": "deepseek/deepseek-v4-flash", "repeats": 3,
-        "tool_accuracy": 0.875, "arg_accuracy": 0.9,
-        "total_cost_usd": 0.00205, "total_input_tokens": 115717,
-        "total_output_tokens": 381, "rows": [],
+        "backend": "openai",
+        "model": "deepseek/deepseek-v4-flash",
+        "repeats": 3,
+        "tool_accuracy": 0.875,
+        "arg_accuracy": 0.9,
+        "total_cost_usd": 0.00205,
+        "total_input_tokens": 115717,
+        "total_output_tokens": 381,
+        "rows": [],
     }
 
     def test_maps_harness_fields_onto_eval_attributes(self):
@@ -279,8 +313,7 @@ class BuildEvalRecordTest(unittest.TestCase):
 
     def test_failure_record_has_no_score_fields(self):
         """An outage must never be stored as a score of zero."""
-        rec = canary.build_failure_record(
-            "deepseek/deepseek-v4-flash", "openai", "v", "r", 1, "connection refused")
+        rec = canary.build_failure_record("deepseek/deepseek-v4-flash", "openai", "v", "r", 1, "connection refused")
         self.assertEqual(rec["eval.status"], "failed")
         self.assertNotIn("eval.tool_accuracy", rec)
         self.assertNotIn("eval.arg_accuracy", rec)
@@ -313,6 +346,7 @@ than importing it, mirroring evals/ci_gate.py deliberately: run_eval.py is
 the actively-growing harness, and this consumer should not be entangled with
 its internals.
 """
+
 import hashlib
 import json
 import subprocess
@@ -329,12 +363,22 @@ RESULTS_DIR = HERE / "results"
 EVAL_SERVICE_NAME = "berserk-mcp-eval"
 EVAL_SCOPE_NAME = "berserk-mcp.canary"
 
-EVAL_ATTRIBUTE_ALLOWLIST = frozenset({
-    "eval.model", "eval.backend", "eval.case_set_version",
-    "eval.tool_accuracy", "eval.arg_accuracy", "eval.repeats",
-    "eval.total_cost_usd", "eval.run_id", "eval.status", "eval.error",
-    "eval.behavioral_fingerprint", "eval.provider_metadata_fingerprint",
-})
+EVAL_ATTRIBUTE_ALLOWLIST = frozenset(
+    {
+        "eval.model",
+        "eval.backend",
+        "eval.case_set_version",
+        "eval.tool_accuracy",
+        "eval.arg_accuracy",
+        "eval.repeats",
+        "eval.total_cost_usd",
+        "eval.run_id",
+        "eval.status",
+        "eval.error",
+        "eval.behavioral_fingerprint",
+        "eval.provider_metadata_fingerprint",
+    }
+)
 
 
 def _hash_bytes(raw):
@@ -381,10 +425,20 @@ def _run_harness(model, backend, cases_path, repeats, timeout=900):
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     before = set(RESULTS_DIR.glob("*.json"))
     proc = subprocess.run(
-        [sys.executable, str(HERE / "run_eval.py"),
-         "--backend", backend, "--model", model,
-         "--repeats", str(repeats), str(cases_path)],
-        capture_output=True, text=True, timeout=timeout,
+        [
+            sys.executable,
+            str(HERE / "run_eval.py"),
+            "--backend",
+            backend,
+            "--model",
+            model,
+            "--repeats",
+            str(repeats),
+            str(cases_path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"run_eval.py exited {proc.returncode}: {proc.stderr[:500]}")
@@ -411,8 +465,10 @@ def emit(records, started_ns):
     every eval.* attribute is silently dropped (see Task 1)."""
     sys.path.insert(0, str(REPO_ROOT))
     import ai_finops
+
     return ai_finops.emit_otlp_records(
-        records, EVAL_SERVICE_NAME,
+        records,
+        EVAL_SERVICE_NAME,
         scope_name=EVAL_SCOPE_NAME,
         timestamp_ns=started_ns,
         allowed_keys=EVAL_ATTRIBUTE_ALLOWLIST,
@@ -469,25 +525,36 @@ git commit -m "feat: frozen canary case set and scored daily canary run (#89)"
 # evals/test_fingerprint.py
 import sys, unittest
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fingerprint  # noqa: E402
 
 
-PAYLOAD = {"data": [
-    {"id": "deepseek/deepseek-v4-flash", "context_length": 128000,
-     "pricing": {"prompt": "0.0000001", "completion": "0.0000002"}},
-    {"id": "other/model", "context_length": 8192, "pricing": {}},
-]}
+PAYLOAD = {
+    "data": [
+        {
+            "id": "deepseek/deepseek-v4-flash",
+            "context_length": 128000,
+            "pricing": {"prompt": "0.0000001", "completion": "0.0000002"},
+        },
+        {"id": "other/model", "context_length": 8192, "pricing": {}},
+    ]
+}
 
 
 class MetadataFingerprintTest(unittest.TestCase):
     def test_key_order_does_not_change_the_hash(self):
         """Otherwise every poll looks like a provider update."""
-        reordered = {"data": [
-            {"pricing": {"completion": "0.0000002", "prompt": "0.0000001"},
-             "context_length": 128000, "id": "deepseek/deepseek-v4-flash"},
-            {"id": "other/model", "context_length": 8192, "pricing": {}},
-        ]}
+        reordered = {
+            "data": [
+                {
+                    "pricing": {"completion": "0.0000002", "prompt": "0.0000001"},
+                    "context_length": 128000,
+                    "id": "deepseek/deepseek-v4-flash",
+                },
+                {"id": "other/model", "context_length": 8192, "pricing": {}},
+            ]
+        }
         self.assertEqual(
             fingerprint.metadata_fingerprint(PAYLOAD, "deepseek/deepseek-v4-flash"),
             fingerprint.metadata_fingerprint(reordered, "deepseek/deepseek-v4-flash"),
@@ -501,10 +568,15 @@ class MetadataFingerprintTest(unittest.TestCase):
         )
 
     def test_price_change_changes_the_hash(self):
-        changed = {"data": [
-            {"id": "deepseek/deepseek-v4-flash", "context_length": 128000,
-             "pricing": {"prompt": "0.0000009", "completion": "0.0000002"}},
-        ]}
+        changed = {
+            "data": [
+                {
+                    "id": "deepseek/deepseek-v4-flash",
+                    "context_length": 128000,
+                    "pricing": {"prompt": "0.0000009", "completion": "0.0000002"},
+                },
+            ]
+        }
         self.assertNotEqual(
             fingerprint.metadata_fingerprint(PAYLOAD, "deepseek/deepseek-v4-flash"),
             fingerprint.metadata_fingerprint(changed, "deepseek/deepseek-v4-flash"),
@@ -559,6 +631,7 @@ proof the provider swapped the model. Temperature 0 is not guaranteed
 deterministic across providers -- batching and hardware nondeterminism can
 change output with no model change. Every caller must report it that way.
 """
+
 import hashlib
 import json
 
@@ -600,8 +673,7 @@ def metadata_fingerprint(models_payload, model_id):
 
 def behavioral_fingerprint(completions):
     """Hash normalized completions for the fixed prompt set."""
-    canonical = json.dumps([_normalize(c) for c in completions],
-                           sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps([_normalize(c) for c in completions], sort_keys=True, separators=(",", ":"))
     return _hash(canonical)
 ```
 
@@ -646,13 +718,13 @@ git commit -m "feat: provider metadata and behavioral fingerprints (#90)"
 # tests/test_model_drift.py
 import json, sys, unittest
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import model_drift
 
 
 def series(*scores, version="v1"):
-    return [{"tool_accuracy": s, "case_set_version": version, "status": "ok"}
-            for s in scores]
+    return [{"tool_accuracy": s, "case_set_version": version, "status": "ok"} for s in scores]
 
 
 class VerdictTest(unittest.TestCase):
@@ -701,10 +773,16 @@ class VerdictTest(unittest.TestCase):
 
 class GroupByModelTest(unittest.TestCase):
     def test_groups_rows_by_model_column(self):
-        payload = json.dumps({"Tables": [{
-            "schema": {"columns": [{"name": "model"}, {"name": "tool_accuracy"}]},
-            "rows": [["m1", 0.9], ["m2", 0.5], ["m1", 0.85]],
-        }]})
+        payload = json.dumps(
+            {
+                "Tables": [
+                    {
+                        "schema": {"columns": [{"name": "model"}, {"name": "tool_accuracy"}]},
+                        "rows": [["m1", 0.9], ["m2", 0.5], ["m1", 0.85]],
+                    }
+                ]
+            }
+        )
         grouped = model_drift.group_by_model(payload)
         self.assertEqual(len(grouped["m1"]), 2)
         self.assertEqual(len(grouped["m2"]), 1)
@@ -746,9 +824,9 @@ implementation plan. DEFAULT_NOISE_BAND below is provisional until that
 measurement lands.
 """
 
-MIN_HISTORY = 4          # runs at one case_set_version before any verdict
+MIN_HISTORY = 4  # runs at one case_set_version before any verdict
 CONSECUTIVE_REQUIRED = 2  # degraded runs in a row before firing
-MIN_TREND_R2 = 0.6        # matches berserk_mcp.py:2913's forecastability floor
+MIN_TREND_R2 = 0.6  # matches berserk_mcp.py:2913's forecastability floor
 DEFAULT_NOISE_BAND = 0.05  # PROVISIONAL -- replace with measured variance
 
 CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
@@ -767,9 +845,11 @@ def _single_version(rows):
 def classify(series, noise_band=DEFAULT_NOISE_BAND, fingerprint_changed=False):
     rows = _usable(series)
     if len(rows) < MIN_HISTORY or _single_version(rows) is None:
-        return {"verdict": "insufficient-data",
-                "reason": "not enough runs at a single case-set version",
-                "confidence": "low"}
+        return {
+            "verdict": "insufficient-data",
+            "reason": "not enough runs at a single case-set version",
+            "confidence": "low",
+        }
 
     scores = [float(r["tool_accuracy"]) for r in rows]
     baseline = sum(scores[:-CONSECUTIVE_REQUIRED]) / len(scores[:-CONSECUTIVE_REQUIRED])
@@ -777,9 +857,7 @@ def classify(series, noise_band=DEFAULT_NOISE_BAND, fingerprint_changed=False):
 
     degraded = [s for s in recent if baseline - s > noise_band]
     if len(degraded) < CONSECUTIVE_REQUIRED:
-        return {"verdict": "stable",
-                "reason": "no sustained drop beyond the noise band",
-                "confidence": "medium"}
+        return {"verdict": "stable", "reason": "no sustained drop beyond the noise band", "confidence": "medium"}
 
     drop = baseline - min(recent)
     sharp = drop > 2 * noise_band
@@ -800,6 +878,7 @@ Expected: PASS.
 
 ```python
 # model_drift.py
+
 
 def series_kql(model=None, since="30d ago"):
     """KQL for the canary's own OTLP records, column names pre-aliased to
@@ -831,6 +910,7 @@ def group_by_model(bzrk_json_text):
     PARSED JSON (a dict/list), not raw text, and returns None -- never an
     exception -- for a shape it doesn't recognize; both must be handled."""
     from agent_analytics import _json_records
+
     if not bzrk_json_text.strip():
         return {}
     records = _json_records(json.loads(bzrk_json_text)) or []
@@ -871,6 +951,7 @@ git commit -m "feat: drift and regression verdict logic with measured noise band
 
 ```python
 # tests/test_berserk_mcp.py
+
 
 class ModelDriftToolsTest(unittest.TestCase):
     def test_both_tools_are_registered(self):
@@ -938,6 +1019,7 @@ def _valid_model_id(value, max_chars=MAX_INTERPOLATED_NAME_CHARS):
 ```python
 # tests/test_berserk_mcp.py
 
+
 class ModelIdValidatorTest(unittest.TestCase):
     def test_accepts_a_real_vendor_slash_model_id(self):
         self.assertTrue(bm._valid_model_id("deepseek/deepseek-v4-flash"))
@@ -990,10 +1072,14 @@ Task 4 must therefore also export `group_by_model(bzrk_json_text) -> dict[str, l
 Alongside `--worker` and `--agent-report` (near `berserk_mcp.py:4923`):
 
 ```python
-    cli.add_argument("--canary-run", action="store_true",
-                     help="run the model canary for BERSERK_MCP_CANARY_MODELS and ingest results")
-    cli.add_argument("--drift-report", action="store_true",
-                     help="evaluate stored canary history; exit non-zero if any model is degrading")
+cli.add_argument(
+    "--canary-run", action="store_true", help="run the model canary for BERSERK_MCP_CANARY_MODELS and ingest results"
+)
+cli.add_argument(
+    "--drift-report",
+    action="store_true",
+    help="evaluate stored canary history; exit non-zero if any model is degrading",
+)
 ```
 
 **This is the integration point the plan's task split otherwise misses.** Task 2 defines `eval.behavioral_fingerprint` and `eval.provider_metadata_fingerprint` in `EVAL_ATTRIBUTE_ALLOWLIST`, and Task 3 builds the functions that compute them — but neither task's own code calls the other. Without this step, both fields are permanently absent from every emitted record, and nothing would catch it: it fails silently, the same shape of bug Task 1 already found once in `_otlp_attributes()`. The `--canary-run` handler is the natural place to close this, since it already has to call both `canary.run_canary()` and, separately, would otherwise need its own fingerprint call:
@@ -1027,21 +1113,28 @@ Alongside `--worker` and `--agent-report` (near `berserk_mcp.py:4923`):
 ```python
 # berserk_mcp.py -- module level, called from the --canary-run loop above
 
+
 def _attach_fingerprints(record, model):
     """Fingerprints are additive and best-effort: a fetch failure must not
     discard a real, already-scored canary result, so every failure here is
     caught and logged, never raised past this function."""
     import parser_factory
+
     try:
         url = parser_factory._hermes_url()
         key = os.environ.get("HERMES_API_KEY", "")
         headers = {"Authorization": f"Bearer {key}"} if key else {}
         completions = []
         for prompt in fingerprint.FINGERPRINT_PROMPTS:
-            out, err = parser_factory._http_post_json(url, headers, {
-                "model": model, "temperature": 0,
-                "messages": [{"role": "user", "content": prompt}],
-            })
+            out, err = parser_factory._http_post_json(
+                url,
+                headers,
+                {
+                    "model": model,
+                    "temperature": 0,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
             if err:
                 raise RuntimeError(err)
             completions.append(out["choices"][0]["message"]["content"])

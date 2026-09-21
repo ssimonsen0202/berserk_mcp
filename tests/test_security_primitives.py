@@ -103,9 +103,7 @@ class SharedHttpTest(unittest.TestCase):
             _http.parse_header_items("Authorization=Bearer token\nX-Evil=yes")
 
     def test_header_parser_keeps_json_content_type(self):
-        headers = _http.parse_header_items(
-            "Content-Type=text/plain,Authorization=Bearer token"
-        )
+        headers = _http.parse_header_items("Content-Type=text/plain,Authorization=Bearer token")
         self.assertEqual(headers["Content-Type"], "application/json")
         self.assertEqual(headers["Authorization"], "Bearer token")
         self.assertNotIn("text/plain", headers.values())
@@ -142,7 +140,12 @@ class SharedHttpTest(unittest.TestCase):
             eval_module.HERE = Path(directory)
             stdout = io.StringIO()
             argv = [
-                "run_eval.py", "--backend", "mock", "--limit", "1", str(cases),
+                "run_eval.py",
+                "--backend",
+                "mock",
+                "--limit",
+                "1",
+                str(cases),
             ]
             with mock.patch.object(sys, "argv", argv), redirect_stdout(stdout):
                 eval_module.main()
@@ -219,7 +222,8 @@ class PrimerConfigurationTest(unittest.TestCase):
 
     def test_relative_primer_directory_fails_startup(self):
         result = self._fresh_import(
-            BERSERK_MCP_ROLE="sre", BERSERK_MCP_PRIMERS_DIR="relative/primers",
+            BERSERK_MCP_ROLE="sre",
+            BERSERK_MCP_PRIMERS_DIR="relative/primers",
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("BERSERK_MCP_PRIMERS_DIR", result.stderr)
@@ -227,7 +231,8 @@ class PrimerConfigurationTest(unittest.TestCase):
     def test_traversal_primer_directory_fails_startup(self):
         traversal = str(Path(tempfile.gettempdir()) / "safe" / ".." / "primers")
         result = self._fresh_import(
-            BERSERK_MCP_ROLE="sre", BERSERK_MCP_PRIMERS_DIR=traversal,
+            BERSERK_MCP_ROLE="sre",
+            BERSERK_MCP_PRIMERS_DIR=traversal,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must not contain '..'", result.stderr)
@@ -235,7 +240,8 @@ class PrimerConfigurationTest(unittest.TestCase):
     def test_configured_empty_primer_directory_fails_loudly(self):
         with tempfile.TemporaryDirectory() as directory:
             result = self._fresh_import(
-                BERSERK_MCP_ROLE="sre", BERSERK_MCP_PRIMERS_DIR=directory,
+                BERSERK_MCP_ROLE="sre",
+                BERSERK_MCP_PRIMERS_DIR=directory,
             )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("sre.md", result.stderr)
@@ -244,7 +250,8 @@ class PrimerConfigurationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, "sre.md").write_text("custom-secure-primer", encoding="utf-8")
             sre = self._fresh_import(
-                BERSERK_MCP_ROLE="sre", BERSERK_MCP_PRIMERS_DIR=directory,
+                BERSERK_MCP_ROLE="sre",
+                BERSERK_MCP_PRIMERS_DIR=directory,
             )
         self.assertEqual(sre.returncode, 0, sre.stderr)
         self.assertIn("custom-secure-primer", sre.stdout)

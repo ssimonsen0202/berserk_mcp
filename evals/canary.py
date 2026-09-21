@@ -17,6 +17,7 @@ than importing it, mirroring evals/ci_gate.py deliberately: run_eval.py is
 the actively-growing harness, and this consumer should not be entangled with
 its internals.
 """
+
 import hashlib
 import json
 import os
@@ -34,13 +35,25 @@ RESULTS_DIR = HERE / "results"
 EVAL_SERVICE_NAME = "berserk-mcp-eval"
 EVAL_SCOPE_NAME = "berserk-mcp.canary"
 
-EVAL_ATTRIBUTE_ALLOWLIST = frozenset({
-    "eval.model", "eval.backend", "eval.case_set_version",
-    "eval.tool_accuracy", "eval.arg_accuracy", "eval.repeats",
-    "eval.total_cost_usd", "eval.run_id", "eval.status", "eval.error",
-    "eval.behavioral_fingerprint", "eval.provider_metadata_fingerprint",
-    "eval.role", "eval.discovery_mode", "eval.tier",
-})
+EVAL_ATTRIBUTE_ALLOWLIST = frozenset(
+    {
+        "eval.model",
+        "eval.backend",
+        "eval.case_set_version",
+        "eval.tool_accuracy",
+        "eval.arg_accuracy",
+        "eval.repeats",
+        "eval.total_cost_usd",
+        "eval.run_id",
+        "eval.status",
+        "eval.error",
+        "eval.behavioral_fingerprint",
+        "eval.provider_metadata_fingerprint",
+        "eval.role",
+        "eval.discovery_mode",
+        "eval.tier",
+    }
+)
 
 
 def _hash_bytes(raw):
@@ -76,8 +89,7 @@ def _current_environment():
     from berserk_mcp.py's internals (see this module's own docstring).
     The raw value is enough to detect "the environment changed"."""
     role = os.environ.get("BERSERK_MCP_ROLE", "all").strip().lower() or "all"
-    discovery = os.environ.get("BERSERK_MCP_DISCOVERY", "").strip().lower() in \
-        {"1", "true", "yes", "on"}
+    discovery = os.environ.get("BERSERK_MCP_DISCOVERY", "").strip().lower() in {"1", "true", "yes", "on"}
     tier = os.environ.get("BERSERK_MCP_TIER", "").strip().lower()
     return role, ("1" if discovery else "0"), tier
 
@@ -120,13 +132,11 @@ def build_failure_record(model, backend, version, run_id, started_ns, error):
     }
 
 
-def _run_harness(model, backend, cases_path, repeats, base_url=None, key_env=None,
-                 tool_choice=None, timeout=900):
+def _run_harness(model, backend, cases_path, repeats, base_url=None, key_env=None, tool_choice=None, timeout=900):
     """Invoke run_eval.py and return its saved report. Mirrors ci_gate.py."""
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     before = set(RESULTS_DIR.glob("*.json"))
-    cmd = [sys.executable, str(HERE / "run_eval.py"),
-           "--backend", backend, "--model", model, "--repeats", str(repeats)]
+    cmd = [sys.executable, str(HERE / "run_eval.py"), "--backend", backend, "--model", model, "--repeats", str(repeats)]
     if base_url:
         cmd += ["--base-url", base_url]
     if key_env:
@@ -144,8 +154,9 @@ def _run_harness(model, backend, cases_path, repeats, base_url=None, key_env=Non
     return json.loads(newest.read_text(encoding="utf-8"))
 
 
-def run_canary(model, backend="openai", cases_path=DEFAULT_CASES, repeats=3,
-               base_url=None, key_env=None, tool_choice=None):
+def run_canary(
+    model, backend="openai", cases_path=DEFAULT_CASES, repeats=3, base_url=None, key_env=None, tool_choice=None
+):
     """base_url/key_env default to this project's own configured Hermes
     provider (BERSERK_LLM_HERMES_URL / HERMES_API_KEY) when the backend is
     "openai" and neither is given explicitly -- the same provider
@@ -164,6 +175,7 @@ def run_canary(model, backend="openai", cases_path=DEFAULT_CASES, repeats=3,
         if base_url is None:
             sys.path.insert(0, str(REPO_ROOT))
             import parser_factory
+
             hermes_url = parser_factory._hermes_url()
             suffix = "/chat/completions"
             if hermes_url and hermes_url.endswith(suffix):
@@ -176,8 +188,9 @@ def run_canary(model, backend="openai", cases_path=DEFAULT_CASES, repeats=3,
     run_id = uuid.uuid4().hex[:16]
     started_ns = int(time.time() * 1_000_000_000)
     try:
-        report = _run_harness(model, backend, cases_path, repeats,
-                              base_url=base_url, key_env=key_env, tool_choice=tool_choice)
+        report = _run_harness(
+            model, backend, cases_path, repeats, base_url=base_url, key_env=key_env, tool_choice=tool_choice
+        )
     except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
         return build_failure_record(model, backend, version, run_id, started_ns, exc)
     return build_eval_record(report, version, run_id, started_ns)
@@ -188,8 +201,10 @@ def emit(records, started_ns):
     every eval.* attribute is silently dropped (see Task 1)."""
     sys.path.insert(0, str(REPO_ROOT))
     import ai_finops
+
     return ai_finops.emit_otlp_records(
-        records, EVAL_SERVICE_NAME,
+        records,
+        EVAL_SERVICE_NAME,
         scope_name=EVAL_SCOPE_NAME,
         timestamp_ns=started_ns,
         allowed_keys=EVAL_ATTRIBUTE_ALLOWLIST,

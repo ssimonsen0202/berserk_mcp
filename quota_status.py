@@ -22,6 +22,7 @@ caller, and must never require a daemon or forwarder to be running:
 The caller is always told which path produced the result via the "source"
 field: "live", "estimated", or "unavailable".
 """
+
 import json
 import os
 import platform
@@ -41,8 +42,11 @@ _HTTP_TIMEOUT_S = 5
 # list is a best guess, not a verified contract -- see the module
 # docstring. Extend it once a real response is confirmed.
 _LIVE_FIELDS = (
-    "utilization", "five_hour_utilization", "seven_day_utilization",
-    "resets_at", "rate_limit_tier",
+    "utilization",
+    "five_hour_utilization",
+    "seven_day_utilization",
+    "resets_at",
+    "rate_limit_tier",
 )
 
 
@@ -55,7 +59,9 @@ def _read_oauth_token(run=subprocess.run, platform_name=None):
     try:
         result = run(
             ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
-            capture_output=True, text=True, timeout=_KEYCHAIN_TIMEOUT_S,
+            capture_output=True,
+            text=True,
+            timeout=_KEYCHAIN_TIMEOUT_S,
         )
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
@@ -122,8 +128,13 @@ def _extract_live_fields(data):
     return out
 
 
-def get_quota_status(since="5h ago", run=subprocess.run, opener=_http.NO_REDIRECT_OPENER.open,
-                      platform_name=None, _total_tokens_estimate=agent_analytics.total_tokens_estimate):
+def get_quota_status(
+    since="5h ago",
+    run=subprocess.run,
+    opener=_http.NO_REDIRECT_OPENER.open,
+    platform_name=None,
+    _total_tokens_estimate=agent_analytics.total_tokens_estimate,
+):
     """Main entry point. Tries the live Keychain+endpoint path first;
     falls back to log-derived estimation on ANY failure. Never raises,
     never requires a daemon/forwarder to be running. Returns a dict with
@@ -137,12 +148,16 @@ def get_quota_status(since="5h ago", run=subprocess.run, opener=_http.NO_REDIREC
     total, all_exact, is_err = _total_tokens_estimate(since)
     if is_err or total is None:
         return {
-            "source": "unavailable", "ok": False,
+            "source": "unavailable",
+            "ok": False,
             "detail": "live endpoint unavailable and the telemetry query failed",
         }
     return {
-        "source": "estimated", "ok": True, "since": since,
-        "total_tokens": total, "all_exact": all_exact,
+        "source": "estimated",
+        "ok": True,
+        "since": since,
+        "total_tokens": total,
+        "all_exact": all_exact,
     }
 
 

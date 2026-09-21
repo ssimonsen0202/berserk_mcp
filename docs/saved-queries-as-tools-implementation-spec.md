@@ -68,12 +68,21 @@ Relevant current paths:
 Store entry shape, as written by `save_query`:
 
 ```python
-{"name": str, "description": str, "kql": str, "since": str,
- # present when KQL validation ran:
- "validation_version": int, "validation_risk": str,
- "schema_hash": str | None, "schema_status": str, "validated_at": str,
- # optional:
- "roles": [str], "origin": "generated"}
+{
+    "name": str,
+    "description": str,
+    "kql": str,
+    "since": str,
+    # present when KQL validation ran:
+    "validation_version": int,
+    "validation_risk": str,
+    "schema_hash": str | None,
+    "schema_status": str,
+    "validated_at": str,
+    # optional:
+    "roles": [str],
+    "origin": "generated",
+}
 ```
 
 Entry order in the store is insertion order. `persist_learned_query` removes
@@ -108,9 +117,7 @@ Rules:
 Add the constant near `LEARNED_STORE_CAP` (`:1455`):
 
 ```python
-SAVED_TOOL_PROJECTION_CAP = _nonnegative_int_env(
-    "BERSERK_MCP_SAVED_TOOL_CAP", 25
-) or 25
+SAVED_TOOL_PROJECTION_CAP = _nonnegative_int_env("BERSERK_MCP_SAVED_TOOL_CAP", 25) or 25
 ```
 
 25, not 500. The routing surface is already the binding constraint on the

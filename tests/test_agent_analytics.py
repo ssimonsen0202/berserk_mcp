@@ -23,11 +23,13 @@ def row(session, ts, tools, body="", err=False, model="claude-sonnet-5"):
 
 def usage_row(session, ts, tools, tokens_in, tokens_out, body=""):
     event = row(session, ts, tools, body)
-    event.update({
-        "tokens_in": tokens_in,
-        "tokens_out": tokens_out,
-        "has_token_usage": True,
-    })
+    event.update(
+        {
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "has_token_usage": True,
+        }
+    )
     return event
 
 
@@ -46,20 +48,14 @@ def jsonl(rows):
 
 class AgentAnalyticsPureTest(unittest.TestCase):
     def test_repeated_same_tool_target_is_likely_looping(self):
-        events = [
-            row("s1", f"2026-07-12T10:0{i}:00Z", "Edit", "src/app.py")
-            for i in range(4)
-        ]
+        events = [row("s1", f"2026-07-12T10:0{i}:00Z", "Edit", "src/app.py") for i in range(4)]
         report = aa.analyze_loop_events(events)[0]
         self.assertEqual(report["verdict"], "likely-looping")
         self.assertGreaterEqual(report["repetition_ratio"], 0.7)
         self.assertIn("Edit", report["top_repeated_call"])
 
     def test_distinct_tool_targets_are_healthy(self):
-        events = [
-            row("s1", f"2026-07-12T10:{i:02d}:00Z", "Tool", f"target-{i}")
-            for i in range(10)
-        ]
+        events = [row("s1", f"2026-07-12T10:{i:02d}:00Z", "Tool", f"target-{i}") for i in range(10)]
         report = aa.analyze_loop_events(events)[0]
         self.assertEqual(report["verdict"], "healthy")
 
@@ -83,7 +79,13 @@ class AgentAnalyticsPureTest(unittest.TestCase):
                 for i in range(40)
             ],
             *[
-                row("sonnet-ok", f"2026-07-12T12:{i:02d}:00Z", "Read" if i % 2 else "Edit", f"file-{i}", model="claude-sonnet")
+                row(
+                    "sonnet-ok",
+                    f"2026-07-12T12:{i:02d}:00Z",
+                    "Read" if i % 2 else "Edit",
+                    f"file-{i}",
+                    model="claude-sonnet",
+                )
                 for i in range(8)
             ],
         ]
@@ -101,10 +103,7 @@ class AgentAnalyticsPureTest(unittest.TestCase):
         self.assertEqual(report["model"], "claude-opus-4-8")
 
     def test_token_burn_estimate_flags_high_burn_loop(self):
-        events = [
-            row("high", f"2026-07-12T10:0{i}:00Z", "Read", "src/app.py " + ("x" * 1000))
-            for i in range(4)
-        ] + [
+        events = [row("high", f"2026-07-12T10:0{i}:00Z", "Read", "src/app.py " + ("x" * 1000)) for i in range(4)] + [
             row("low", "2026-07-12T11:00:00Z", "Read", "a.py"),
             row("low", "2026-07-12T11:01:00Z", "Edit", "b.py"),
         ]
@@ -125,11 +124,14 @@ class AgentAnalyticsPureTest(unittest.TestCase):
         self.assertEqual(report["token_source"], "exact")
 
     def test_token_burn_supports_mixed_exact_and_estimated_sessions(self):
-        parsed = aa._parse_rows(jsonl([
-            {**row("exact", "2026-07-12T10:00:00Z", "Read", "x" * 400),
-             "tokens_in": "80", "tokens_out": "20"},
-            row("estimated", "2026-07-12T11:00:00Z", "Read", "y" * 400),
-        ]))
+        parsed = aa._parse_rows(
+            jsonl(
+                [
+                    {**row("exact", "2026-07-12T10:00:00Z", "Read", "x" * 400), "tokens_in": "80", "tokens_out": "20"},
+                    row("estimated", "2026-07-12T11:00:00Z", "Read", "y" * 400),
+                ]
+            )
+        )
         reports = {r["session_id"]: r for r in aa.analyze_token_burn_events(parsed)}
         self.assertEqual((reports["exact"]["tokens"], reports["exact"]["token_source"]), (100, "exact"))
         self.assertEqual((reports["estimated"]["tokens"], reports["estimated"]["token_source"]), (100, "estimated"))
@@ -137,25 +139,27 @@ class AgentAnalyticsPureTest(unittest.TestCase):
     def test_token_burn_only_flags_top_decile(self):
         events = []
         for i in range(10):
-            events.append(row(
-                f"s{i}", f"2026-07-12T{i:02d}:00:00Z", "Read", "x" * ((i + 1) * 40)
-            ))
+            events.append(row(f"s{i}", f"2026-07-12T{i:02d}:00:00Z", "Read", "x" * ((i + 1) * 40)))
         reports = aa.analyze_token_burn_events(events)
         flagged = [r["session_id"] for r in reports if r["verdict"].startswith("high-burn")]
         self.assertEqual(flagged, ["s9"])
 
     def test_token_burn_handles_zero_progress_without_division_error(self):
-        report = aa.analyze_token_burn_events([
-            row("message-only", "2026-07-12T10:00:00Z", "", "x" * 40)
-        ])[0]
+        report = aa.analyze_token_burn_events([row("message-only", "2026-07-12T10:00:00Z", "", "x" * 40)])[0]
         self.assertEqual(report["progress_units"], 0)
         self.assertEqual(report["burn_per_progress"], 10.0)
 
     def test_malformed_usage_falls_back_and_negative_values_are_not_counted(self):
-        malformed = aa._parse_rows(jsonl([{
-            **row("bad", "2026-07-12T10:00:00Z", "Read", "x" * 40),
-            "tokens_in": "not-a-number",
-        }]))
+        malformed = aa._parse_rows(
+            jsonl(
+                [
+                    {
+                        **row("bad", "2026-07-12T10:00:00Z", "Read", "x" * 40),
+                        "tokens_in": "not-a-number",
+                    }
+                ]
+            )
+        )
         report = aa.analyze_token_burn_events(malformed)[0]
         self.assertEqual((report["tokens"], report["token_source"]), (10, "estimated"))
 
@@ -201,9 +205,9 @@ class AgentAnalyticsPureTest(unittest.TestCase):
 
     def test_parse_rows_accepts_json_array_and_wrapper(self):
         recs = [row("s1", "2026-07-12T10:00:00Z", "Edit", "a.py")]
-        self.assertEqual(len(aa._parse_rows(json.dumps(recs))), 1)          # bare array
+        self.assertEqual(len(aa._parse_rows(json.dumps(recs))), 1)  # bare array
         self.assertEqual(len(aa._parse_rows(json.dumps({"rows": recs}))), 1)  # wrapped
-        self.assertEqual(len(aa._parse_rows(jsonl(recs))), 1)              # jsonl still works
+        self.assertEqual(len(aa._parse_rows(jsonl(recs))), 1)  # jsonl still works
         self.assertEqual(aa._parse_rows("(no rows)"), [])
 
     def test_parse_rows_accepts_real_bzrk_tables_shape(self):
@@ -216,22 +220,24 @@ class AgentAnalyticsPureTest(unittest.TestCase):
         alone never caught because they only exercised jsonl and the
         {"rows": [...]}-of-dicts shape above."""
         doc = {
-            "Tables": [{
-                "schema": {
-                    "name": "PrimaryResult",
-                    "columns": [
-                        {"name": "session", "type": 5, "nullable": True},
-                        {"name": "ts", "type": 6, "nullable": True},
-                        {"name": "typ", "type": 9, "nullable": True},
-                        {"name": "tools", "type": 9, "nullable": True},
-                        {"name": "tokens_in", "type": 9, "nullable": True},
-                        {"name": "tokens_out", "type": 9, "nullable": True},
+            "Tables": [
+                {
+                    "schema": {
+                        "name": "PrimaryResult",
+                        "columns": [
+                            {"name": "session", "type": 5, "nullable": True},
+                            {"name": "ts", "type": 6, "nullable": True},
+                            {"name": "typ", "type": 9, "nullable": True},
+                            {"name": "tools", "type": 9, "nullable": True},
+                            {"name": "tokens_in", "type": 9, "nullable": True},
+                            {"name": "tokens_out", "type": 9, "nullable": True},
+                        ],
+                    },
+                    "rows": [
+                        ["s1", 1784314514467508988, "assistant", "Bash", "10", "20"],
                     ],
-                },
-                "rows": [
-                    ["s1", 1784314514467508988, "assistant", "Bash", "10", "20"],
-                ],
-            }],
+                }
+            ],
             "stats": {"rows_processed": 1},
             "trace_id": "abc123",
             "warnings": [],
@@ -248,10 +254,12 @@ class AgentAnalyticsPureTest(unittest.TestCase):
         # Realistic "no matching data" response: real bzrk always populates
         # schema.columns even when the row set is empty.
         doc = {
-            "Tables": [{
-                "schema": {"columns": [{"name": "session", "type": 5, "nullable": True}]},
-                "rows": [],
-            }],
+            "Tables": [
+                {
+                    "schema": {"columns": [{"name": "session", "type": 5, "nullable": True}]},
+                    "rows": [],
+                }
+            ],
             "stats": {"rows_processed": 0},
         }
         self.assertEqual(aa._parse_rows(json.dumps(doc)), [])
@@ -332,14 +340,20 @@ class MessageIdCollapseTest(unittest.TestCase):
 
 
 def daily_row(day, model="m", events=10, errors=0, tin=0, tout=0, chars=0):
-    return {"day": day, "model": model, "events": events, "errors": errors,
-            "tokens_in_sum": tin, "tokens_out_sum": tout, "body_chars_sum": chars}
+    return {
+        "day": day,
+        "model": model,
+        "events": events,
+        "errors": errors,
+        "tokens_in_sum": tin,
+        "tokens_out_sum": tout,
+        "body_chars_sum": chars,
+    }
 
 
 class CostReportPureTest(unittest.TestCase):
     def test_exact_tokens_preferred_and_summed(self):
-        rows = [daily_row("2026-07-14", tin=1000, tout=500),
-                daily_row("2026-07-15", tin=2000, tout=1000)]
+        rows = [daily_row("2026-07-14", tin=1000, tout=500), daily_row("2026-07-15", tin=2000, tout=1000)]
         rep = aa.analyze_cost_daily(rows)
         self.assertEqual(rep["days"][0]["tokens"], 1500)
         self.assertEqual(rep["days"][0]["source"], "exact")
@@ -352,30 +366,25 @@ class CostReportPureTest(unittest.TestCase):
         self.assertEqual(rep["days"][0]["source"], "estimated")
 
     def test_insufficient_data_under_three_days(self):
-        rep = aa.analyze_cost_daily([daily_row("2026-07-14", tin=100),
-                                     daily_row("2026-07-15", tin=100)])
+        rep = aa.analyze_cost_daily([daily_row("2026-07-14", tin=100), daily_row("2026-07-15", tin=100)])
         self.assertEqual(rep["verdict"], "insufficient-data")
 
     def test_growing_flat_declining_verdicts(self):
-        grow = [daily_row(f"2026-07-{d:02d}", tin=1000 * i)
-                for i, d in enumerate(range(10, 15), start=1)]
+        grow = [daily_row(f"2026-07-{d:02d}", tin=1000 * i) for i, d in enumerate(range(10, 15), start=1)]
         self.assertEqual(aa.analyze_cost_daily(grow)["verdict"], "burn-growing")
         flat = [daily_row(f"2026-07-{d:02d}", tin=1000) for d in range(10, 15)]
         self.assertEqual(aa.analyze_cost_daily(flat)["verdict"], "burn-flat")
-        decl = [daily_row(f"2026-07-{d:02d}", tin=1000 * (6 - i))
-                for i, d in enumerate(range(10, 15), start=1)]
+        decl = [daily_row(f"2026-07-{d:02d}", tin=1000 * (6 - i)) for i, d in enumerate(range(10, 15), start=1)]
         self.assertEqual(aa.analyze_cost_daily(decl)["verdict"], "burn-declining")
 
     def test_per_model_split(self):
-        rows = [daily_row("2026-07-14", model="opus", tin=3000),
-                daily_row("2026-07-14", model="haiku", tin=1000)]
+        rows = [daily_row("2026-07-14", model="opus", tin=3000), daily_row("2026-07-14", model="haiku", tin=1000)]
         rep = aa.analyze_cost_daily(rows)
         self.assertEqual(rep["models"]["opus"], 3000)
         self.assertEqual(rep["models"]["haiku"], 1000)
 
     def test_mixed_day_rows_merge(self):
-        rows = [daily_row("2026-07-14", model="a", tin=100),
-                daily_row("2026-07-14", model="b", tin=200)]
+        rows = [daily_row("2026-07-14", model="a", tin=100), daily_row("2026-07-14", model="b", tin=200)]
         rep = aa.analyze_cost_daily(rows)
         self.assertEqual(len(rep["days"]), 1)
         self.assertEqual(rep["days"][0]["tokens"], 300)
@@ -443,9 +452,7 @@ class BzrkSearchJsonTest(unittest.TestCase):
 
     def test_requests_json_and_returns_when_supported(self):
         seen = []
-        bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: (
-            seen.append(list(args)) or ('[{"session": "s"}]', False)
-        )
+        bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: seen.append(list(args)) or ('[{"session": "s"}]', False)
         out, err = bm.bzrk_search_json(f"{bm.TABLE} | take 1", "1h ago")
         self.assertFalse(err)
         self.assertIn("--json", seen[0])
@@ -489,12 +496,17 @@ class AgentAnalyticsMcpTest(unittest.TestCase):
 
         def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
             self.calls.append(list(args))
-            return (jsonl([
-                row("s1", "2026-07-12T10:00:00Z", "Edit", "secret-value-" + ("x" * 100)),
-                row("s1", "2026-07-12T10:01:00Z", "Edit", "secret-value-" + ("x" * 100)),
-                row("s1", "2026-07-12T10:02:00Z", "Edit", "secret-value-" + ("x" * 100)),
-                row("s1", "2026-07-12T10:03:00Z", "Edit", "secret-value-" + ("x" * 100)),
-            ]), False)
+            return (
+                jsonl(
+                    [
+                        row("s1", "2026-07-12T10:00:00Z", "Edit", "secret-value-" + ("x" * 100)),
+                        row("s1", "2026-07-12T10:01:00Z", "Edit", "secret-value-" + ("x" * 100)),
+                        row("s1", "2026-07-12T10:02:00Z", "Edit", "secret-value-" + ("x" * 100)),
+                        row("s1", "2026-07-12T10:03:00Z", "Edit", "secret-value-" + ("x" * 100)),
+                    ]
+                ),
+                False,
+            )
 
         bm.run_bzrk = fake_run_bzrk
 
@@ -513,10 +525,10 @@ class AgentAnalyticsMcpTest(unittest.TestCase):
         # It must be scrubbed by the injected redactor regardless of the global
         # output-filter mode (roadmap A1: no raw secret-bearing body echoed).
         aws = "AKIAIOSFODNN7EXAMPLE"
-        bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: (jsonl([
-            row("s1", f"2026-07-12T10:0{i}:00Z", "Bash", f"aws {aws} deploy")
-            for i in range(4)
-        ]), False)
+        bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: (
+            jsonl([row("s1", f"2026-07-12T10:0{i}:00Z", "Bash", f"aws {aws} deploy") for i in range(4)]),
+            False,
+        )
         text, err = bm.handle_call("claude_loop_check", {})
         self.assertFalse(err)
         self.assertNotIn(aws, text)
@@ -546,8 +558,11 @@ class AgentAnalyticsMcpTest(unittest.TestCase):
         orig = bm.quota_status.get_quota_status
         try:
             bm.quota_status.get_quota_status = lambda since: {
-                "source": "estimated", "ok": True, "since": since,
-                "total_tokens": 1234, "all_exact": True,
+                "source": "estimated",
+                "ok": True,
+                "since": since,
+                "total_tokens": 1234,
+                "all_exact": True,
             }
             text, err = bm.handle_call("claude_quota_status", {})
             self.assertFalse(err)
@@ -637,8 +652,15 @@ class _RewiredAnalytics(unittest.TestCase):
 class CostReportToolTest(_RewiredAnalytics):
     def test_cost_report_day_grouping_renders_verdict(self):
         daily = [
-            {"day": f"2026-07-{d:02d}", "model": "m", "events": 5, "errors": 0,
-             "tokens_in_sum": 1000 * i, "tokens_out_sum": 0, "body_chars_sum": 0}
+            {
+                "day": f"2026-07-{d:02d}",
+                "model": "m",
+                "events": 5,
+                "errors": 0,
+                "tokens_in_sum": 1000 * i,
+                "tokens_out_sum": 0,
+                "body_chars_sum": 0,
+            }
             for i, d in enumerate(range(10, 15), start=1)
         ]
         self.rewire(lambda q, s: (json.dumps(daily), False))
@@ -648,8 +670,10 @@ class CostReportToolTest(_RewiredAnalytics):
         self.assertIn("exact", text)
 
     def test_cost_report_project_grouping_uses_events(self):
-        events = [row("s1", "2026-07-14T10:00:00Z", "Edit", "/h/proj-a/src/a.py"),
-                  row("s2", "2026-07-14T11:00:00Z", "Edit", "/h/proj-b/src/b.py")]
+        events = [
+            row("s1", "2026-07-14T10:00:00Z", "Edit", "/h/proj-a/src/a.py"),
+            row("s2", "2026-07-14T11:00:00Z", "Edit", "/h/proj-b/src/b.py"),
+        ]
         self.rewire(lambda q, s: (jsonl(events), False))
         text, err = aa.claude_cost_report(group_by="project")
         self.assertFalse(err)
@@ -693,10 +717,24 @@ class CostReportToolTest(_RewiredAnalytics):
 
     def test_cost_report_model_grouping(self):
         daily = [
-            {"day": "2026-07-14", "model": "claude-opus-4-7", "events": 5, "errors": 0,
-             "tokens_in_sum": 3000, "tokens_out_sum": 0, "body_chars_sum": 0},
-            {"day": "2026-07-14", "model": "claude-haiku-4-5", "events": 5, "errors": 0,
-             "tokens_in_sum": 1000, "tokens_out_sum": 0, "body_chars_sum": 0},
+            {
+                "day": "2026-07-14",
+                "model": "claude-opus-4-7",
+                "events": 5,
+                "errors": 0,
+                "tokens_in_sum": 3000,
+                "tokens_out_sum": 0,
+                "body_chars_sum": 0,
+            },
+            {
+                "day": "2026-07-14",
+                "model": "claude-haiku-4-5",
+                "events": 5,
+                "errors": 0,
+                "tokens_in_sum": 1000,
+                "tokens_out_sum": 0,
+                "body_chars_sum": 0,
+            },
         ]
         self.rewire(lambda q, s: (json.dumps(daily), False))
         text, err = aa.claude_cost_report(group_by="model")
@@ -806,15 +844,14 @@ class WorkflowInsightsTest(_RewiredAnalytics):
     def test_bigram_sequences_counted(self):
         events = []
         for i in range(3):
-            events.append(row("s1", f"2026-07-14T10:{2*i:02d}:00Z", "Read", "a.py"))
-            events.append(row("s1", f"2026-07-14T10:{2*i+1:02d}:00Z", "Edit", "a.py"))
+            events.append(row("s1", f"2026-07-14T10:{2 * i:02d}:00Z", "Read", "a.py"))
+            events.append(row("s1", f"2026-07-14T10:{2 * i + 1:02d}:00Z", "Edit", "a.py"))
         rep = aa.analyze_workflow_events(events)
         patterns = {s["pattern"]: s["count"] for s in rep["sequences"]}
         self.assertGreaterEqual(patterns.get("Read→Edit", 0), 3)
 
     def test_error_hotspot_needs_min_two_errors(self):
-        events = [row("s1", f"2026-07-14T10:0{i}:00Z", "Bash", "npm test", err=True)
-                  for i in range(3)]
+        events = [row("s1", f"2026-07-14T10:0{i}:00Z", "Bash", "npm test", err=True) for i in range(3)]
         events.append(row("s1", "2026-07-14T10:09:00Z", "Read", "x.py", err=True))
         rep = aa.analyze_workflow_events(events)
         keys = [h["key"] for h in rep["hotspots"]]
@@ -834,10 +871,12 @@ class WorkflowInsightsTest(_RewiredAnalytics):
         self.assertIn("No Claude Code", text)
 
     def test_wrapper_full_render(self):
-        events = [row("s1", "2026-07-14T10:00:00Z", "Read", "/p/src/a.py"),
-                  row("s1", "2026-07-14T10:01:00Z", "Edit", "/p/src/a.py"),
-                  row("s1", "2026-07-14T10:02:00Z", "Bash", "pytest", err=True),
-                  row("s1", "2026-07-14T10:03:00Z", "Bash", "pytest", err=True)]
+        events = [
+            row("s1", "2026-07-14T10:00:00Z", "Read", "/p/src/a.py"),
+            row("s1", "2026-07-14T10:01:00Z", "Edit", "/p/src/a.py"),
+            row("s1", "2026-07-14T10:02:00Z", "Bash", "pytest", err=True),
+            row("s1", "2026-07-14T10:03:00Z", "Bash", "pytest", err=True),
+        ]
         aa_events = jsonl(events + events)  # repeat so bigrams cross min-count
         self.rewire(lambda q, s: (aa_events, False))
         text, err = aa.claude_workflow_insights()

@@ -62,9 +62,13 @@ class Phase3ToolsTest(unittest.TestCase):
             ("trace_analyze", {"trace_id": "a" * 65}),
             ("logs_for_service", {"service": "s" * 129}),
             ("detect_anomalies", {"service": "s" * 129}),
-            ("forecast_capacity", {
-                "metric": "system.memory.usage", "host": "h" * 129,
-            }),
+            (
+                "forecast_capacity",
+                {
+                    "metric": "system.memory.usage",
+                    "host": "h" * 129,
+                },
+            ),
             ("request_discovery", {"service": "s" * 129}),
             ("generate_parser", {"service": "s" * 129}),
         )
@@ -102,12 +106,17 @@ class Phase3ToolsTest(unittest.TestCase):
 
     def test_forecast_refuses_weak_or_downward_trends(self):
         payload = {
-            "Tables": [{
-                "schema": {"columns": [
-                    {"name": "host"}, {"name": "fit"},
-                ]},
-                "rows": [["node-a", [0.42, -1.0, 0, 0, 0, []]]],
-            }]
+            "Tables": [
+                {
+                    "schema": {
+                        "columns": [
+                            {"name": "host"},
+                            {"name": "fit"},
+                        ]
+                    },
+                    "rows": [["node-a", [0.42, -1.0, 0, 0, 0, []]]],
+                }
+            ]
         }
 
         def fit(args, timeout=bm.DEFAULT_TIMEOUT):
@@ -115,9 +124,7 @@ class Phase3ToolsTest(unittest.TestCase):
             return json.dumps(payload), False
 
         bm.run_bzrk = fit
-        text, is_err = bm.handle_call(
-            "forecast_capacity", {"metric": "system.memory.usage"}
-        )
+        text, is_err = bm.handle_call("forecast_capacity", {"metric": "system.memory.usage"})
         self.assertFalse(is_err)
         self.assertIn("no reliable trend", text)
         self.assertIn("R²=0.420", text)

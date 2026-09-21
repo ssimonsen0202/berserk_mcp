@@ -3,6 +3,7 @@
 look like real OpenAI/Anthropic tool schemas and must never collide with a
 real berserk-mcp tool name, or the multi-server eval would be testing
 something other than what it claims to."""
+
 import sys
 import unittest
 from pathlib import Path

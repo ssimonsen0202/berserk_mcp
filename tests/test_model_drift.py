@@ -2,15 +2,24 @@ import json
 import sys
 import unittest
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import model_drift
 
 
 def series(*scores, version="v1", role="all", discovery_mode="0", tier="", repeats=3):
-    return [{"tool_accuracy": s, "case_set_version": version, "status": "ok",
-             "role": role, "discovery_mode": discovery_mode, "tier": tier,
-             "repeats": repeats}
-            for s in scores]
+    return [
+        {
+            "tool_accuracy": s,
+            "case_set_version": version,
+            "status": "ok",
+            "role": role,
+            "discovery_mode": discovery_mode,
+            "tier": tier,
+            "repeats": repeats,
+        }
+        for s in scores
+    ]
 
 
 class VerdictTest(unittest.TestCase):
@@ -59,10 +68,16 @@ class VerdictTest(unittest.TestCase):
 
 class GroupByModelTest(unittest.TestCase):
     def test_groups_rows_by_model_column(self):
-        payload = json.dumps({"Tables": [{
-            "schema": {"columns": [{"name": "model"}, {"name": "tool_accuracy"}]},
-            "rows": [["m1", 0.9], ["m2", 0.5], ["m1", 0.85]],
-        }]})
+        payload = json.dumps(
+            {
+                "Tables": [
+                    {
+                        "schema": {"columns": [{"name": "model"}, {"name": "tool_accuracy"}]},
+                        "rows": [["m1", 0.9], ["m2", 0.5], ["m1", 0.85]],
+                    }
+                ]
+            }
+        )
         grouped = model_drift.group_by_model(payload)
         self.assertEqual(len(grouped["m1"]), 2)
         self.assertEqual(len(grouped["m2"]), 1)
@@ -85,8 +100,13 @@ class NoiseBandCalibrationTest(unittest.TestCase):
     fails, either the calibration data changed (re-baseline deliberately)
     or DEFAULT_NOISE_BAND was edited without re-measuring (a regression)."""
 
-    MEASURED_SCORES = [0.9513888888888888, 0.9583333333333334,
-                       0.9513888888888888, 0.9513888888888888, 0.9444444444444444]
+    MEASURED_SCORES = [
+        0.9513888888888888,
+        0.9583333333333334,
+        0.9513888888888888,
+        0.9513888888888888,
+        0.9444444444444444,
+    ]
 
     def test_default_noise_band_is_the_measured_value(self):
         self.assertEqual(model_drift.DEFAULT_NOISE_BAND, 0.02)
@@ -134,8 +154,7 @@ class RoleAndDiscoveryModeGateClassificationTest(unittest.TestCase):
     case_set_version. Found by Codex review, 2026-09-02."""
 
     def test_role_change_is_not_compared_across(self):
-        mixed = (series(0.88, 0.88, role="all")
-                + series(0.60, 0.60, 0.60, 0.60, role="claude"))
+        mixed = series(0.88, 0.88, role="all") + series(0.60, 0.60, 0.60, 0.60, role="claude")
         out = model_drift.classify(mixed, noise_band=0.05)
         # Only 4 rows share the latest (role="claude") combination -- flat
         # among themselves, so stable, not a false "regression" against
@@ -147,8 +166,7 @@ class RoleAndDiscoveryModeGateClassificationTest(unittest.TestCase):
         do -- an identically-shaped gap to the role/discovery one above,
         missed in the first fix and found by Codex's backtest of that
         same fix, same day."""
-        mixed = (series(0.88, 0.88, tier="small")
-                + series(0.60, 0.60, 0.60, 0.60, tier="deep"))
+        mixed = series(0.88, 0.88, tier="small") + series(0.60, 0.60, 0.60, 0.60, tier="deep")
         out = model_drift.classify(mixed, noise_band=0.05)
         self.assertEqual(out["verdict"], "stable")
 
@@ -182,6 +200,7 @@ class SeriesKqlTableTest(unittest.TestCase):
     def test_honors_berserk_table_env_var(self):
         import importlib
         import os
+
         old = os.environ.get("BERSERK_TABLE")
         os.environ["BERSERK_TABLE"] = "custom_table"
         try:
@@ -244,13 +263,20 @@ class FingerprintChangedAutoDerivationTest(unittest.TestCase):
     fingerprints actually showed. Found by Codex review, 2026-09-02."""
 
     def _row(self, score, fp):
-        return {"tool_accuracy": score, "case_set_version": "v1", "status": "ok",
-                "role": "all", "discovery_mode": "0", "tier": "", "repeats": 3,
-                "behavioral_fingerprint": fp, "provider_metadata_fingerprint": fp}
+        return {
+            "tool_accuracy": score,
+            "case_set_version": "v1",
+            "status": "ok",
+            "role": "all",
+            "discovery_mode": "0",
+            "tier": "",
+            "repeats": 3,
+            "behavioral_fingerprint": fp,
+            "provider_metadata_fingerprint": fp,
+        }
 
     def test_fingerprint_change_on_the_last_transition_raises_confidence(self):
-        rows = [self._row(0.9, "a"), self._row(0.9, "a"),
-                self._row(0.6, "a"), self._row(0.6, "b")]
+        rows = [self._row(0.9, "a"), self._row(0.9, "a"), self._row(0.6, "a"), self._row(0.6, "b")]
         without = model_drift.classify(rows, noise_band=0.05, fingerprint_changed=False)
         auto = model_drift.classify(rows, noise_band=0.05)  # fingerprint_changed=None (default)
         self.assertEqual(auto["verdict"], "step-change")
@@ -267,8 +293,7 @@ class FingerprintChangedAutoDerivationTest(unittest.TestCase):
         so the two most recent rows (row[2], row[3]) are already both
         "b" -- a last-two-rows comparison finds no change at all. Found
         by Codex backtest, 2026-09-02."""
-        rows = [self._row(0.9, "a"), self._row(0.9, "a"),
-                self._row(0.6, "b"), self._row(0.6, "b")]
+        rows = [self._row(0.9, "a"), self._row(0.9, "a"), self._row(0.6, "b"), self._row(0.6, "b")]
         self.assertFalse(
             rows[-2]["behavioral_fingerprint"] != rows[-1]["behavioral_fingerprint"],
             "test setup sanity check: the last two rows must share a fingerprint "
@@ -279,8 +304,7 @@ class FingerprintChangedAutoDerivationTest(unittest.TestCase):
         self.assertIn("fingerprint", auto["reason"])
 
     def test_no_fingerprint_change_does_not_raise_confidence(self):
-        rows = [self._row(0.9, "a"), self._row(0.9, "a"),
-                self._row(0.6, "a"), self._row(0.6, "a")]
+        rows = [self._row(0.9, "a"), self._row(0.9, "a"), self._row(0.6, "a"), self._row(0.6, "a")]
         auto = model_drift.classify(rows, noise_band=0.05)
         self.assertNotIn("fingerprint", auto["reason"])
 
@@ -292,8 +316,7 @@ class FingerprintChangedAutoDerivationTest(unittest.TestCase):
         tools' own descriptions promise reporting fingerprint status
         regardless of verdict, and nothing previously surfaced it when
         the verdict stayed stable. Found by Codex backtest, 2026-09-02."""
-        rows = [self._row(0.9, "a"), self._row(0.9, "a"),
-                self._row(0.9, "b"), self._row(0.9, "b")]
+        rows = [self._row(0.9, "a"), self._row(0.9, "a"), self._row(0.9, "b"), self._row(0.9, "b")]
         out = model_drift.classify(rows, noise_band=0.05)
         self.assertEqual(out["verdict"], "stable")
         self.assertEqual(out["fingerprint_values"]["behavioral_fingerprint"], ["b"])

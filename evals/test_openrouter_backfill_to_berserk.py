@@ -22,16 +22,24 @@ def _attr(key, value):
 
 def _otlp_payload(model="m", trace_id="t1"):
     return {
-        "resourceSpans": [{
-            "resource": {"attributes": [_attr("service.name", "openrouter")]},
-            "scopeSpans": [{
-                "spans": [{
-                    "traceId": trace_id, "spanId": "s1", "name": "gen",
-                    "startTimeUnixNano": "1700000000000000000",
-                    "attributes": [_attr("gen_ai.request.model", model)],
-                }],
-            }],
-        }],
+        "resourceSpans": [
+            {
+                "resource": {"attributes": [_attr("service.name", "openrouter")]},
+                "scopeSpans": [
+                    {
+                        "spans": [
+                            {
+                                "traceId": trace_id,
+                                "spanId": "s1",
+                                "name": "gen",
+                                "startTimeUnixNano": "1700000000000000000",
+                                "attributes": [_attr("gen_ai.request.model", model)],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
     }
 
 
@@ -65,6 +73,7 @@ class StateFileTest(unittest.TestCase):
 class MergePayloadsTest(unittest.TestCase):
     def test_merges_multiple_resourceLogs_into_one_payload(self):
         from openrouter_webhook_receiver import spans_to_berserk_payload
+
         p1 = spans_to_berserk_payload(_otlp_payload(trace_id="t1"))
         p2 = spans_to_berserk_payload(_otlp_payload(trace_id="t2"))
         merged = merge_payloads([p1, p2])
@@ -94,8 +103,7 @@ class RunBackfillTest(unittest.TestCase):
 
     def test_forwards_all_records_in_one_batch_when_under_batch_size(self):
         self._write_raw(3)
-        ok = run_backfill(self.raw_path, self.state_path, "http://x/v1/logs",
-                           batch_size=25, post_fn=self._fake_post)
+        ok = run_backfill(self.raw_path, self.state_path, "http://x/v1/logs", batch_size=25, post_fn=self._fake_post)
         self.assertTrue(ok)
         self.assertEqual(len(self.posted), 1)
         self.assertEqual(len(self.posted[0]["resourceLogs"]), 3)
@@ -103,8 +111,7 @@ class RunBackfillTest(unittest.TestCase):
 
     def test_splits_into_multiple_batches(self):
         self._write_raw(5)
-        ok = run_backfill(self.raw_path, self.state_path, "http://x/v1/logs",
-                           batch_size=2, post_fn=self._fake_post)
+        ok = run_backfill(self.raw_path, self.state_path, "http://x/v1/logs", batch_size=2, post_fn=self._fake_post)
         self.assertTrue(ok)
         self.assertEqual(len(self.posted), 3)  # 2, 2, 1
         self.assertEqual(_read_state(self.state_path), 5)
@@ -112,8 +119,7 @@ class RunBackfillTest(unittest.TestCase):
     def test_resumes_from_saved_state_not_from_scratch(self):
         self._write_raw(5)
         _write_state(self.state_path, 3)
-        ok = run_backfill(self.raw_path, self.state_path, "http://x/v1/logs",
-                           batch_size=25, post_fn=self._fake_post)
+        ok = run_backfill(self.raw_path, self.state_path, "http://x/v1/logs", batch_size=25, post_fn=self._fake_post)
         self.assertTrue(ok)
         self.assertEqual(len(self.posted[0]["resourceLogs"]), 2)  # only lines 3,4
         self.assertEqual(_read_state(self.state_path), 5)
@@ -121,21 +127,30 @@ class RunBackfillTest(unittest.TestCase):
     def test_failed_batch_stops_and_does_not_advance_state(self):
         self._write_raw(5)
         calls = []
+
         def failing_after_first(endpoint, payload):
             calls.append(payload)
             return (True, "ok") if len(calls) == 1 else (False, "connection refused")
-        ok = run_backfill(self.raw_path, self.state_path, "http://x/v1/logs",
-                           batch_size=2, post_fn=failing_after_first)
+
+        ok = run_backfill(self.raw_path, self.state_path, "http://x/v1/logs", batch_size=2, post_fn=failing_after_first)
         self.assertFalse(ok)
         # first batch (lines 0-1) succeeded and was saved; second batch failed
         self.assertEqual(_read_state(self.state_path), 2)
 
     def test_dry_run_never_calls_post_fn(self):
         self._write_raw(3)
+
         def should_not_be_called(endpoint, payload):
             raise AssertionError("post_fn must not be called in dry-run")
-        ok = run_backfill(self.raw_path, self.state_path, "http://x/v1/logs",
-                           batch_size=25, dry_run=True, post_fn=should_not_be_called)
+
+        ok = run_backfill(
+            self.raw_path,
+            self.state_path,
+            "http://x/v1/logs",
+            batch_size=25,
+            dry_run=True,
+            post_fn=should_not_be_called,
+        )
         self.assertTrue(ok)
 
     def test_dry_run_does_not_persist_state_a_real_run_afterward_still_sees_everything(self):
@@ -145,11 +160,16 @@ class RunBackfillTest(unittest.TestCase):
         # actually dry-running the deployed script before the real
         # backfill, not by reasoning about it in advance.
         self._write_raw(3)
-        run_backfill(self.raw_path, self.state_path, "http://x/v1/logs",
-                      batch_size=25, dry_run=True, post_fn=lambda *a, **k: (_ for _ in ()).throw(AssertionError))
+        run_backfill(
+            self.raw_path,
+            self.state_path,
+            "http://x/v1/logs",
+            batch_size=25,
+            dry_run=True,
+            post_fn=lambda *a, **k: (_ for _ in ()).throw(AssertionError),
+        )
         self.assertEqual(_read_state(self.state_path), 0)
-        ok = run_backfill(self.raw_path, self.state_path, "http://x/v1/logs",
-                           batch_size=25, post_fn=self._fake_post)
+        ok = run_backfill(self.raw_path, self.state_path, "http://x/v1/logs", batch_size=25, post_fn=self._fake_post)
         self.assertTrue(ok)
         self.assertEqual(len(self.posted[0]["resourceLogs"]), 3)
         self.assertEqual(_read_state(self.state_path), 3)
@@ -159,8 +179,7 @@ class RunBackfillTest(unittest.TestCase):
             f.write(_raw_line(_otlp_payload(trace_id="t0")) + "\n")
             f.write("not valid json at all\n")
             f.write(_raw_line(_otlp_payload(trace_id="t2")) + "\n")
-        ok = run_backfill(self.raw_path, self.state_path, "http://x/v1/logs",
-                           batch_size=25, post_fn=self._fake_post)
+        ok = run_backfill(self.raw_path, self.state_path, "http://x/v1/logs", batch_size=25, post_fn=self._fake_post)
         self.assertTrue(ok)
         self.assertEqual(len(self.posted[0]["resourceLogs"]), 2)  # 2 valid spans
         self.assertEqual(_read_state(self.state_path), 3)  # all 3 lines counted as processed
@@ -173,11 +192,19 @@ class RunBackfillTest(unittest.TestCase):
         with open(self.raw_path, "w") as f:
             f.write(_raw_line(payload) + "\n")
         seen_texts = []
+
         def spy_redact(text):
             seen_texts.append(text)
             return "[REDACTED]"
-        ok = run_backfill(self.raw_path, self.state_path, "http://x/v1/logs",
-                           batch_size=25, post_fn=self._fake_post, redact=spy_redact)
+
+        ok = run_backfill(
+            self.raw_path,
+            self.state_path,
+            "http://x/v1/logs",
+            batch_size=25,
+            post_fn=self._fake_post,
+            redact=spy_redact,
+        )
         self.assertTrue(ok)
         self.assertTrue(any("sk-proj-realsecretvalue12345" in t for t in seen_texts))
         posted_str = json.dumps(self.posted[0])

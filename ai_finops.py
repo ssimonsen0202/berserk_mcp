@@ -4,6 +4,7 @@ The module is deliberately standard-library only.  ``berserk_mcp`` injects a
 bounded Berserk search callable and filesystem locations at startup; pure
 functions remain independently testable without a live cluster.
 """
+
 from collections import defaultdict
 from datetime import datetime, timezone
 import argparse
@@ -32,10 +33,16 @@ _SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 _search = None
 _table = "default"
+
+
 def _redact(value):
     return str(value)
+
+
 def _redact_aggressive(value):
     return str(value)
+
+
 _catalog_path = None
 _business_store_path = None
 _decision_store_path = None
@@ -48,9 +55,19 @@ _otlp_headers = ""
 _store_lock = threading.RLock()
 
 
-def configure(search, table="default", redact=None, redact_aggressive=None, catalog_path=None,
-              business_store_path=None, decision_store_path=None,
-              pseudonym_key_path=None, report_dir=None, otlp_endpoint="", otlp_headers=""):
+def configure(
+    search,
+    table="default",
+    redact=None,
+    redact_aggressive=None,
+    catalog_path=None,
+    business_store_path=None,
+    decision_store_path=None,
+    pseudonym_key_path=None,
+    report_dir=None,
+    otlp_endpoint="",
+    otlp_headers="",
+):
     """Inject runtime dependencies without importing ``berserk_mcp``."""
     global _search, _table, _redact, _redact_aggressive, _catalog_path, _business_store_path
     global _decision_store_path, _pseudonym_key_path, _pseudonym_key_cache
@@ -116,9 +133,7 @@ def _pseudonymize(value):
     text = str(value or "").strip()
     if not text:
         return ""
-    return hmac.new(
-        _deployment_pseudonym_key(), text.encode("utf-8"), hashlib.sha256
-    ).hexdigest()[:32]
+    return hmac.new(_deployment_pseudonym_key(), text.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
 
 
 def _nonnegative_int(value):
@@ -172,9 +187,7 @@ def _timestamp_text(value):
                 numeric /= 1_000_000.0
             elif magnitude >= 1e11:  # milliseconds
                 numeric /= 1_000.0
-            return datetime.fromtimestamp(numeric, timezone.utc).isoformat().replace(
-                "+00:00", "Z"
-            )
+            return datetime.fromtimestamp(numeric, timezone.utc).isoformat().replace("+00:00", "Z")
         except (OverflowError, OSError, TypeError, ValueError):
             pass
     return str(value or "")
@@ -196,7 +209,8 @@ def _json_records(value):
     if isinstance(tables, list) and tables and isinstance(tables[0], dict):
         table = tables[0]
         columns = [
-            col.get("name") for col in (table.get("schema") or {}).get("columns", [])
+            col.get("name")
+            for col in (table.get("schema") or {}).get("columns", [])
             if isinstance(col, dict) and col.get("name")
         ]
         rows = table.get("rows")
@@ -237,23 +251,34 @@ def normalize_usage_row(obj):
     resource = obj.get("resource") if isinstance(obj.get("resource"), dict) else {}
 
     input_raw = _first(
-        obj.get("tokens_in_sum"), obj.get("input_tokens"), obj.get("tokens_in"),
-        attrs.get("input_tokens"), attrs.get("gen_ai.usage.input_tokens"),
+        obj.get("tokens_in_sum"),
+        obj.get("input_tokens"),
+        obj.get("tokens_in"),
+        attrs.get("input_tokens"),
+        attrs.get("gen_ai.usage.input_tokens"),
         attrs.get("claude.tokens_input"),
     )
     output_raw = _first(
-        obj.get("tokens_out_sum"), obj.get("output_tokens"), obj.get("tokens_out"),
-        attrs.get("output_tokens"), attrs.get("gen_ai.usage.output_tokens"),
+        obj.get("tokens_out_sum"),
+        obj.get("output_tokens"),
+        obj.get("tokens_out"),
+        attrs.get("output_tokens"),
+        attrs.get("gen_ai.usage.output_tokens"),
         attrs.get("claude.tokens_output"),
     )
     cache_read_raw = _first(
-        obj.get("cache_read_tokens_sum"), obj.get("cache_read_tokens"),
-        obj.get("cache_read"), attrs.get("cache_read_tokens"),
-        attrs.get("cache_read_input_tokens"), attrs.get("claude.cache_read_tokens"),
+        obj.get("cache_read_tokens_sum"),
+        obj.get("cache_read_tokens"),
+        obj.get("cache_read"),
+        attrs.get("cache_read_tokens"),
+        attrs.get("cache_read_input_tokens"),
+        attrs.get("claude.cache_read_tokens"),
     )
     cache_create_raw = _first(
-        obj.get("cache_creation_tokens_sum"), obj.get("cache_creation_tokens"),
-        obj.get("cache_create"), attrs.get("cache_creation_tokens"),
+        obj.get("cache_creation_tokens_sum"),
+        obj.get("cache_creation_tokens"),
+        obj.get("cache_create"),
+        attrs.get("cache_creation_tokens"),
         attrs.get("cache_creation_input_tokens"),
         attrs.get("claude.cache_creation_tokens"),
     )
@@ -264,34 +289,27 @@ def normalize_usage_row(obj):
     )
     long_input_raw = _first(obj.get("long_input_tokens_sum"), obj.get("long_input_tokens"))
     long_output_raw = _first(obj.get("long_output_tokens_sum"), obj.get("long_output_tokens"))
-    long_cache_read_raw = _first(
-        obj.get("long_cache_read_tokens_sum"), obj.get("long_cache_read_tokens")
-    )
-    long_cache_create_raw = _first(
-        obj.get("long_cache_creation_tokens_sum"), obj.get("long_cache_creation_tokens")
-    )
+    long_cache_read_raw = _first(obj.get("long_cache_read_tokens_sum"), obj.get("long_cache_read_tokens"))
+    long_cache_create_raw = _first(obj.get("long_cache_creation_tokens_sum"), obj.get("long_cache_creation_tokens"))
     long_split_known = any(
         value is not None and str(value).strip() != ""
-        for value in (long_input_raw, long_output_raw, long_cache_read_raw,
-                      long_cache_create_raw)
+        for value in (long_input_raw, long_output_raw, long_cache_read_raw, long_cache_create_raw)
     )
     raw_token_fields_present = any(
         value is not None and str(value).strip() != ""
-        for value in (input_raw, output_raw, cache_read_raw, cache_create_raw,
-                      cache_create_1h_raw)
+        for value in (input_raw, output_raw, cache_read_raw, cache_create_raw, cache_create_1h_raw)
     )
-    aggregate_token_marker = (
-        "exact_usage_events" in obj or "estimated_usage_events" in obj
-    )
+    aggregate_token_marker = "exact_usage_events" in obj or "estimated_usage_events" in obj
     exact_usage_events = _nonnegative_int(obj.get("exact_usage_events"))
     estimated_usage_events = _nonnegative_int(obj.get("estimated_usage_events"))
-    token_fields_present = (
-        exact_usage_events > 0 if aggregate_token_marker else raw_token_fields_present
+    token_fields_present = exact_usage_events > 0 if aggregate_token_marker else raw_token_fields_present
+    body_chars = _nonnegative_int(
+        _first(
+            obj.get("body_chars_sum"),
+            obj.get("body_chars"),
+            len(str(obj.get("body") or "")),
+        )
     )
-    body_chars = _nonnegative_int(_first(
-        obj.get("body_chars_sum"), obj.get("body_chars"),
-        len(str(obj.get("body") or "")),
-    ))
     tokens_in = _nonnegative_int(input_raw)
     tokens_out = _nonnegative_int(output_raw)
     cache_read = _nonnegative_int(cache_read_raw)
@@ -305,18 +323,22 @@ def normalize_usage_row(obj):
         estimated_tokens = int(math.ceil(body_chars / 4.0))
         tokens_in = estimated_tokens
 
-    timestamp = _timestamp_text(_first(
-        obj.get("day"), obj.get("ts"), obj.get("timestamp"), attrs.get("event.timestamp")
-    ))
+    timestamp = _timestamp_text(
+        _first(obj.get("day"), obj.get("ts"), obj.get("timestamp"), attrs.get("event.timestamp"))
+    )
     day = timestamp[:10] if len(timestamp) >= 10 else ""
-    event_name = str(_first(obj.get("event_name"), attrs.get("event.name"),
-                            obj.get("typ"), attrs.get("claude.type")))
-    session = str(_first(obj.get("session"), obj.get("session_id"),
-                         attrs.get("session.id"), attrs.get("claude.session_id")))
+    event_name = str(_first(obj.get("event_name"), attrs.get("event.name"), obj.get("typ"), attrs.get("claude.type")))
+    session = str(
+        _first(obj.get("session"), obj.get("session_id"), attrs.get("session.id"), attrs.get("claude.session_id"))
+    )
 
     native_source = event_name in {
-        "api_request", "api_error", "api_retries_exhausted", "tool_result",
-        "compaction", "claude_code.api_request",
+        "api_request",
+        "api_error",
+        "api_retries_exhausted",
+        "tool_result",
+        "compaction",
+        "claude_code.api_request",
     } or any(key in attrs for key in ("input_tokens", "output_tokens", "cost_usd"))
     legacy_source = bool(attrs.get("claude.type") or attrs.get("claude.session_id"))
     if aggregate_token_marker:
@@ -335,69 +357,132 @@ def normalize_usage_row(obj):
         "session_id": session,
         "prompt_id": str(_first(obj.get("prompt_id"), attrs.get("prompt.id"))),
         "interaction_id": str(_first(obj.get("interaction_id"), attrs.get("interaction.id"))),
-        "request_id": str(_first(obj.get("request_id"), attrs.get("request_id"),
-                                  attrs.get("gen_ai.response.id"))),
+        "request_id": str(_first(obj.get("request_id"), attrs.get("request_id"), attrs.get("gen_ai.response.id"))),
         "message_id": str(_first(obj.get("message_id"), attrs.get("claude.message_id"))),
-        "organization_id": str(_first(obj.get("organization"), obj.get("organization_id"),
-                                       attrs.get("organization.id"), resource.get("organization.id"))),
-        "team_id": str(_first(obj.get("team"), obj.get("team_id"),
-                               resource.get("business.team.id"), attrs.get("business.team.id"))),
-        "portfolio_id": str(_first(obj.get("portfolio"), obj.get("portfolio_id"),
-                                    resource.get("business.portfolio.id"),
-                                    attrs.get("business.portfolio.id"))),
-        "project_id": str(_first(obj.get("project"), obj.get("project_id"),
-                                  resource.get("business.project.id"),
-                                  attrs.get("business.project.id"))),
-        "feature_id": str(_first(obj.get("feature"), obj.get("feature_id"),
-                                  resource.get("business.feature.id"),
-                                  attrs.get("business.feature.id"))),
-        "work_item_id": str(_first(obj.get("work_item"), obj.get("work_item_id"),
-                                    resource.get("business.work_item.id"),
-                                    attrs.get("business.work_item.id"))),
-        "cost_center": str(_first(obj.get("cost_center"),
-                                   resource.get("business.cost_center"),
-                                   attrs.get("business.cost_center"))),
-        "repository_id": str(_first(obj.get("repository"), obj.get("repository_id"),
-                                     resource.get("code.repository.id"),
-                                     attrs.get("code.repository.id"))),
-        "branch_id": str(_first(obj.get("branch"), obj.get("branch_id"),
-                                 resource.get("code.branch.id"), attrs.get("code.branch.id"))),
-        "pull_request_id": str(_first(obj.get("pull_request"), obj.get("pull_request_id"),
-                                       attrs.get("vcs.pull_request.id"))),
-        "agent_profile": str(_first(obj.get("agent"), obj.get("agent_profile"),
-                                     resource.get("berserk.agent.profile"),
-                                     attrs.get("agent.name"), attrs.get("agent_id"))),
-        "parent_agent_id": str(_first(obj.get("parent_agent"), obj.get("parent_agent_id"),
-                                       attrs.get("parent_agent_id"))),
-        "harness_version": str(_first(obj.get("harness"), obj.get("harness_version"),
-                                       resource.get("berserk.harness.version"),
-                                       attrs.get("berserk.harness.version"))),
-        "recommendation_id": str(_first(obj.get("recommendation_id"),
-                                         resource.get("berserk.recommendation.id"),
-                                         attrs.get("berserk.recommendation.id"))),
-        "model": str(_first(obj.get("model"), attrs.get("model"),
-                             attrs.get("gen_ai.request.model"),
-                             attrs.get("claude.message_model"))),
+        "organization_id": str(
+            _first(
+                obj.get("organization"),
+                obj.get("organization_id"),
+                attrs.get("organization.id"),
+                resource.get("organization.id"),
+            )
+        ),
+        "team_id": str(
+            _first(obj.get("team"), obj.get("team_id"), resource.get("business.team.id"), attrs.get("business.team.id"))
+        ),
+        "portfolio_id": str(
+            _first(
+                obj.get("portfolio"),
+                obj.get("portfolio_id"),
+                resource.get("business.portfolio.id"),
+                attrs.get("business.portfolio.id"),
+            )
+        ),
+        "project_id": str(
+            _first(
+                obj.get("project"),
+                obj.get("project_id"),
+                resource.get("business.project.id"),
+                attrs.get("business.project.id"),
+            )
+        ),
+        "feature_id": str(
+            _first(
+                obj.get("feature"),
+                obj.get("feature_id"),
+                resource.get("business.feature.id"),
+                attrs.get("business.feature.id"),
+            )
+        ),
+        "work_item_id": str(
+            _first(
+                obj.get("work_item"),
+                obj.get("work_item_id"),
+                resource.get("business.work_item.id"),
+                attrs.get("business.work_item.id"),
+            )
+        ),
+        "cost_center": str(
+            _first(obj.get("cost_center"), resource.get("business.cost_center"), attrs.get("business.cost_center"))
+        ),
+        "repository_id": str(
+            _first(
+                obj.get("repository"),
+                obj.get("repository_id"),
+                resource.get("code.repository.id"),
+                attrs.get("code.repository.id"),
+            )
+        ),
+        "branch_id": str(
+            _first(obj.get("branch"), obj.get("branch_id"), resource.get("code.branch.id"), attrs.get("code.branch.id"))
+        ),
+        "pull_request_id": str(
+            _first(obj.get("pull_request"), obj.get("pull_request_id"), attrs.get("vcs.pull_request.id"))
+        ),
+        "agent_profile": str(
+            _first(
+                obj.get("agent"),
+                obj.get("agent_profile"),
+                resource.get("berserk.agent.profile"),
+                attrs.get("agent.name"),
+                attrs.get("agent_id"),
+            )
+        ),
+        "parent_agent_id": str(
+            _first(obj.get("parent_agent"), obj.get("parent_agent_id"), attrs.get("parent_agent_id"))
+        ),
+        "harness_version": str(
+            _first(
+                obj.get("harness"),
+                obj.get("harness_version"),
+                resource.get("berserk.harness.version"),
+                attrs.get("berserk.harness.version"),
+            )
+        ),
+        "recommendation_id": str(
+            _first(
+                obj.get("recommendation_id"),
+                resource.get("berserk.recommendation.id"),
+                attrs.get("berserk.recommendation.id"),
+            )
+        ),
+        "model": str(
+            _first(
+                obj.get("model"),
+                attrs.get("model"),
+                attrs.get("gen_ai.request.model"),
+                attrs.get("claude.message_model"),
+            )
+        ),
         "speed": str(_first(obj.get("speed"), attrs.get("speed"), "normal")).lower(),
         "query_source": str(_first(obj.get("query_source"), attrs.get("query_source"))),
-        "tool_name": str(_first(obj.get("tool"), obj.get("tool_name"),
-                                 attrs.get("mcp_tool.name"), attrs.get("tool_name"),
-                                 attrs.get("claude.tool_names"))),
+        "tool_name": str(
+            _first(
+                obj.get("tool"),
+                obj.get("tool_name"),
+                attrs.get("mcp_tool.name"),
+                attrs.get("tool_name"),
+                attrs.get("claude.tool_names"),
+            )
+        ),
         "events": event_count,
-        "tool_calls": _nonnegative_int(_first(obj.get("tool_calls"),
-                                               1 if event_name == "tool_result" else 0)),
-        "compactions": _nonnegative_int(_first(
-            obj.get("compactions"), 1 if event_name == "compaction" else 0
-        )),
-        "errors": _nonnegative_int(_first(obj.get("errors"),
-                                           1 if _bool(_first(obj.get("error"), obj.get("err"),
-                                                            attrs.get("error"), attrs.get("claude.error"))) else 0)),
-        "successes": _nonnegative_int(_first(
-            obj.get("successes"),
-            1 if _bool(_first(obj.get("success"), attrs.get("success"))) else 0,
-        )),
-        "attempts": _nonnegative_int(_first(obj.get("attempts"), obj.get("attempt"),
-                                           attrs.get("attempt"), 1)),
+        "tool_calls": _nonnegative_int(_first(obj.get("tool_calls"), 1 if event_name == "tool_result" else 0)),
+        "compactions": _nonnegative_int(_first(obj.get("compactions"), 1 if event_name == "compaction" else 0)),
+        "errors": _nonnegative_int(
+            _first(
+                obj.get("errors"),
+                1
+                if _bool(_first(obj.get("error"), obj.get("err"), attrs.get("error"), attrs.get("claude.error")))
+                else 0,
+            )
+        ),
+        "successes": _nonnegative_int(
+            _first(
+                obj.get("successes"),
+                1 if _bool(_first(obj.get("success"), attrs.get("success"))) else 0,
+            )
+        ),
+        "attempts": _nonnegative_int(_first(obj.get("attempts"), obj.get("attempt"), attrs.get("attempt"), 1)),
         "input_tokens": tokens_in,
         "output_tokens": tokens_out,
         "cache_read_tokens": cache_read,
@@ -410,65 +495,93 @@ def normalize_usage_row(obj):
         "long_context_split_known": long_split_known,
         "estimated_tokens": estimated_tokens,
         "token_source": (
-            "mixed" if token_fields_present and estimated_tokens else
-            "exact" if token_fields_present else
-            "estimated" if estimated_tokens else "missing"
+            "mixed"
+            if token_fields_present and estimated_tokens
+            else "exact"
+            if token_fields_present
+            else "estimated"
+            if estimated_tokens
+            else "missing"
         ),
         "exact_usage_events": (
-            exact_usage_events if aggregate_token_marker else
-            event_count if token_fields_present else 0
+            exact_usage_events if aggregate_token_marker else event_count if token_fields_present else 0
         ),
         "estimated_usage_events": (
-            estimated_usage_events if aggregate_token_marker else
-            event_count if estimated_tokens else 0
+            estimated_usage_events if aggregate_token_marker else event_count if estimated_tokens else 0
         ),
-        "native_events": _nonnegative_int(_first(
-            obj.get("native_events"), event_count if native_source else 0,
-        )),
-        "legacy_events": _nonnegative_int(_first(
-            obj.get("legacy_events"), event_count if legacy_source and not native_source else 0,
-        )),
+        "native_events": _nonnegative_int(
+            _first(
+                obj.get("native_events"),
+                event_count if native_source else 0,
+            )
+        ),
+        "legacy_events": _nonnegative_int(
+            _first(
+                obj.get("legacy_events"),
+                event_count if legacy_source and not native_source else 0,
+            )
+        ),
         "telemetry_source": telemetry_source,
         "body_chars": body_chars,
-        "reported_cost_usd": _nonnegative_float(_first(
-            obj.get("reported_cost_usd"), obj.get("cost_usd"),
-            attrs.get("cost_usd"),
-            (_parse_micros_cost(attrs.get("cost_usd_micros"))),
-            attrs.get("claude.cost_usd"),
-        )),
-        "active_seconds": _nonnegative_float(_first(
-            obj.get("active_seconds"), obj.get("active_seconds_sum"),
-            attrs.get("active_seconds"),
-        )),
-        "duration_seconds": _nonnegative_float(_first(
-            obj.get("duration_seconds"), obj.get("duration_seconds_sum"),
-            (_nonnegative_float(attrs.get("duration_ms")) / 1000.0
-             if attrs.get("duration_ms") not in (None, "") else None),
-        )),
-        "result_tokens": _nonnegative_int(_first(obj.get("result_tokens"),
-                                                  obj.get("result_tokens_sum"),
-                                                  attrs.get("result_tokens"),
-                                                  _nonnegative_int(attrs.get("tool_result_size_bytes")) / 4)),
-        "lines_added": _nonnegative_int(_first(
-            obj.get("lines_added"), obj.get("lines_added_sum"), attrs.get("lines_added")
-        )),
-        "lines_removed": _nonnegative_int(_first(
-            obj.get("lines_removed"), obj.get("lines_removed_sum"), attrs.get("lines_removed")
-        )),
-        "commits": _nonnegative_int(_first(
-            obj.get("commits"), obj.get("commits_sum"), attrs.get("commits")
-        )),
-        "pull_requests": _nonnegative_int(_first(
-            obj.get("pull_requests"), obj.get("pull_requests_sum"), attrs.get("pull_requests")
-        )),
-        "web_search_requests": _nonnegative_int(_first(
-            obj.get("web_search_requests"), obj.get("web_search_requests_sum"),
-            attrs.get("server_tool_use.web_search_requests"),
-        )),
-        "code_execution_seconds": _nonnegative_float(_first(
-            obj.get("code_execution_seconds"), obj.get("code_execution_seconds_sum"),
-            attrs.get("code_execution_seconds"),
-        )),
+        "reported_cost_usd": _nonnegative_float(
+            _first(
+                obj.get("reported_cost_usd"),
+                obj.get("cost_usd"),
+                attrs.get("cost_usd"),
+                (_parse_micros_cost(attrs.get("cost_usd_micros"))),
+                attrs.get("claude.cost_usd"),
+            )
+        ),
+        "active_seconds": _nonnegative_float(
+            _first(
+                obj.get("active_seconds"),
+                obj.get("active_seconds_sum"),
+                attrs.get("active_seconds"),
+            )
+        ),
+        "duration_seconds": _nonnegative_float(
+            _first(
+                obj.get("duration_seconds"),
+                obj.get("duration_seconds_sum"),
+                (
+                    _nonnegative_float(attrs.get("duration_ms")) / 1000.0
+                    if attrs.get("duration_ms") not in (None, "")
+                    else None
+                ),
+            )
+        ),
+        "result_tokens": _nonnegative_int(
+            _first(
+                obj.get("result_tokens"),
+                obj.get("result_tokens_sum"),
+                attrs.get("result_tokens"),
+                _nonnegative_int(attrs.get("tool_result_size_bytes")) / 4,
+            )
+        ),
+        "lines_added": _nonnegative_int(
+            _first(obj.get("lines_added"), obj.get("lines_added_sum"), attrs.get("lines_added"))
+        ),
+        "lines_removed": _nonnegative_int(
+            _first(obj.get("lines_removed"), obj.get("lines_removed_sum"), attrs.get("lines_removed"))
+        ),
+        "commits": _nonnegative_int(_first(obj.get("commits"), obj.get("commits_sum"), attrs.get("commits"))),
+        "pull_requests": _nonnegative_int(
+            _first(obj.get("pull_requests"), obj.get("pull_requests_sum"), attrs.get("pull_requests"))
+        ),
+        "web_search_requests": _nonnegative_int(
+            _first(
+                obj.get("web_search_requests"),
+                obj.get("web_search_requests_sum"),
+                attrs.get("server_tool_use.web_search_requests"),
+            )
+        ),
+        "code_execution_seconds": _nonnegative_float(
+            _first(
+                obj.get("code_execution_seconds"),
+                obj.get("code_execution_seconds_sum"),
+                attrs.get("code_execution_seconds"),
+            )
+        ),
     }
     return result
 
@@ -500,22 +613,36 @@ def deduplicate_usage_rows(raw_rows):
         timestamp = str(row.get("timestamp") or "")
         if aggregate or row.get("telemetry_source") != "native" or len(timestamp) <= 10:
             continue
-        native_fingerprints.add((
-            row.get("session_id"), timestamp, row.get("model"),
-            row.get("input_tokens"), row.get("output_tokens"),
-            row.get("cache_read_tokens"), row.get("cache_creation_tokens"),
-        ))
+        native_fingerprints.add(
+            (
+                row.get("session_id"),
+                timestamp,
+                row.get("model"),
+                row.get("input_tokens"),
+                row.get("output_tokens"),
+                row.get("cache_read_tokens"),
+                row.get("cache_creation_tokens"),
+            )
+        )
 
     after_fingerprint = []
     for raw, row, priority, aggregate in prepared:
         timestamp = str(row.get("timestamp") or "")
         fingerprint = (
-            row.get("session_id"), timestamp, row.get("model"),
-            row.get("input_tokens"), row.get("output_tokens"),
-            row.get("cache_read_tokens"), row.get("cache_creation_tokens"),
+            row.get("session_id"),
+            timestamp,
+            row.get("model"),
+            row.get("input_tokens"),
+            row.get("output_tokens"),
+            row.get("cache_read_tokens"),
+            row.get("cache_creation_tokens"),
         )
-        if (not aggregate and row.get("telemetry_source") == "legacy"
-                and len(timestamp) > 10 and fingerprint in native_fingerprints):
+        if (
+            not aggregate
+            and row.get("telemetry_source") == "legacy"
+            and len(timestamp) > 10
+            and fingerprint in native_fingerprints
+        ):
             continue
         after_fingerprint.append((raw, row, priority, aggregate))
 
@@ -546,15 +673,48 @@ def deduplicate_usage_rows(raw_rows):
 # as a list and joined into "col=max(col)" clauses so the two summarize
 # stages can't drift out of sync with each other by hand-edit.
 _USAGE_ROW_FIELDS = (
-    "timestamp", "event_name", "legacy_type", "model", "speed", "tool_name",
-    "tokens_in", "tokens_out", "cache_read", "cache_create", "cache_create_1h",
-    "context_tokens", "organization", "team", "portfolio", "project", "feature",
-    "work_item", "cost_center", "repository", "branch", "pull_request", "agent",
-    "harness", "recommendation_id", "query_source", "source_priority",
-    "result_tokens", "active_seconds", "lines_added", "lines_removed", "commits",
-    "pull_requests", "token_exact", "estimated_body_chars", "error_flag",
-    "success_flag", "request_attempts", "reported_cost", "web_search_requests",
-    "code_execution_seconds", "duration_seconds",
+    "timestamp",
+    "event_name",
+    "legacy_type",
+    "model",
+    "speed",
+    "tool_name",
+    "tokens_in",
+    "tokens_out",
+    "cache_read",
+    "cache_create",
+    "cache_create_1h",
+    "context_tokens",
+    "organization",
+    "team",
+    "portfolio",
+    "project",
+    "feature",
+    "work_item",
+    "cost_center",
+    "repository",
+    "branch",
+    "pull_request",
+    "agent",
+    "harness",
+    "recommendation_id",
+    "query_source",
+    "source_priority",
+    "result_tokens",
+    "active_seconds",
+    "lines_added",
+    "lines_removed",
+    "commits",
+    "pull_requests",
+    "token_exact",
+    "estimated_body_chars",
+    "error_flag",
+    "success_flag",
+    "request_attempts",
+    "reported_cost",
+    "web_search_requests",
+    "code_execution_seconds",
+    "duration_seconds",
 )
 
 
@@ -762,9 +922,7 @@ def load_pricing_catalog(path=None):
         if not data.get("catalog_version"):
             raise ValueError("pricing catalog must contain catalog_version")
         return data
-    raise ValueError("unable to load pricing catalog: %s" % (
-        type(last_error).__name__ if last_error else "not found"
-    ))
+    raise ValueError("unable to load pricing catalog: %s" % (type(last_error).__name__ if last_error else "not found"))
 
 
 def resolve_model_price(catalog, model, at=None):
@@ -782,15 +940,11 @@ def resolve_model_price(catalog, model, at=None):
             continue
         if at_day and effective_to and at_day > effective_to:
             continue
-        aliases = [str(entry.get("id") or "").lower()] + [
-            str(alias).lower() for alias in entry.get("aliases", [])
-        ]
+        aliases = [str(entry.get("id") or "").lower()] + [str(alias).lower() for alias in entry.get("aliases", [])]
         matched = [
-            alias for alias in aliases
-            if alias and (
-                alias == model_text
-                or (any(char.isdigit() for char in alias) and alias in model_text)
-            )
+            alias
+            for alias in aliases
+            if alias and (alias == model_text or (any(char.isdigit() for char in alias) and alias in model_text))
         ]
         if matched:
             candidates.append((max(len(alias) for alias in matched), effective_from, entry))
@@ -803,21 +957,22 @@ def resolve_model_price(catalog, model, at=None):
 def calculate_public_cost(row, catalog):
     normalized = normalize_usage_row(row) if "input_tokens" not in row else dict(row)
     price = resolve_model_price(catalog, normalized.get("model"), normalized.get("day"))
-    token_total = sum(_nonnegative_int(normalized.get(key)) for key in (
-        "input_tokens", "output_tokens", "cache_read_tokens",
-        "cache_creation_tokens", "cache_creation_1h_tokens",
-    ))
+    token_total = sum(
+        _nonnegative_int(normalized.get(key))
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_creation_tokens",
+            "cache_creation_1h_tokens",
+        )
+    )
     server_tools = catalog.get("server_tools", {}) if isinstance(catalog, dict) else {}
-    web_rate = _nonnegative_float(
-        (server_tools.get("web_search") or {}).get("usd_per_1000_requests")
-    )
-    execution_rate = _nonnegative_float(
-        (server_tools.get("code_execution") or {}).get("usd_per_session_hour")
-    )
+    web_rate = _nonnegative_float((server_tools.get("web_search") or {}).get("usd_per_1000_requests"))
+    execution_rate = _nonnegative_float((server_tools.get("code_execution") or {}).get("usd_per_session_hour"))
     tool_cost = (
         _nonnegative_int(normalized.get("web_search_requests")) * web_rate / 1000.0
-        + _nonnegative_float(normalized.get("code_execution_seconds"))
-        * execution_rate / 3600.0
+        + _nonnegative_float(normalized.get("code_execution_seconds")) * execution_rate / 3600.0
     )
     if price is None:
         return {
@@ -833,31 +988,44 @@ def calculate_public_cost(row, catalog):
 
     rates = dict(price)
     pricing_variant = "standard"
-    if str(normalized.get("speed") or "").lower() == "fast" and isinstance(
-            price.get("fast_mode"), dict):
+    if str(normalized.get("speed") or "").lower() == "fast" and isinstance(price.get("fast_mode"), dict):
         rates.update(price["fast_mode"])
         pricing_variant = "fast"
-    total_input = sum(_nonnegative_int(normalized.get(key)) for key in (
-        "input_tokens", "cache_read_tokens", "cache_creation_tokens",
-        "cache_creation_1h_tokens",
-    ))
+    total_input = sum(
+        _nonnegative_int(normalized.get(key))
+        for key in (
+            "input_tokens",
+            "cache_read_tokens",
+            "cache_creation_tokens",
+            "cache_creation_1h_tokens",
+        )
+    )
     long_context = False
     long_context_unknown = False
     long_rates = rates.get("long_context")
     components = {
-        "input": (_nonnegative_int(normalized.get("input_tokens")),
-                  _nonnegative_float(rates.get("input_usd_per_mtok"))),
-        "output": (_nonnegative_int(normalized.get("output_tokens")),
-                   _nonnegative_float(rates.get("output_usd_per_mtok"))),
-        "cache_read": (_nonnegative_int(normalized.get("cache_read_tokens")),
-                       _nonnegative_float(rates.get("cache_read_usd_per_mtok"))),
-        "cache_write_5m": (_nonnegative_int(normalized.get("cache_creation_tokens")),
-                           _nonnegative_float(rates.get("cache_write_5m_usd_per_mtok"))),
-        "cache_write_1h": (_nonnegative_int(normalized.get("cache_creation_1h_tokens")),
-                           _nonnegative_float(rates.get("cache_write_1h_usd_per_mtok"))),
+        "input": (
+            _nonnegative_int(normalized.get("input_tokens")),
+            _nonnegative_float(rates.get("input_usd_per_mtok")),
+        ),
+        "output": (
+            _nonnegative_int(normalized.get("output_tokens")),
+            _nonnegative_float(rates.get("output_usd_per_mtok")),
+        ),
+        "cache_read": (
+            _nonnegative_int(normalized.get("cache_read_tokens")),
+            _nonnegative_float(rates.get("cache_read_usd_per_mtok")),
+        ),
+        "cache_write_5m": (
+            _nonnegative_int(normalized.get("cache_creation_tokens")),
+            _nonnegative_float(rates.get("cache_write_5m_usd_per_mtok")),
+        ),
+        "cache_write_1h": (
+            _nonnegative_int(normalized.get("cache_creation_1h_tokens")),
+            _nonnegative_float(rates.get("cache_write_1h_usd_per_mtok")),
+        ),
     }
-    cost = tool_cost + sum(tokens * rate / 1_000_000.0
-                           for tokens, rate in components.values())
+    cost = tool_cost + sum(tokens * rate / 1_000_000.0 for tokens, rate in components.values())
     if isinstance(long_rates, dict):
         long_tokens = {
             "input": _nonnegative_int(normalized.get("long_input_tokens")),
@@ -896,8 +1064,7 @@ def calculate_public_cost(row, catalog):
     else:
         long_missing_tokens = 0
     missing_rate_tokens = (
-        sum(tokens for tokens, rate in components.values() if tokens and not rate)
-        + long_missing_tokens
+        sum(tokens for tokens, rate in components.values() if tokens and not rate) + long_missing_tokens
     )
     status = "partially_priced" if missing_rate_tokens or long_context_unknown else "priced"
     return {
@@ -1065,25 +1232,23 @@ def normalize_business_record(kind, record):
             "planned_start": str(record.get("planned_start") or "")[:32],
             "planned_end": str(record.get("planned_end") or "")[:32],
             "planned_hours": _validated_number(record.get("planned_hours"), "planned_hours"),
-            "planned_ai_budget_usd": _validated_number(
-                record.get("planned_ai_budget_usd"), "planned_ai_budget_usd"
-            ),
-            "completion_pct": _validated_number(
-                record.get("completion_pct"), "completion_pct", maximum=100
-            ),
+            "planned_ai_budget_usd": _validated_number(record.get("planned_ai_budget_usd"), "planned_ai_budget_usd"),
+            "completion_pct": _validated_number(record.get("completion_pct"), "completion_pct", maximum=100),
             "repositories": _identifier_list(record.get("repositories"), "repository"),
             "branches": _identifier_list(record.get("branches"), "branch"),
             "pull_requests": _identifier_list(record.get("pull_requests"), "pull_request"),
             "source_system": _identifier(record.get("source_system") or "import", "source_system", True),
-            "source_record_id": _identifier(record.get("source_record_id") or record.get("feature_id"),
-                                             "source_record_id", True),
+            "source_record_id": _identifier(
+                record.get("source_record_id") or record.get("feature_id"), "source_record_id", True
+            ),
             "source_updated_at": _source_timestamp(record.get("source_updated_at")),
         }
         return result
     if kind == "effort":
         hours = _validated_number(
             _first(record.get("actual_hours"), record.get("hours")),
-            "actual_hours", maximum=24,
+            "actual_hours",
+            maximum=24,
         )
         date = str(record.get("work_date") or "").strip()
         if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
@@ -1110,22 +1275,43 @@ def _merge_latest(existing, incoming, key_fields):
         incoming_ts = str(row.get("source_updated_at") or "")
         current_ts = str(current.get("source_updated_at") or "") if current else ""
         if current is not None and incoming_ts == current_ts and row != current:
-            raise ValueError(
-                "conflicting records have the same source key and source_updated_at"
-            )
+            raise ValueError("conflicting records have the same source key and source_updated_at")
         if current is None or incoming_ts > current_ts:
             merged[key] = row
     return [merged[key] for key in sorted(merged)]
 
 
-_FINOPS_ATTRIBUTE_ALLOWLIST = frozenset({
-    "feature_id", "work_item_id", "project_id", "portfolio_id", "team_id",
-    "cost_center", "status", "planned_start", "planned_end",
-    "planned_hours", "planned_ai_budget_usd", "completion_pct", "repositories",
-    "branches", "pull_requests", "source_system", "source_record_id",
-    "source_updated_at", "worklog_id", "work_date", "hours", "actual_hours",
-    "recommendation_id", "decision", "owner_hash", "rationale_hash", "ts",
-})
+_FINOPS_ATTRIBUTE_ALLOWLIST = frozenset(
+    {
+        "feature_id",
+        "work_item_id",
+        "project_id",
+        "portfolio_id",
+        "team_id",
+        "cost_center",
+        "status",
+        "planned_start",
+        "planned_end",
+        "planned_hours",
+        "planned_ai_budget_usd",
+        "completion_pct",
+        "repositories",
+        "branches",
+        "pull_requests",
+        "source_system",
+        "source_record_id",
+        "source_updated_at",
+        "worklog_id",
+        "work_date",
+        "hours",
+        "actual_hours",
+        "recommendation_id",
+        "decision",
+        "owner_hash",
+        "rationale_hash",
+        "ts",
+    }
+)
 
 
 def _otlp_attributes(record, allowed=None):
@@ -1150,9 +1336,7 @@ def _otlp_attributes(record, allowed=None):
         elif isinstance(value, (int, float)):
             otel_value = {"doubleValue": float(value)}
         elif isinstance(value, list):
-            otel_value = {"arrayValue": {"values": [
-                {"stringValue": str(item)[:240]} for item in value[:50]
-            ]}}
+            otel_value = {"arrayValue": {"values": [{"stringValue": str(item)[:240]} for item in value[:50]]}}
         else:
             otel_value = {"stringValue": str(value)[:1000]}
         attrs.append({"key": key, "value": otel_value})
@@ -1163,13 +1347,16 @@ def _parse_headers(raw):
     return _http.parse_header_items(raw, force_json=True)
 
 
-def emit_otlp_records(records, service_name, *, scope_name="berserk-mcp.ai-finops",
-                      timestamp_ns=None, allowed_keys=None):
+def emit_otlp_records(
+    records, service_name, *, scope_name="berserk-mcp.ai-finops", timestamp_ns=None, allowed_keys=None
+):
     if not _otlp_endpoint or not records:
         return False
     try:
         _http.validate_http_url(
-            _otlp_endpoint, label="OTLP endpoint", allow_plaintext_remote=False,
+            _otlp_endpoint,
+            label="OTLP endpoint",
+            allow_plaintext_remote=False,
         )
     except _http.UrlPolicyError as exc:
         raise ValueError(str(exc)) from None
@@ -1179,19 +1366,20 @@ def emit_otlp_records(records, service_name, *, scope_name="berserk-mcp.ai-finop
     else:
         stamp = str(int(timestamp_ns))
     for record in records:
-        logs.append({
-            "timeUnixNano": stamp,
-            "body": {"stringValue": service_name},
-            "attributes": _otlp_attributes(record, allowed=allowed_keys),
-        })
+        logs.append(
+            {
+                "timeUnixNano": stamp,
+                "body": {"stringValue": service_name},
+                "attributes": _otlp_attributes(record, allowed=allowed_keys),
+            }
+        )
     payload = {
-        "resourceLogs": [{
-            "resource": {"attributes": [{
-                "key": "service.name", "value": {"stringValue": service_name}
-            }]},
-            "scopeLogs": [{"scope": {"name": scope_name},
-                           "logRecords": logs}],
-        }]
+        "resourceLogs": [
+            {
+                "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": service_name}}]},
+                "scopeLogs": [{"scope": {"name": scope_name}, "logRecords": logs}],
+            }
+        ]
     }
     status = _http.post_bytes_status(
         _otlp_endpoint,
@@ -1218,14 +1406,11 @@ def import_business_data(kind, input_path, fmt=None, store_path=None, emit_otlp=
                 store.get("features", []), normalized, ("source_system", "source_record_id")
             )
         else:
-            store["effort"] = _merge_latest(
-                store.get("effort", []), normalized, ("source_system", "worklog_id")
-            )
+            store["effort"] = _merge_latest(store.get("effort", []), normalized, ("source_system", "worklog_id"))
         store["updated_at"] = _now_iso()
         _atomic_write_json(target, store)
     emitted = emit_otlp_records(normalized, "engineering-work") if emit_otlp else False
-    return {"kind": kind, "imported": len(normalized), "emitted_otlp": emitted,
-            "store": str(target)}
+    return {"kind": kind, "imported": len(normalized), "emitted_otlp": emitted, "store": str(target)}
 
 
 def _feature_indexes(store):
@@ -1293,62 +1478,100 @@ def attribute_usage(row, store):
 
 
 _GROUP_FIELD = {
-    "day": "day", "team": "team_id", "portfolio": "portfolio_id",
-    "project": "project_id", "repository": "repository_id",
-    "feature": "feature_id", "work_item": "work_item_id",
-    "agent": "agent_profile", "harness": "harness_version", "model": "model",
+    "day": "day",
+    "team": "team_id",
+    "portfolio": "portfolio_id",
+    "project": "project_id",
+    "repository": "repository_id",
+    "feature": "feature_id",
+    "work_item": "work_item_id",
+    "agent": "agent_profile",
+    "harness": "harness_version",
+    "model": "model",
 }
 
 
 def _apply_filters(rows, filters):
     result = []
     mapping = {
-        "team": "team_id", "project": "project_id", "repository": "repository_id",
-        "feature": "feature_id", "agent": "agent_profile", "harness": "harness_version",
+        "team": "team_id",
+        "project": "project_id",
+        "repository": "repository_id",
+        "feature": "feature_id",
+        "agent": "agent_profile",
+        "harness": "harness_version",
         "model": "model",
     }
     for row in rows:
-        if all(not filters.get(name) or str(row.get(field) or "") == str(filters[name])
-               for name, field in mapping.items()):
+        if all(
+            not filters.get(name) or str(row.get(field) or "") == str(filters[name]) for name, field in mapping.items()
+        ):
             result.append(row)
     return result
 
 
 def _normalized_usage_rows(raw_rows, store):
-    return [
-        attribute_usage(normalize_usage_row(row), store)
-        for row in deduplicate_usage_rows(raw_rows)
-    ]
+    return [attribute_usage(normalize_usage_row(row), store) for row in deduplicate_usage_rows(raw_rows)]
 
 
 def _aggregate(rows, fields, catalog):
     groups = {}
     for row in rows:
         key = tuple(str(row.get(field) or "") or "unattributed" for field in fields)
-        slot = groups.setdefault(key, {
-            field: key[index] for index, field in enumerate(fields)
-        })
+        slot = groups.setdefault(key, {field: key[index] for index, field in enumerate(fields)})
         if "events" not in slot:
-            slot.update({
-                "events": 0, "tool_calls": 0, "compactions": 0,
-                "errors": 0, "successes": 0,
-                "attempts": 0, "input_tokens": 0, "output_tokens": 0,
-                "cache_read_tokens": 0, "cache_creation_tokens": 0,
-                "cache_creation_1h_tokens": 0, "estimated_tokens": 0,
-                "reported_cost_usd": 0.0, "public_api_equivalent_usd": 0.0,
-                "priced_tokens": 0, "unpriced_tokens": 0, "active_seconds": 0.0,
-                "duration_seconds": 0.0,
-                "result_tokens": 0, "lines_added": 0, "lines_removed": 0,
-                "commits": 0, "pull_requests": 0, "exact_rows": 0,
-                "estimated_rows": 0, "native_events": 0, "legacy_events": 0,
-                "attributed_events": 0,
-            })
+            slot.update(
+                {
+                    "events": 0,
+                    "tool_calls": 0,
+                    "compactions": 0,
+                    "errors": 0,
+                    "successes": 0,
+                    "attempts": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "cache_creation_tokens": 0,
+                    "cache_creation_1h_tokens": 0,
+                    "estimated_tokens": 0,
+                    "reported_cost_usd": 0.0,
+                    "public_api_equivalent_usd": 0.0,
+                    "priced_tokens": 0,
+                    "unpriced_tokens": 0,
+                    "active_seconds": 0.0,
+                    "duration_seconds": 0.0,
+                    "result_tokens": 0,
+                    "lines_added": 0,
+                    "lines_removed": 0,
+                    "commits": 0,
+                    "pull_requests": 0,
+                    "exact_rows": 0,
+                    "estimated_rows": 0,
+                    "native_events": 0,
+                    "legacy_events": 0,
+                    "attributed_events": 0,
+                }
+            )
         pricing = calculate_public_cost(row, catalog)
-        for name in ("events", "tool_calls", "compactions", "errors", "successes", "attempts",
-                     "input_tokens", "output_tokens", "cache_read_tokens",
-                     "cache_creation_tokens", "cache_creation_1h_tokens",
-                     "estimated_tokens", "result_tokens", "lines_added", "lines_removed",
-                     "commits", "pull_requests"):
+        for name in (
+            "events",
+            "tool_calls",
+            "compactions",
+            "errors",
+            "successes",
+            "attempts",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_creation_tokens",
+            "cache_creation_1h_tokens",
+            "estimated_tokens",
+            "result_tokens",
+            "lines_added",
+            "lines_removed",
+            "commits",
+            "pull_requests",
+        ):
             slot[name] += _nonnegative_int(row.get(name))
         slot["native_events"] += _nonnegative_int(row.get("native_events"))
         slot["legacy_events"] += _nonnegative_int(row.get("legacy_events"))
@@ -1365,23 +1588,23 @@ def _aggregate(rows, fields, catalog):
     result = []
     for slot in groups.values():
         total_prompt = slot["input_tokens"] + slot["cache_read_tokens"]
-        slot["cache_hit_ratio"] = round(
-            slot["cache_read_tokens"] / float(total_prompt), 4
-        ) if total_prompt else 0.0
+        slot["cache_hit_ratio"] = round(slot["cache_read_tokens"] / float(total_prompt), 4) if total_prompt else 0.0
         slot["error_rate"] = round(slot["errors"] / float(max(1, slot["events"])), 4)
         slot["success_rate"] = round(slot["successes"] / float(max(1, slot["events"])), 4)
-        slot["cost_per_active_hour_usd"] = round(
-            slot["public_api_equivalent_usd"] / (slot["active_seconds"] / 3600.0), 6
-        ) if slot["active_seconds"] else None
-        slot["cost_per_success_usd"] = round(
-            slot["public_api_equivalent_usd"] / slot["successes"], 6
-        ) if slot["successes"] else None
-        slot["cost_per_commit_usd"] = round(
-            slot["public_api_equivalent_usd"] / slot["commits"], 6
-        ) if slot["commits"] else None
-        slot["cost_per_pull_request_usd"] = round(
-            slot["public_api_equivalent_usd"] / slot["pull_requests"], 6
-        ) if slot["pull_requests"] else None
+        slot["cost_per_active_hour_usd"] = (
+            round(slot["public_api_equivalent_usd"] / (slot["active_seconds"] / 3600.0), 6)
+            if slot["active_seconds"]
+            else None
+        )
+        slot["cost_per_success_usd"] = (
+            round(slot["public_api_equivalent_usd"] / slot["successes"], 6) if slot["successes"] else None
+        )
+        slot["cost_per_commit_usd"] = (
+            round(slot["public_api_equivalent_usd"] / slot["commits"], 6) if slot["commits"] else None
+        )
+        slot["cost_per_pull_request_usd"] = (
+            round(slot["public_api_equivalent_usd"] / slot["pull_requests"], 6) if slot["pull_requests"] else None
+        )
         slot["average_duration_seconds"] = round(
             slot["duration_seconds"] / max(1, slot["events"] + slot["tool_calls"]), 4
         )
@@ -1389,17 +1612,13 @@ def _aggregate(rows, fields, catalog):
         slot["reported_cost_usd"] = round(slot["reported_cost_usd"], 6)
         total_tokens = slot["priced_tokens"] + slot["unpriced_tokens"]
         slot["pricing_coverage"] = round(slot["priced_tokens"] / float(total_tokens), 4) if total_tokens else 0.0
-        slot["attribution_coverage"] = round(
-            slot["attributed_events"] / float(max(1, slot["events"])), 4
-        )
+        slot["attribution_coverage"] = round(slot["attributed_events"] / float(max(1, slot["events"])), 4)
         telemetry_total = slot["native_events"] + slot["legacy_events"]
-        slot["native_telemetry_coverage"] = round(
-            slot["native_events"] / float(telemetry_total), 4
-        ) if telemetry_total else 0.0
+        slot["native_telemetry_coverage"] = (
+            round(slot["native_events"] / float(telemetry_total), 4) if telemetry_total else 0.0
+        )
         exact_total = slot["exact_rows"] + slot["estimated_rows"]
-        slot["exact_token_coverage"] = round(
-            slot["exact_rows"] / float(exact_total), 4
-        ) if exact_total else 0.0
+        slot["exact_token_coverage"] = round(slot["exact_rows"] / float(exact_total), 4) if exact_total else 0.0
         result.append(slot)
     return result
 
@@ -1414,19 +1633,31 @@ def build_spend_overview(raw_rows, catalog, store=None, group_by="day", filters=
     if group_by == "day":
         groups.sort(key=lambda row: row.get("day", ""))
     else:
-        groups.sort(key=lambda row: (-row["public_api_equivalent_usd"],
-                                     str(row.get(_GROUP_FIELD[group_by], ""))))
-    groups = groups[:max(1, min(100, int(limit or 20)))]
+        groups.sort(key=lambda row: (-row["public_api_equivalent_usd"], str(row.get(_GROUP_FIELD[group_by], ""))))
+    groups = groups[: max(1, min(100, int(limit or 20)))]
     total = _aggregate(normalized, [], catalog)
-    overall = total[0] if total else {
-        "events": 0, "input_tokens": 0, "output_tokens": 0,
-        "cache_read_tokens": 0, "cache_creation_tokens": 0,
-        "public_api_equivalent_usd": 0.0, "reported_cost_usd": 0.0,
-        "pricing_coverage": 0.0, "attribution_coverage": 0.0,
-        "exact_rows": 0, "estimated_rows": 0, "unpriced_tokens": 0,
-        "native_events": 0, "legacy_events": 0,
-        "native_telemetry_coverage": 0.0, "exact_token_coverage": 0.0,
-    }
+    overall = (
+        total[0]
+        if total
+        else {
+            "events": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+            "public_api_equivalent_usd": 0.0,
+            "reported_cost_usd": 0.0,
+            "pricing_coverage": 0.0,
+            "attribution_coverage": 0.0,
+            "exact_rows": 0,
+            "estimated_rows": 0,
+            "unpriced_tokens": 0,
+            "native_events": 0,
+            "legacy_events": 0,
+            "native_telemetry_coverage": 0.0,
+            "exact_token_coverage": 0.0,
+        }
+    )
     daily = sorted(_aggregate(normalized, ["day"], catalog), key=lambda row: row["day"])
     trend = {"direction": "insufficient-data", "change_pct": None, "points": len(daily)}
     if len(daily) >= 2:
@@ -1438,9 +1669,11 @@ def build_spend_overview(raw_rows, catalog, store=None, group_by="day", filters=
             direction = "growing"
         elif change is not None and change < -5:
             direction = "declining"
-        trend = {"direction": direction,
-                 "change_pct": round(change, 2) if change is not None else None,
-                 "points": len(daily)}
+        trend = {
+            "direction": direction,
+            "change_pct": round(change, 2) if change is not None else None,
+            "points": len(daily),
+        }
     return {
         "schema_version": SCHEMA_VERSION,
         "catalog_version": catalog.get("catalog_version"),
@@ -1480,10 +1713,7 @@ def _break_markdown_fence_runs(value):
     """Keep untrusted text from terminating a model-facing Markdown fence."""
     return re.sub(
         r"`{3,}",
-        lambda match: "\u200b".join(
-            match.group(0)[index:index + 2]
-            for index in range(0, len(match.group(0)), 2)
-        ),
+        lambda match: "\u200b".join(match.group(0)[index : index + 2] for index in range(0, len(match.group(0)), 2)),
         str(value),
     )
 
@@ -1529,8 +1759,7 @@ def spend_overview(since="7d ago", group_by="day", filters=None, limit=20):
         return rows, True
     try:
         catalog = load_pricing_catalog()
-        report = build_spend_overview(rows, catalog, load_business_store(), group_by,
-                                      filters, limit)
+        report = build_spend_overview(rows, catalog, load_business_store(), group_by, filters, limit)
         report["generated_at"] = _now_iso()
         report["source_window"] = since
     except ValueError as exc:
@@ -1553,16 +1782,28 @@ def _feature_snapshot(feature_id, rows, catalog, store):
     attributed = _normalized_usage_rows(rows, store)
     selected = [row for row in attributed if row.get("feature_id") == feature_id]
     totals = _aggregate(selected, ["feature_id"], catalog)
-    usage = totals[0] if totals else {
-        "events": 0, "public_api_equivalent_usd": 0.0, "input_tokens": 0,
-        "output_tokens": 0, "cache_read_tokens": 0, "errors": 0,
-        "successes": 0, "attribution_coverage": 0.0,
-    }
-    actual_hours = round(sum(
-        _nonnegative_float(_first(row.get("actual_hours"), row.get("hours")))
-        for row in store.get("effort", [])
-        if str(row.get("feature_id") or "") == feature_id
-    ), 2)
+    usage = (
+        totals[0]
+        if totals
+        else {
+            "events": 0,
+            "public_api_equivalent_usd": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "errors": 0,
+            "successes": 0,
+            "attribution_coverage": 0.0,
+        }
+    )
+    actual_hours = round(
+        sum(
+            _nonnegative_float(_first(row.get("actual_hours"), row.get("hours")))
+            for row in store.get("effort", [])
+            if str(row.get("feature_id") or "") == feature_id
+        ),
+        2,
+    )
     planned_hours = _nonnegative_float(feature.get("planned_hours"))
     budget = _nonnegative_float(feature.get("planned_ai_budget_usd"))
     completion_pct = min(100.0, _nonnegative_float(feature.get("completion_pct")))
@@ -1618,8 +1859,7 @@ def feature_cost(feature_id, since="90d ago"):
     snapshot["source_window"] = since
     lines = [
         f"Feature: {snapshot['feature'].get('name', feature_id)} ({feature_id}).",
-        f"Developer hours: {snapshot['actual_hours']:.2f} actual / "
-        f"{snapshot['planned_hours']:.2f} planned.",
+        f"Developer hours: {snapshot['actual_hours']:.2f} actual / {snapshot['planned_hours']:.2f} planned.",
         f"AI API-equivalent cost: ${snapshot['actual_ai_cost_usd']:.4f} / "
         f"${snapshot['planned_ai_budget_usd']:.4f} planned.",
     ]
@@ -1633,10 +1873,13 @@ def _project_snapshot(project_id, rows, catalog, store):
     selected = [row for row in normalized if row.get("project_id") == project_id]
     totals = _aggregate(selected, ["project_id"], catalog)
     usage = totals[0] if totals else {"events": 0, "public_api_equivalent_usd": 0.0}
-    feature_ids = sorted({
-        str(row.get("feature_id")) for row in store.get("features", [])
-        if str(row.get("project_id") or "") == project_id
-    })
+    feature_ids = sorted(
+        {
+            str(row.get("feature_id"))
+            for row in store.get("features", [])
+            if str(row.get("project_id") or "") == project_id
+        }
+    )
     features = [_feature_snapshot(fid, rows, catalog, store) for fid in feature_ids]
     repositories = _aggregate(selected, ["repository_id"], catalog)
     repositories.sort(key=lambda item: -item["public_api_equivalent_usd"])
@@ -1656,12 +1899,10 @@ def _project_snapshot(project_id, rows, catalog, store):
         "actual_ai_cost_usd": round(actual_cost, 6),
         "ai_budget_variance_usd": round(actual_cost - budget, 6) if budget else None,
         "unattributed_ai_cost_usd": round(
-            unattributed_totals[0]["public_api_equivalent_usd"]
-            if unattributed_totals else 0.0, 6
+            unattributed_totals[0]["public_api_equivalent_usd"] if unattributed_totals else 0.0, 6
         ),
         "completed_features": completed,
-        "ai_cost_per_completed_feature_usd": round(actual_cost / completed, 6)
-        if completed else None,
+        "ai_cost_per_completed_feature_usd": round(actual_cost / completed, 6) if completed else None,
         "repositories": repositories[:50],
         "features": features,
     }
@@ -1680,8 +1921,7 @@ def project_economics(project_id, since="90d ago"):
     snapshot["source_window"] = since
     lines = [
         f"Project: {project_id}; {len(snapshot['features'])} governed features.",
-        f"Developer hours: {snapshot['actual_hours']:.2f} actual / "
-        f"{snapshot['planned_hours']:.2f} planned.",
+        f"Developer hours: {snapshot['actual_hours']:.2f} actual / {snapshot['planned_hours']:.2f} planned.",
         f"AI API-equivalent cost: ${snapshot['usage'].get('public_api_equivalent_usd', 0):.4f}.",
     ]
     return _envelope("Claude project economics", snapshot, lines), False
@@ -1728,21 +1968,38 @@ def analyze_efficiency_rows(raw_rows, catalog, store=None, filters=None):
     rows = _apply_filters(rows, filters or {})
     groups = _aggregate(
         rows,
-        ["agent_profile", "harness_version", "project_id", "model",
-         "speed", "query_source", "tool_name"],
+        ["agent_profile", "harness_version", "project_id", "model", "speed", "query_source", "tool_name"],
         catalog,
     )
     findings = []
     for group in groups:
         events = group["events"]
         observations = max(events, group["tool_calls"], group["compactions"])
-        evidence = {key: group.get(key) for key in (
-            "agent_profile", "harness_version", "project_id", "model",
-            "speed", "query_source", "tool_name", "events", "tool_calls", "compactions",
-            "input_tokens", "output_tokens", "cache_read_tokens", "result_tokens",
-            "errors", "attempts", "successes", "average_duration_seconds",
-            "public_api_equivalent_usd", "cost_per_success_usd",
-        )}
+        evidence = {
+            key: group.get(key)
+            for key in (
+                "agent_profile",
+                "harness_version",
+                "project_id",
+                "model",
+                "speed",
+                "query_source",
+                "tool_name",
+                "events",
+                "tool_calls",
+                "compactions",
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "result_tokens",
+                "errors",
+                "attempts",
+                "successes",
+                "average_duration_seconds",
+                "public_api_equivalent_usd",
+                "cost_per_success_usd",
+            )
+        }
         candidates = []
         prompt_tokens = group["input_tokens"] + group["cache_read_tokens"]
         if prompt_tokens >= 1000 and group["cache_hit_ratio"] < 0.20:
@@ -1769,37 +2026,50 @@ def analyze_efficiency_rows(raw_rows, catalog, store=None, filters=None):
         if "subagent" in query_source and events >= 20:
             candidates.append(("subagent_fanout", min(0.95, 0.6 + events / 200.0)))
         if ("kql" in tool_name or "search" in tool_name) and (
-                group["result_tokens"] >= 10000 or group["attempts"] > max(1, events) * 1.2):
+            group["result_tokens"] >= 10000 or group["attempts"] > max(1, events) * 1.2
+        ):
             candidates.append(("expensive_kql", min(0.95, 0.65 + events / 100.0)))
         for code, confidence in candidates:
-            stable_scope = {key: evidence.get(key) for key in (
-                "agent_profile", "harness_version", "project_id", "model",
-                "speed", "query_source", "tool_name",
-            )}
-            material = json.dumps({"code": code, "scope": stable_scope}, sort_keys=True,
-                                  separators=(",", ":"))
+            stable_scope = {
+                key: evidence.get(key)
+                for key in (
+                    "agent_profile",
+                    "harness_version",
+                    "project_id",
+                    "model",
+                    "speed",
+                    "query_source",
+                    "tool_name",
+                )
+            }
+            material = json.dumps({"code": code, "scope": stable_scope}, sort_keys=True, separators=(",", ":"))
             rec_id = "rec_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
-            findings.append({
-                "recommendation_id": rec_id,
-                "code": code,
-                "confidence": round(confidence, 2),
-                "sample_size": observations,
-                "eligible_for_approval": observations >= MIN_RECOMMENDATION_EVENTS and confidence >= 0.65,
-                "amendment": _AMENDMENTS[code],
-                "expected_result": _EXPECTED_RESULTS[code],
-                "risks": _RISKS.get(
-                    code,
-                    "Over-constraining the harness may reduce completion quality; validate against matched outcomes.",
-                ),
-                "evidence": evidence,
-                "validation_window": "14d",
-                "rollback_condition": "Rollback if error rate rises by >5 percentage points or success rate falls by >10%.",
-            })
+            findings.append(
+                {
+                    "recommendation_id": rec_id,
+                    "code": code,
+                    "confidence": round(confidence, 2),
+                    "sample_size": observations,
+                    "eligible_for_approval": observations >= MIN_RECOMMENDATION_EVENTS and confidence >= 0.65,
+                    "amendment": _AMENDMENTS[code],
+                    "expected_result": _EXPECTED_RESULTS[code],
+                    "risks": _RISKS.get(
+                        code,
+                        "Over-constraining the harness may reduce completion quality; validate against matched outcomes.",
+                    ),
+                    "evidence": evidence,
+                    "validation_window": "14d",
+                    "rollback_condition": "Rollback if error rate rises by >5 percentage points or success rate falls by >10%.",
+                }
+            )
     findings.sort(key=lambda item: (-item["confidence"], item["recommendation_id"]))
-    return {"schema_version": SCHEMA_VERSION,
-            "catalog_version": catalog.get("catalog_version"),
-            "findings": findings, "cohorts": groups,
-            "groups_analyzed": len(groups)}
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "catalog_version": catalog.get("catalog_version"),
+        "findings": findings,
+        "cohorts": groups,
+        "groups_analyzed": len(groups),
+    }
 
 
 def efficiency_insights(since="7d ago", filters=None):
@@ -1810,8 +2080,10 @@ def efficiency_insights(since="7d ago", filters=None):
     report["generated_at"] = _now_iso()
     report["source_window"] = since
     eligible = sum(1 for item in report["findings"] if item["eligible_for_approval"])
-    lines = [f"Window: {since}; {report['groups_analyzed']} matched cohorts analyzed.",
-             f"Findings: {len(report['findings'])}; approval-eligible: {eligible}."]
+    lines = [
+        f"Window: {since}; {report['groups_analyzed']} matched cohorts analyzed.",
+        f"Findings: {len(report['findings'])}; approval-eligible: {eligible}.",
+    ]
     return _envelope("Claude agent and harness efficiency", report, lines), False
 
 
@@ -1823,8 +2095,10 @@ def harness_recommendations(since="14d ago", filters=None):
     report["generated_at"] = _now_iso()
     report["source_window"] = since
     report["findings"] = [item for item in report["findings"] if item["eligible_for_approval"]]
-    lines = [f"Generated {len(report['findings'])} evidence-backed recommendations.",
-             "Every amendment requires owner approval; no harness was modified."]
+    lines = [
+        f"Generated {len(report['findings'])} evidence-backed recommendations.",
+        "Every amendment requires owner approval; no harness was modified.",
+    ]
     return _envelope("Claude harness recommendations", report, lines), False
 
 
@@ -1865,11 +2139,17 @@ def record_recommendation_decision(recommendation_id, decision, owner, rationale
     }
     with _store_lock:
         decisions = _load_decisions()
-        duplicate = next((item for item in decisions
-                          if item.get("recommendation_id") == recommendation_id
-                          and item.get("decision") == decision
-                          and item.get("owner_hash") == entry["owner_hash"]
-                          and item.get("rationale_hash") == entry["rationale_hash"]), None)
+        duplicate = next(
+            (
+                item
+                for item in decisions
+                if item.get("recommendation_id") == recommendation_id
+                and item.get("decision") == decision
+                and item.get("owner_hash") == entry["owner_hash"]
+                and item.get("rationale_hash") == entry["rationale_hash"]
+            ),
+            None,
+        )
         if duplicate:
             entry = duplicate
             idempotent = True
@@ -1878,17 +2158,16 @@ def record_recommendation_decision(recommendation_id, decision, owner, rationale
             _atomic_write_json(_decision_store_path, decisions)
             idempotent = False
     emitted = emit_otlp_records([entry], "berserk-mcp-recommendation") if not idempotent else False
-    payload = {"schema_version": SCHEMA_VERSION, "record": entry,
-               "idempotent": idempotent, "emitted_otlp": emitted}
-    return _envelope("Claude recommendation decision recorded", payload,
-                     [f"{recommendation_id}: {decision}."]), False
+    payload = {"schema_version": SCHEMA_VERSION, "record": entry, "idempotent": idempotent, "emitted_otlp": emitted}
+    return _envelope("Claude recommendation decision recorded", payload, [f"{recommendation_id}: {decision}."]), False
 
 
-def optimization_impact(agent_profile, before_harness, after_harness,
-                        since="30d ago", project=""):
-    for value, name in ((agent_profile, "agent_profile"),
-                        (before_harness, "before_harness"),
-                        (after_harness, "after_harness")):
+def optimization_impact(agent_profile, before_harness, after_harness, since="30d ago", project=""):
+    for value, name in (
+        (agent_profile, "agent_profile"),
+        (before_harness, "before_harness"),
+        (after_harness, "after_harness"),
+    ):
         try:
             _identifier(value, name, True)
         except ValueError as exc:
@@ -1899,25 +2178,26 @@ def optimization_impact(agent_profile, before_harness, after_harness,
     catalog = load_pricing_catalog()
     store = load_business_store()
     normalized = _normalized_usage_rows(rows, store)
-    normalized = [row for row in normalized if row.get("agent_profile") == agent_profile
-                  and (not project or row.get("project_id") == project)]
+    normalized = [
+        row
+        for row in normalized
+        if row.get("agent_profile") == agent_profile and (not project or row.get("project_id") == project)
+    ]
     before_cohorts = {
-        (row.get("model"), row.get("speed") or "normal",
-         row.get("query_source") or "unspecified")
+        (row.get("model"), row.get("speed") or "normal", row.get("query_source") or "unspecified")
         for row in normalized
         if row.get("harness_version") == before_harness and row.get("model")
     }
     after_cohorts = {
-        (row.get("model"), row.get("speed") or "normal",
-         row.get("query_source") or "unspecified")
+        (row.get("model"), row.get("speed") or "normal", row.get("query_source") or "unspecified")
         for row in normalized
         if row.get("harness_version") == after_harness and row.get("model")
     }
     matched_cohorts = sorted(before_cohorts & after_cohorts)
     matched = [
-        row for row in normalized
-        if (row.get("model"), row.get("speed") or "normal",
-            row.get("query_source") or "unspecified") in matched_cohorts
+        row
+        for row in normalized
+        if (row.get("model"), row.get("speed") or "normal", row.get("query_source") or "unspecified") in matched_cohorts
     ]
     cohorts = _aggregate(matched, ["harness_version"], catalog)
     by_harness = {row["harness_version"]: row for row in cohorts}
@@ -1925,7 +2205,12 @@ def optimization_impact(agent_profile, before_harness, after_harness,
     after = by_harness.get(after_harness)
     verdict = "insufficient-data"
     metrics = {}
-    if before and after and before["events"] >= MIN_RECOMMENDATION_EVENTS and after["events"] >= MIN_RECOMMENDATION_EVENTS:
+    if (
+        before
+        and after
+        and before["events"] >= MIN_RECOMMENDATION_EVENTS
+        and after["events"] >= MIN_RECOMMENDATION_EVENTS
+    ):
         before_cost = before["public_api_equivalent_usd"] / max(1, before["events"])
         after_cost = after["public_api_equivalent_usd"] / max(1, after["events"])
         cost_change = (after_cost - before_cost) / before_cost if before_cost else 0.0
@@ -1933,43 +2218,47 @@ def optimization_impact(agent_profile, before_harness, after_harness,
         success_delta = after["success_rate"] - before["success_rate"]
         before_latency = before.get("average_duration_seconds", 0)
         after_latency = after.get("average_duration_seconds", 0)
-        latency_change = (
-            (after_latency - before_latency) / before_latency if before_latency else 0.0
-        )
-        before_delivery = (
-            before.get("commits", 0) + before.get("pull_requests", 0)
-        ) / float(max(1, before["events"]))
-        after_delivery = (
-            after.get("commits", 0) + after.get("pull_requests", 0)
-        ) / float(max(1, after["events"]))
-        delivery_change = (
-            (after_delivery - before_delivery) / before_delivery if before_delivery else 0.0
-        )
+        latency_change = (after_latency - before_latency) / before_latency if before_latency else 0.0
+        before_delivery = (before.get("commits", 0) + before.get("pull_requests", 0)) / float(max(1, before["events"]))
+        after_delivery = (after.get("commits", 0) + after.get("pull_requests", 0)) / float(max(1, after["events"]))
+        delivery_change = (after_delivery - before_delivery) / before_delivery if before_delivery else 0.0
         delivery_regressed = before_delivery > 0 and delivery_change < -0.10
-        if (error_delta > 0.05 or success_delta < -0.10 or cost_change > 0.10
-                or (before_latency and latency_change > 0.20) or delivery_regressed):
+        if (
+            error_delta > 0.05
+            or success_delta < -0.10
+            or cost_change > 0.10
+            or (before_latency and latency_change > 0.20)
+            or delivery_regressed
+        ):
             verdict = "recommend-rollback"
         elif cost_change <= -0.05:
             verdict = "keep"
         else:
             verdict = "no-material-change"
-        metrics = {"cost_per_event_change_pct": round(cost_change * 100.0, 2),
-                   "error_rate_delta": round(error_delta, 4),
-                   "success_rate_delta": round(success_delta, 4),
-                   "average_duration_change_pct": round(latency_change * 100.0, 2),
-                   "delivery_outcomes_per_event_change_pct": round(
-                       delivery_change * 100.0, 2
-                   ) if before_delivery else None}
-    payload = {"schema_version": SCHEMA_VERSION, "agent_profile": agent_profile,
-               "project_id": project, "before": before, "after": after,
-               "matched_cohorts": [
-                   {"model": model, "speed": speed, "query_source": query_source}
-                   for model, speed, query_source in matched_cohorts
-               ], "metrics": metrics,
-               "verdict": verdict, "catalog_version": catalog.get("catalog_version"),
-               "generated_at": _now_iso(), "source_window": since}
-    return _envelope("Claude harness optimization impact", payload,
-                     [f"Verdict: {verdict}."]), False
+        metrics = {
+            "cost_per_event_change_pct": round(cost_change * 100.0, 2),
+            "error_rate_delta": round(error_delta, 4),
+            "success_rate_delta": round(success_delta, 4),
+            "average_duration_change_pct": round(latency_change * 100.0, 2),
+            "delivery_outcomes_per_event_change_pct": round(delivery_change * 100.0, 2) if before_delivery else None,
+        }
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "agent_profile": agent_profile,
+        "project_id": project,
+        "before": before,
+        "after": after,
+        "matched_cohorts": [
+            {"model": model, "speed": speed, "query_source": query_source}
+            for model, speed, query_source in matched_cohorts
+        ],
+        "metrics": metrics,
+        "verdict": verdict,
+        "catalog_version": catalog.get("catalog_version"),
+        "generated_at": _now_iso(),
+        "source_window": since,
+    }
+    return _envelope("Claude harness optimization impact", payload, [f"Verdict: {verdict}."]), False
 
 
 def management_report(scope="portfolio", identifier="", since="90d ago"):
@@ -1997,25 +2286,30 @@ def _dashboard_payload(dashboard, identifier, since):
         report = build_spend_overview(rows, catalog, store, "project", {}, 100)
         overall = report["overall"]
         normalized = _normalized_usage_rows(rows, store)
-        unpriced_models = sorted({
-            row.get("model") or "unknown" for row in normalized
-            if calculate_public_cost(row, catalog).get("pricing_status") != "priced"
-            and (row.get("input_tokens") or row.get("output_tokens"))
-        })
+        unpriced_models = sorted(
+            {
+                row.get("model") or "unknown"
+                for row in normalized
+                if calculate_public_cost(row, catalog).get("pricing_status") != "priced"
+                and (row.get("input_tokens") or row.get("output_tokens"))
+            }
+        )
         decision_counts = defaultdict(int)
         for decision in _load_decisions():
             decision_counts[str(decision.get("decision") or "unknown")] += 1
-        payload = {"schema_version": SCHEMA_VERSION,
-                   "pricing_coverage": overall.get("pricing_coverage", 0),
-                   "attribution_coverage": overall.get("attribution_coverage", 0),
-                   "native_telemetry_coverage": overall.get("native_telemetry_coverage", 0),
-                   "exact_token_coverage": overall.get("exact_token_coverage", 0),
-                   "exact_rows": overall.get("exact_rows", 0),
-                   "estimated_rows": overall.get("estimated_rows", 0),
-                   "unpriced_tokens": overall.get("unpriced_tokens", 0),
-                   "unpriced_models": unpriced_models,
-                   "business_data_stale": _business_data_stale(store),
-                   "recommendation_decisions": dict(sorted(decision_counts.items()))}
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "pricing_coverage": overall.get("pricing_coverage", 0),
+            "attribution_coverage": overall.get("attribution_coverage", 0),
+            "native_telemetry_coverage": overall.get("native_telemetry_coverage", 0),
+            "exact_token_coverage": overall.get("exact_token_coverage", 0),
+            "exact_rows": overall.get("exact_rows", 0),
+            "estimated_rows": overall.get("estimated_rows", 0),
+            "unpriced_tokens": overall.get("unpriced_tokens", 0),
+            "unpriced_models": unpriced_models,
+            "business_data_stale": _business_data_stale(store),
+            "recommendation_decisions": dict(sorted(decision_counts.items())),
+        }
     else:
         payload = build_spend_overview(rows, catalog, store, "project", {}, 30)
     payload["generated_at"] = _now_iso()
@@ -2029,22 +2323,29 @@ def _markdown_dashboard(title, payload, since):
     lines = [f"# {title}", "", f"Generated: {_now_iso()}", f"Window: {since}", ""]
     if "overall" in payload:
         overall = payload["overall"]
-        lines.extend([
-            "## Summary", "",
-            f"- API-equivalent cost: ${overall.get('public_api_equivalent_usd', 0):.4f}",
-            f"- Input tokens: {overall.get('input_tokens', 0)}",
-            f"- Output tokens: {overall.get('output_tokens', 0)}",
-            f"- Attribution coverage: {overall.get('attribution_coverage', 0) * 100:.1f}%",
-            f"- Pricing coverage: {overall.get('pricing_coverage', 0) * 100:.1f}%", "",
-            "## Breakdown", "",
-            "| Group | API-equivalent USD | Events | Error rate |",
-            "|---|---:|---:|---:|",
-        ])
+        lines.extend(
+            [
+                "## Summary",
+                "",
+                f"- API-equivalent cost: ${overall.get('public_api_equivalent_usd', 0):.4f}",
+                f"- Input tokens: {overall.get('input_tokens', 0)}",
+                f"- Output tokens: {overall.get('output_tokens', 0)}",
+                f"- Attribution coverage: {overall.get('attribution_coverage', 0) * 100:.1f}%",
+                f"- Pricing coverage: {overall.get('pricing_coverage', 0) * 100:.1f}%",
+                "",
+                "## Breakdown",
+                "",
+                "| Group | API-equivalent USD | Events | Error rate |",
+                "|---|---:|---:|---:|",
+            ]
+        )
         field = _GROUP_FIELD.get(payload.get("group_by"), "project_id")
         for row in payload.get("groups", []):
-            lines.append(f"| {_redact(row.get(field, 'unattributed'))} | "
-                         f"{row.get('public_api_equivalent_usd', 0):.4f} | "
-                         f"{row.get('events', 0)} | {row.get('error_rate', 0) * 100:.1f}% |")
+            lines.append(
+                f"| {_redact(row.get(field, 'unattributed'))} | "
+                f"{row.get('public_api_equivalent_usd', 0):.4f} | "
+                f"{row.get('events', 0)} | {row.get('error_rate', 0) * 100:.1f}% |"
+            )
     else:
         lines.extend(["## Report", ""] + _fenced_json_lines(payload))
     lines.extend(["", "---", "Costs are public API equivalents, not invoices. "])
@@ -2072,16 +2373,15 @@ def _html_dashboard(title, payload, since):
 svg{{background:white;border-radius:9px;margin-top:1rem}}rect{{fill:#6e56cf}}.label{{font-size:12px}}.value{{font-size:12px;fill:#333}}
 details{{margin-top:1rem}}pre{{white-space:pre-wrap;background:white;padding:1rem;border-radius:9px}}</style></head>
 <body><h1>{html.escape(title)}</h1><p>Generated {_now_iso()} · window {html.escape(since)}</p>
-<div class="cards"><div class="card"><b>API-equivalent cost</b><br>${overall.get('public_api_equivalent_usd', 0):.4f}</div>
-<div class="card"><b>Attribution coverage</b><br>{overall.get('attribution_coverage', 0) * 100:.1f}%</div>
-<div class="card"><b>Pricing coverage</b><br>{overall.get('pricing_coverage', 0) * 100:.1f}%</div></div>
-<svg width="1000" height="{max(100, 30 * len(bars) + 20)}" role="img" aria-label="AI cost breakdown">{''.join(bars)}</svg>
+<div class="cards"><div class="card"><b>API-equivalent cost</b><br>${overall.get("public_api_equivalent_usd", 0):.4f}</div>
+<div class="card"><b>Attribution coverage</b><br>{overall.get("attribution_coverage", 0) * 100:.1f}%</div>
+<div class="card"><b>Pricing coverage</b><br>{overall.get("pricing_coverage", 0) * 100:.1f}%</div></div>
+<svg width="1000" height="{max(100, 30 * len(bars) + 20)}" role="img" aria-label="AI cost breakdown">{"".join(bars)}</svg>
 <details><summary>Structured data</summary><pre>{raw_json}</pre></details>
 <p>Costs are public API equivalents, not invoices.</p></body></html>"""
 
 
-def generate_dashboard(dashboard="portfolio", identifier="", since="90d ago",
-                       fmt="markdown", filename=""):
+def generate_dashboard(dashboard="portfolio", identifier="", since="90d ago", fmt="markdown", filename=""):
     if dashboard not in {"portfolio", "project", "feature", "agent_efficiency", "data_quality"}:
         return "invalid dashboard type", True
     if fmt not in {"markdown", "html"}:
@@ -2109,10 +2409,17 @@ def generate_dashboard(dashboard="portfolio", identifier="", since="90d ago",
     if target.parent != root:
         return "report output must remain inside BERSERK_MCP_REPORT_DIR", True
     title = "Claude " + dashboard.replace("_", " ").title()
-    content = _markdown_dashboard(title, payload, since) if fmt == "markdown" else _html_dashboard(title, payload, since)
+    content = (
+        _markdown_dashboard(title, payload, since) if fmt == "markdown" else _html_dashboard(title, payload, since)
+    )
     _atomic_write_text(target, content, private=False)
-    result = {"schema_version": SCHEMA_VERSION, "dashboard": dashboard,
-              "format": fmt, "path": str(target), "generated_at": _now_iso()}
+    result = {
+        "schema_version": SCHEMA_VERSION,
+        "dashboard": dashboard,
+        "format": fmt,
+        "path": str(target),
+        "generated_at": _now_iso(),
+    }
     return _envelope("Claude dashboard generated", result, [f"Report: {target}"]), False
 
 
@@ -2120,13 +2427,20 @@ def build_bi_datasets(raw_rows, catalog, store=None, decisions=None):
     store = store or _empty_business_store()
     decisions = decisions if decisions is not None else []
     rows = _normalized_usage_rows(raw_rows, store)
-    daily = _aggregate(rows, ["day", "team_id", "project_id", "repository_id",
-                              "feature_id", "agent_profile", "harness_version", "model"], catalog)
-    features = [_feature_snapshot(str(feature.get("feature_id")), raw_rows, catalog, store)
-                for feature in store.get("features", []) if feature.get("feature_id")]
-    project_ids = sorted({str(feature.get("project_id")) for feature in store.get("features", [])
-                          if feature.get("project_id")} | {str(row.get("project_id")) for row in rows
-                                                          if row.get("project_id")})
+    daily = _aggregate(
+        rows,
+        ["day", "team_id", "project_id", "repository_id", "feature_id", "agent_profile", "harness_version", "model"],
+        catalog,
+    )
+    features = [
+        _feature_snapshot(str(feature.get("feature_id")), raw_rows, catalog, store)
+        for feature in store.get("features", [])
+        if feature.get("feature_id")
+    ]
+    project_ids = sorted(
+        {str(feature.get("project_id")) for feature in store.get("features", []) if feature.get("project_id")}
+        | {str(row.get("project_id")) for row in rows if row.get("project_id")}
+    )
     projects = [_project_snapshot(project_id, raw_rows, catalog, store) for project_id in project_ids]
     analysis = analyze_efficiency_rows(raw_rows, catalog, store)
     efficiency = analysis["cohorts"]
@@ -2134,72 +2448,84 @@ def build_bi_datasets(raw_rows, catalog, store=None, decisions=None):
     for decision in decisions:
         recommendation_id = str(decision.get("recommendation_id") or "")
         current = latest_decisions.get(recommendation_id)
-        if recommendation_id and (
-                current is None or str(decision.get("ts") or "") >= str(current.get("ts") or "")):
+        if recommendation_id and (current is None or str(decision.get("ts") or "") >= str(current.get("ts") or "")):
             latest_decisions[recommendation_id] = decision
     recommendation_status = []
     for finding in analysis["findings"]:
         decision = latest_decisions.get(finding["recommendation_id"], {})
-        recommendation_status.append({
-            "schema_version": SCHEMA_VERSION,
-            "recommendation_id": finding["recommendation_id"],
-            "code": finding["code"],
-            "confidence": finding["confidence"],
-            "sample_size": finding["sample_size"],
-            "eligible_for_approval": finding["eligible_for_approval"],
-            "status": decision.get("decision", "proposed"),
-            "decision_timestamp": decision.get("ts", ""),
-            "amendment": finding["amendment"],
-            "expected_result": finding["expected_result"],
-            "risks": finding["risks"],
-        })
+        recommendation_status.append(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "recommendation_id": finding["recommendation_id"],
+                "code": finding["code"],
+                "confidence": finding["confidence"],
+                "sample_size": finding["sample_size"],
+                "eligible_for_approval": finding["eligible_for_approval"],
+                "status": decision.get("decision", "proposed"),
+                "decision_timestamp": decision.get("ts", ""),
+                "amendment": finding["amendment"],
+                "expected_result": finding["expected_result"],
+                "risks": finding["risks"],
+            }
+        )
     known_recommendations = {row["recommendation_id"] for row in recommendation_status}
     recommendation_status.extend(
         dict({"schema_version": SCHEMA_VERSION, "status": item.get("decision", "")}, **item)
-        for rec_id, item in latest_decisions.items() if rec_id not in known_recommendations
+        for rec_id, item in latest_decisions.items()
+        if rec_id not in known_recommendations
     )
     effort_daily_map = {}
     for effort in store.get("effort", []):
-        key = tuple(str(effort.get(field) or "") for field in (
-            "work_date", "feature_id", "work_item_id", "team_id"
-        ))
-        slot = effort_daily_map.setdefault(key, {
-            "schema_version": SCHEMA_VERSION,
-            "work_date": key[0], "feature_id": key[1],
-            "work_item_id": key[2], "team_id": key[3],
-            "actual_hours": 0.0, "worklog_count": 0,
-        })
-        slot["actual_hours"] += _nonnegative_float(
-            _first(effort.get("actual_hours"), effort.get("hours"))
+        key = tuple(str(effort.get(field) or "") for field in ("work_date", "feature_id", "work_item_id", "team_id"))
+        slot = effort_daily_map.setdefault(
+            key,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "work_date": key[0],
+                "feature_id": key[1],
+                "work_item_id": key[2],
+                "team_id": key[3],
+                "actual_hours": 0.0,
+                "worklog_count": 0,
+            },
         )
+        slot["actual_hours"] += _nonnegative_float(_first(effort.get("actual_hours"), effort.get("hours")))
         slot["worklog_count"] += 1
     effort_daily = [effort_daily_map[key] for key in sorted(effort_daily_map)]
     for effort in effort_daily:
         effort["actual_hours"] = round(effort["actual_hours"], 2)
     overview = build_spend_overview(raw_rows, catalog, store, "project", {}, 100)
-    unpriced_models = sorted({
-        row.get("model") or "unknown"
-        for row in rows
-        if calculate_public_cost(row, catalog).get("pricing_status") != "priced"
-        and (row.get("input_tokens") or row.get("output_tokens")
-             or row.get("cache_read_tokens") or row.get("cache_creation_tokens"))
-    })
+    unpriced_models = sorted(
+        {
+            row.get("model") or "unknown"
+            for row in rows
+            if calculate_public_cost(row, catalog).get("pricing_status") != "priced"
+            and (
+                row.get("input_tokens")
+                or row.get("output_tokens")
+                or row.get("cache_read_tokens")
+                or row.get("cache_creation_tokens")
+            )
+        }
+    )
     updated_at = str(store.get("updated_at") or "")
     stale_business_data = _business_data_stale(store)
-    quality = [{
-        "schema_version": SCHEMA_VERSION,
-        "generated_at": _now_iso(),
-        "pricing_coverage": overview["overall"].get("pricing_coverage", 0),
-        "attribution_coverage": overview["overall"].get("attribution_coverage", 0),
-        "native_telemetry_coverage": overview["overall"].get("native_telemetry_coverage", 0),
-        "exact_token_coverage": overview["overall"].get("exact_token_coverage", 0),
-        "exact_rows": overview["overall"].get("exact_rows", 0),
-        "estimated_rows": overview["overall"].get("estimated_rows", 0),
-        "unpriced_tokens": overview["overall"].get("unpriced_tokens", 0),
-        "unpriced_models": unpriced_models,
-        "business_data_updated_at": updated_at,
-        "business_data_stale": stale_business_data,
-    }]
+    quality = [
+        {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": _now_iso(),
+            "pricing_coverage": overview["overall"].get("pricing_coverage", 0),
+            "attribution_coverage": overview["overall"].get("attribution_coverage", 0),
+            "native_telemetry_coverage": overview["overall"].get("native_telemetry_coverage", 0),
+            "exact_token_coverage": overview["overall"].get("exact_token_coverage", 0),
+            "exact_rows": overview["overall"].get("exact_rows", 0),
+            "estimated_rows": overview["overall"].get("estimated_rows", 0),
+            "unpriced_tokens": overview["overall"].get("unpriced_tokens", 0),
+            "unpriced_models": unpriced_models,
+            "business_data_updated_at": updated_at,
+            "business_data_stale": stale_business_data,
+        }
+    ]
     return {
         "ai_usage_daily": daily,
         "feature_cost_snapshot": features,
@@ -2232,6 +2558,7 @@ def _csv_text(rows):
     if not fieldnames:
         return ""
     import io
+
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
     writer.writerow({name: _csv_safe_cell(name) for name in fieldnames})
@@ -2247,23 +2574,17 @@ def export_bi(since, output_dir, fmt="csv"):
     if error:
         raise RuntimeError(str(rows))
     catalog = load_pricing_catalog()
-    datasets = _sanitize_payload(
-        build_bi_datasets(rows, catalog, load_business_store(), _load_decisions())
-    )
+    datasets = _sanitize_payload(build_bi_datasets(rows, catalog, load_business_store(), _load_decisions()))
     serialized = {}
     for name, values in datasets.items():
         if fmt == "csv":
             serialized[name + ".csv"] = _csv_text(values)
         else:
             serialized[name + ".ndjson"] = "".join(
-                json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
-                for row in values
+                json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n" for row in values
             )
     generated_at = _now_iso()
-    generation_id = (
-        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        + f"-{os.getpid()}-{threading.get_ident()}"
-    )
+    generation_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + f"-{os.getpid()}-{threading.get_ident()}"
     snapshot_dir = target_dir / ".snapshots" / generation_id
     quality = (datasets.get("attribution_quality") or [{}])[0]
     warnings = []
@@ -2312,11 +2633,16 @@ def export_bi(since, output_dir, fmt="csv"):
 
 
 _WORK_CONTEXT_FIELDS = {
-    "team": "business.team.id", "portfolio": "business.portfolio.id",
-    "project": "business.project.id", "feature": "business.feature.id",
-    "work_item": "business.work_item.id", "cost_center": "business.cost_center",
-    "repository": "code.repository.id", "branch": "code.branch.id",
-    "agent_profile": "berserk.agent.profile", "harness_version": "berserk.harness.version",
+    "team": "business.team.id",
+    "portfolio": "business.portfolio.id",
+    "project": "business.project.id",
+    "feature": "business.feature.id",
+    "work_item": "business.work_item.id",
+    "cost_center": "business.cost_center",
+    "repository": "code.repository.id",
+    "branch": "code.branch.id",
+    "agent_profile": "berserk.agent.profile",
+    "harness_version": "berserk.harness.version",
     "recommendation_id": "berserk.recommendation.id",
 }
 
@@ -2336,19 +2662,17 @@ def build_work_context_attributes(existing="", **values):
 
 
 def launcher_main():
-    parser = argparse.ArgumentParser(prog="berserk-claude",
-                                     description="Launch Claude Code with governed AI-cost attribution tags")
+    parser = argparse.ArgumentParser(
+        prog="berserk-claude", description="Launch Claude Code with governed AI-cost attribution tags"
+    )
     for name in _WORK_CONTEXT_FIELDS:
         parser.add_argument("--" + name.replace("_", "-"))
-    parser.add_argument("command", nargs=argparse.REMAINDER,
-                        help="Claude command and arguments; defaults to 'claude'")
+    parser.add_argument("command", nargs=argparse.REMAINDER, help="Claude command and arguments; defaults to 'claude'")
     args = parser.parse_args()
     values = {name: getattr(args, name) for name in _WORK_CONTEXT_FIELDS}
     env = dict(os.environ)
     env["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
-    env["OTEL_RESOURCE_ATTRIBUTES"] = build_work_context_attributes(
-        env.get("OTEL_RESOURCE_ATTRIBUTES", ""), **values
-    )
+    env["OTEL_RESOURCE_ATTRIBUTES"] = build_work_context_attributes(env.get("OTEL_RESOURCE_ATTRIBUTES", ""), **values)
     command = list(args.command)
     if command and command[0] == "--":
         command = command[1:]

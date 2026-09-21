@@ -21,6 +21,7 @@ Usage:
 Output is newline-delimited JSON (one record per line), oldest session first,
 so it composes with grep/jq without any lossy summarization.
 """
+
 import json
 import sys
 from pathlib import Path

@@ -19,62 +19,73 @@ class ReadOauthTokenTest(unittest.TestCase):
     def test_returns_none_on_nonzero_returncode(self):
         def run(*a, **k):
             return fake_completed_process(1, "")
+
         self.assertIsNone(qs._read_oauth_token(run=run, platform_name="Darwin"))
 
     def test_returns_none_on_empty_stdout(self):
         def run(*a, **k):
             return fake_completed_process(0, "")
+
         self.assertIsNone(qs._read_oauth_token(run=run, platform_name="Darwin"))
 
     def test_returns_none_on_malformed_json(self):
         def run(*a, **k):
             return fake_completed_process(0, "not json")
+
         self.assertIsNone(qs._read_oauth_token(run=run, platform_name="Darwin"))
 
     def test_returns_none_when_claudeAiOauth_key_missing(self):
         def run(*a, **k):
             return fake_completed_process(0, json.dumps({"other": "shape"}))
+
         self.assertIsNone(qs._read_oauth_token(run=run, platform_name="Darwin"))
 
     def test_returns_none_when_claudeAiOauth_is_not_a_dict(self):
         def run(*a, **k):
             return fake_completed_process(0, json.dumps({"claudeAiOauth": "nope"}))
+
         self.assertIsNone(qs._read_oauth_token(run=run, platform_name="Darwin"))
 
     def test_returns_none_when_accessToken_missing_or_empty(self):
         def run(*a, **k):
-            return fake_completed_process(
-                    0, json.dumps({"claudeAiOauth": {"subscriptionType": "max"}}))
+            return fake_completed_process(0, json.dumps({"claudeAiOauth": {"subscriptionType": "max"}}))
+
         self.assertIsNone(qs._read_oauth_token(run=run, platform_name="Darwin"))
 
         def run2(*a, **k):
-            return fake_completed_process(
-                    0, json.dumps({"claudeAiOauth": {"accessToken": ""}}))
+            return fake_completed_process(0, json.dumps({"claudeAiOauth": {"accessToken": ""}}))
+
         self.assertIsNone(qs._read_oauth_token(run=run2, platform_name="Darwin"))
 
     def test_returns_token_on_well_formed_blob(self):
         def run(*a, **k):
             return fake_completed_process(
-                    0, json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-oat-fake", "subscriptionType": "max"}}))
+                0, json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-oat-fake", "subscriptionType": "max"}})
+            )
+
         self.assertEqual(qs._read_oauth_token(run=run, platform_name="Darwin"), "sk-ant-oat-fake")
 
     def test_skips_entirely_on_non_macos(self):
         # The `security` CLI doesn't exist outside macOS -- never even try.
         calls = []
+
         def run(*a, **k):
             calls.append(a)
             return fake_completed_process(0, json.dumps({"claudeAiOauth": {"accessToken": "x"}}))
+
         self.assertIsNone(qs._read_oauth_token(run=run, platform_name="Linux"))
         self.assertEqual(calls, [])
 
     def test_returns_none_on_subprocess_timeout(self):
         def run(*a, **k):
             raise subprocess.TimeoutExpired(cmd="security", timeout=5)
+
         self.assertIsNone(qs._read_oauth_token(run=run, platform_name="Darwin"))
 
     def test_returns_none_on_missing_security_binary(self):
         def run(*a, **k):
             raise FileNotFoundError("no such file")
+
         self.assertIsNone(qs._read_oauth_token(run=run, platform_name="Darwin"))
 
 
@@ -97,26 +108,31 @@ class FetchLiveUsageTest(unittest.TestCase):
     def test_returns_parsed_dict_on_200(self):
         def opener(req, timeout):
             return _FakeResponse(200, json.dumps({"a": 1}).encode())
+
         self.assertEqual(qs._fetch_live_usage("tok", opener=opener), {"a": 1})
 
     def test_returns_none_on_non_200_status(self):
         def opener(req, timeout):
             return _FakeResponse(403, b"{}")
+
         self.assertIsNone(qs._fetch_live_usage("tok", opener=opener))
 
     def test_returns_none_on_malformed_json_body(self):
         def opener(req, timeout):
             return _FakeResponse(200, b"not json")
+
         self.assertIsNone(qs._fetch_live_usage("tok", opener=opener))
 
     def test_returns_none_when_body_is_a_json_array_not_object(self):
         def opener(req, timeout):
             return _FakeResponse(200, b"[1,2,3]")
+
         self.assertIsNone(qs._fetch_live_usage("tok", opener=opener))
 
     def test_returns_none_on_connection_error(self):
         def opener(req, timeout):
             raise OSError("connection refused")
+
         self.assertIsNone(qs._fetch_live_usage("tok", opener=opener))
 
     def test_never_raises_on_completely_unexpected_exception_shape(self):
@@ -125,16 +141,18 @@ class FetchLiveUsageTest(unittest.TestCase):
         # the whole quota-status call.
         def opener(req, timeout):
             raise ValueError("surprise")
+
         self.assertIsNone(qs._fetch_live_usage("tok", opener=opener))
 
 
 class GetQuotaStatusTest(unittest.TestCase):
     def test_uses_live_path_when_token_and_endpoint_both_succeed(self):
         def run(*a, **k):
-            return fake_completed_process(
-                    0, json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
+            return fake_completed_process(0, json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
+
         def opener(req, timeout):
             return _FakeResponse(200, json.dumps({"five_hour_utilization": 42}).encode())
+
         result = qs.get_quota_status(run=run, opener=opener, platform_name="Darwin")
         self.assertEqual(result["source"], "live")
         self.assertTrue(result["ok"])
@@ -143,8 +161,10 @@ class GetQuotaStatusTest(unittest.TestCase):
     def test_falls_back_to_estimate_when_no_token(self):
         def run(*a, **k):
             return fake_completed_process(1, "")  # keychain miss
+
         result = qs.get_quota_status(
-            run=run, platform_name="Darwin",
+            run=run,
+            platform_name="Darwin",
             _total_tokens_estimate=lambda since: (500, True, False),
         )
         self.assertEqual(result["source"], "estimated")
@@ -154,12 +174,15 @@ class GetQuotaStatusTest(unittest.TestCase):
 
     def test_falls_back_to_estimate_when_live_endpoint_fails(self):
         def run(*a, **k):
-            return fake_completed_process(
-                    0, json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
+            return fake_completed_process(0, json.dumps({"claudeAiOauth": {"accessToken": "tok"}}))
+
         def opener(req, timeout):
             return _FakeResponse(500, b"{}")
+
         result = qs.get_quota_status(
-            run=run, opener=opener, platform_name="Darwin",
+            run=run,
+            opener=opener,
+            platform_name="Darwin",
             _total_tokens_estimate=lambda since: (300, False, False),
         )
         self.assertEqual(result["source"], "estimated")
@@ -169,8 +192,10 @@ class GetQuotaStatusTest(unittest.TestCase):
     def test_reports_unavailable_when_both_paths_fail(self):
         def run(*a, **k):
             return fake_completed_process(1, "")
+
         result = qs.get_quota_status(
-            run=run, platform_name="Darwin",
+            run=run,
+            platform_name="Darwin",
             _total_tokens_estimate=lambda since: (None, False, True),
         )
         self.assertEqual(result["source"], "unavailable")
@@ -182,8 +207,10 @@ class GetQuotaStatusTest(unittest.TestCase):
         # and (on fallback) the injected estimator.
         def run(*a, **k):
             return fake_completed_process(1, "")
+
         result = qs.get_quota_status(
-            run=run, platform_name="Darwin",
+            run=run,
+            platform_name="Darwin",
             _total_tokens_estimate=lambda since: (0, True, False),
         )
         self.assertIn(result["source"], {"estimated", "unavailable"})
@@ -268,12 +295,12 @@ class FetchLiveUsageRedirectSecurityTest(unittest.TestCase):
         # passes it down, shadowing whatever _fetch_live_usage defaults to
         # (Codex re-review finding).
         def run(*a, **k):
-            return fake_completed_process(
-                    0, json.dumps({"claudeAiOauth": {"accessToken": "secret-oauth-token"}}))
+            return fake_completed_process(0, json.dumps({"claudeAiOauth": {"accessToken": "secret-oauth-token"}}))
 
         def call():
             qs.get_quota_status(
-                run=run, platform_name="Darwin",
+                run=run,
+                platform_name="Darwin",
                 _total_tokens_estimate=lambda since: (0, True, False),
             )
 
@@ -288,6 +315,7 @@ class QuotaStatusToolIntegrationTest(unittest.TestCase):
 
     def test_default_estimator_is_agent_analytics_total_tokens_estimate(self):
         import inspect
+
         sig = inspect.signature(qs.get_quota_status)
         default = sig.parameters["_total_tokens_estimate"].default
         self.assertIs(default, aa.total_tokens_estimate)

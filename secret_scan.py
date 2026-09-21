@@ -1,4 +1,5 @@
 """Secret detection, output redaction, and aggregate Berserk audits."""
+
 from collections import defaultdict
 import ipaddress
 import json
@@ -15,25 +16,25 @@ ALL_PII_TYPES = frozenset({"email", "ipv4", "ipv6", "credit_card"})
 class AuditParseError(ValueError):
     """Raised when audit response cannot be fully decoded as a supported format."""
 
+
 # Ordered most-specific-first. Later matches never replace an earlier overlap.
 _SECRET_PATTERNS = (
-    ("private_key", re.compile(
-        r"-----BEGIN ((?:[A-Z]+ )?PRIVATE KEY)-----.*?-----END \1-----",
-        re.DOTALL,
-    )),
+    (
+        "private_key",
+        re.compile(
+            r"-----BEGIN ((?:[A-Z]+ )?PRIVATE KEY)-----.*?-----END \1-----",
+            re.DOTALL,
+        ),
+    ),
     ("aws_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
-    ("aws_secret", re.compile(
-        r"(?i)\baws[_ -]?secret(?:[_ -]?(?:access)?[_ -]?key)?\s*[=:]\s*[A-Za-z0-9+/]{40}\b"
-    )),
+    ("aws_secret", re.compile(r"(?i)\baws[_ -]?secret(?:[_ -]?(?:access)?[_ -]?key)?\s*[=:]\s*[A-Za-z0-9+/]{40}\b")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")),
     ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
     ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
     ("api_key", re.compile(r"\bsk-[A-Za-z0-9-]{20,}\b")),
     ("bearer", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._-]{20,}\b")),
 )
-_GENERIC_CREDENTIAL = re.compile(
-    r"(?i)\b(password|passwd|pwd|secret|api[_-]?key|token)\s*[=:]\s*[^\s,;]+"
-)
+_GENERIC_CREDENTIAL = re.compile(r"(?i)\b(password|passwd|pwd|secret|api[_-]?key|token)\s*[=:]\s*[^\s,;]+")
 _ENTROPY_TOKEN = re.compile(r"\b[A-Za-z0-9_+/=-]{20,}\b")
 _EMAIL = re.compile(r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
@@ -152,9 +153,7 @@ def redact(text, include_entropy=False, pii_types=ALL_PII_TYPES):
 
     enabled_pii = frozenset(pii_types or ())
     candidates = []
-    for order, (start, end, finding_type) in enumerate(
-        _candidate_matches(original, include_entropy, enabled_pii)
-    ):
+    for order, (start, end, finding_type) in enumerate(_candidate_matches(original, include_entropy, enabled_pii)):
         if order >= MAX_REDACT_CANDIDATES:
             return _limit_result("too_many_matches")
         candidates.append((start, end, finding_type, order))
@@ -181,9 +180,14 @@ def redact(text, include_entropy=False, pii_types=ALL_PII_TYPES):
         pieces.append(original[cursor:start])
         pieces.append(f"[REDACTED:{finding_type}]")
         cursor = end
-        item = summary.setdefault(finding_type, {
-            "type": finding_type, "count": 0, "first_offset": start,
-        })
+        item = summary.setdefault(
+            finding_type,
+            {
+                "type": finding_type,
+                "count": 0,
+                "first_offset": start,
+            },
+        )
         item["count"] += 1
         item["first_offset"] = min(item["first_offset"], start)
     pieces.append(original[cursor:])
@@ -366,14 +370,15 @@ def scan_secrets(since="1h ago", include_entropy=False, pii_types=()):
         audit_rows = _parse_audit_rows(text)
     except AuditParseError:
         return (
-            "Secret scan failed: the query response was malformed or unsupported; "
-            "no clean result was produced."
+            "Secret scan failed: the query response was malformed or unsupported; no clean result was produced."
         ), True
     by_service = {}
     total = 0
     for row in audit_rows:
         _clean, findings = redact(
-            row.get("body", ""), include_entropy=include_entropy, pii_types=pii_types,
+            row.get("body", ""),
+            include_entropy=include_entropy,
+            pii_types=pii_types,
         )
         if not findings:
             continue
@@ -395,11 +400,7 @@ def scan_secrets(since="1h ago", include_entropy=False, pii_types=()):
         # through the global output-redaction filter in dispatch(), and a
         # "password=1" / "api_key=1" token would trip the _GENERIC_CREDENTIAL
         # pattern and get banner-flagged (flag mode) or corrupted (redact mode).
-        type_counts = ", ".join(
-            f"{name} x{count}" for name, count in sorted(report["types"].items())
-        )
-        lines.append(
-            f"- {service}: {type_counts}; first_seen={report['first_seen'] or 'unknown'}"
-        )
+        type_counts = ", ".join(f"{name} x{count}" for name, count in sorted(report["types"].items()))
+        lines.append(f"- {service}: {type_counts}; first_seen={report['first_seen'] or 'unknown'}")
     lines.append("Remediation: scrub secrets at ingest, rotate exposed credentials, and re-run this audit.")
     return "\n".join(lines), False

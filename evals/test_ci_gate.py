@@ -4,6 +4,7 @@ subprocess-invocation/file-discovery glue mirrors this repo's existing
 convention (evals/mcp_protocol_smoke.py) of exercising integration scripts
 directly rather than unit-testing them; only the threshold comparison --
 the part a CI regression actually depends on being correct -- gets tests."""
+
 import sys
 import unittest
 from pathlib import Path

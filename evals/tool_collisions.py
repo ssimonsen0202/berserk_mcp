@@ -109,9 +109,7 @@ def self_query_scores(index, tools, top_k=8):
     out = {}
     for t in tools:
         name = t["name"]
-        query_tokens = td.tokenize(
-            t.get("description", ""), expand_synonyms=True, drop_stopwords=True
-        )
+        query_tokens = td.tokenize(t.get("description", ""), expand_synonyms=True, drop_stopwords=True)
         self_score = _self_score(per_tool, doc_freq, n_tools, query_tokens, name)
         ranked = td.search(index, t.get("description", ""), top_k=top_k + 1, tool_order=order)
         competitors = []
@@ -240,23 +238,19 @@ def report(clusters, tools_by_name=None, role=None, file=sys.stdout):
             if len(visible) < 2:
                 continue
             members = sorted(visible)
-            member_edges = [(pair, val) for pair, val in member_edges
-                            if set(pair) <= visible]
+            member_edges = [(pair, val) for pair, val in member_edges if set(pair) <= visible]
             if not member_edges:
                 continue
         shown += 1
-        print(f"[{shown}] {len(members)} tools, mean collision strength {weight:.2f}",
-              file=file)
+        print(f"[{shown}] {len(members)} tools, mean collision strength {weight:.2f}", file=file)
         for m in members:
             print(f"      {m}", file=file)
         for pair, val in member_edges:
             kind = val[0]
             if kind == "name":
-                print(f"        edge: {pair[0]} <-> {pair[1]}  "
-                      f"(shared name word '{val[2]}')", file=file)
+                print(f"        edge: {pair[0]} <-> {pair[1]}  (shared name word '{val[2]}')", file=file)
             else:
-                print(f"        edge: {pair[0]} <-> {pair[1]}  "
-                      f"(description ratio {val[1]:.2f})", file=file)
+                print(f"        edge: {pair[0]} <-> {pair[1]}  (description ratio {val[1]:.2f})", file=file)
     if shown == 0:
         print("(no clusters at this threshold/role)", file=file)
     return shown
@@ -265,12 +259,11 @@ def report(clusters, tools_by_name=None, role=None, file=sys.stdout):
 def main():
     import argparse
 
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--role", default=None,
-                    help="only report clusters with >=2 members visible in this role")
-    ap.add_argument("--ratio-threshold", type=float, default=0.5,
-                    help="description-similarity threshold for an edge (default 0.5)")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--role", default=None, help="only report clusters with >=2 members visible in this role")
+    ap.add_argument(
+        "--ratio-threshold", type=float, default=0.5, help="description-similarity threshold for an edge (default 0.5)"
+    )
     ap.add_argument("--top-k", type=int, default=8)
     args = ap.parse_args()
 
@@ -281,8 +274,10 @@ def main():
     name_edges = name_token_edges(index)
     clusters = find_clusters(scores, name_edges, ratio_threshold=args.ratio_threshold)
 
-    print(f"{len(tools)} tools indexed, {len(clusters)} raw clusters "
-          f"(description ratio>={args.ratio_threshold} OR shared rare name word)\n")
+    print(
+        f"{len(tools)} tools indexed, {len(clusters)} raw clusters "
+        f"(description ratio>={args.ratio_threshold} OR shared rare name word)\n"
+    )
     n = report(clusters, tools_by_name=tools_by_name, role=args.role)
 
     # Sanity guard: SRE and SOC lanes measured 95-96% accuracy even at the
@@ -290,10 +285,13 @@ def main():
     # known-good. If a role-scoped report for either lane surfaces a long
     # list of clusters, the metric is over-firing, not finding real risk.
     if args.role in ("sre", "soc") and n > 3:
-        print(f"\nWARNING: {n} clusters flagged for role={args.role}, which "
-              "measured 95-96% accuracy in real evals. This method is "
-              "likely over-firing for this lane -- treat its output here "
-              "with extra skepticism before acting on it.", file=sys.stderr)
+        print(
+            f"\nWARNING: {n} clusters flagged for role={args.role}, which "
+            "measured 95-96% accuracy in real evals. This method is "
+            "likely over-firing for this lane -- treat its output here "
+            "with extra skepticism before acting on it.",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":

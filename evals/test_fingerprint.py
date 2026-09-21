@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Tests for evals/fingerprint.py (provider-update detection, issue #90)."""
+
 import sys
 import unittest
 from pathlib import Path
@@ -9,21 +10,31 @@ import fingerprint  # noqa: E402
 import _http  # noqa: E402
 
 
-PAYLOAD = {"data": [
-    {"id": "deepseek/deepseek-v4-flash", "context_length": 128000,
-     "pricing": {"prompt": "0.0000001", "completion": "0.0000002"}},
-    {"id": "other/model", "context_length": 8192, "pricing": {}},
-]}
+PAYLOAD = {
+    "data": [
+        {
+            "id": "deepseek/deepseek-v4-flash",
+            "context_length": 128000,
+            "pricing": {"prompt": "0.0000001", "completion": "0.0000002"},
+        },
+        {"id": "other/model", "context_length": 8192, "pricing": {}},
+    ]
+}
 
 
 class MetadataFingerprintTest(unittest.TestCase):
     def test_key_order_does_not_change_the_hash(self):
         """Otherwise every poll looks like a provider update."""
-        reordered = {"data": [
-            {"pricing": {"completion": "0.0000002", "prompt": "0.0000001"},
-             "context_length": 128000, "id": "deepseek/deepseek-v4-flash"},
-            {"id": "other/model", "context_length": 8192, "pricing": {}},
-        ]}
+        reordered = {
+            "data": [
+                {
+                    "pricing": {"completion": "0.0000002", "prompt": "0.0000001"},
+                    "context_length": 128000,
+                    "id": "deepseek/deepseek-v4-flash",
+                },
+                {"id": "other/model", "context_length": 8192, "pricing": {}},
+            ]
+        }
         self.assertEqual(
             fingerprint.metadata_fingerprint(PAYLOAD, "deepseek/deepseek-v4-flash"),
             fingerprint.metadata_fingerprint(reordered, "deepseek/deepseek-v4-flash"),
@@ -37,10 +48,15 @@ class MetadataFingerprintTest(unittest.TestCase):
         )
 
     def test_price_change_changes_the_hash(self):
-        changed = {"data": [
-            {"id": "deepseek/deepseek-v4-flash", "context_length": 128000,
-             "pricing": {"prompt": "0.0000009", "completion": "0.0000002"}},
-        ]}
+        changed = {
+            "data": [
+                {
+                    "id": "deepseek/deepseek-v4-flash",
+                    "context_length": 128000,
+                    "pricing": {"prompt": "0.0000009", "completion": "0.0000002"},
+                },
+            ]
+        }
         self.assertNotEqual(
             fingerprint.metadata_fingerprint(PAYLOAD, "deepseek/deepseek-v4-flash"),
             fingerprint.metadata_fingerprint(changed, "deepseek/deepseek-v4-flash"),
@@ -95,6 +111,7 @@ class FetchModelsTest(unittest.TestCase):
 
     def test_fetch_models_with_bearer_token(self):
         """Include API key in Authorization header."""
+
         def fake_get(url, headers, timeout=120):
             self._get_calls.append((url, headers))
             return {"data": []}, None
@@ -105,6 +122,7 @@ class FetchModelsTest(unittest.TestCase):
 
     def test_fetch_models_no_api_key(self):
         """Omit Authorization header when no API key provided."""
+
         def fake_get(url, headers, timeout=120):
             self._get_calls.append((url, headers))
             return {"data": []}, None
@@ -121,6 +139,7 @@ class FetchModelsTest(unittest.TestCase):
 
     def test_fetch_models_http_error(self):
         """Return error when HTTP request fails."""
+
         def fake_get(url, headers, timeout=120):
             return None, "HTTP 401"
 

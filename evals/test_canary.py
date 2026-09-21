@@ -3,8 +3,10 @@ import sys
 import unittest
 from pathlib import Path
 from unittest import mock
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import canary  # noqa: E402
+
 # parser_factory lives at the repo root, not in evals/. canary.py only adds
 # the repo root to sys.path lazily, inside run_canary() itself -- add it
 # here too so mock.patch("parser_factory...") can resolve the module before
@@ -29,10 +31,15 @@ class CaseSetVersionTest(unittest.TestCase):
 
 class BuildEvalRecordTest(unittest.TestCase):
     REPORT = {
-        "backend": "openai", "model": "deepseek/deepseek-v4-flash", "repeats": 3,
-        "tool_accuracy": 0.875, "arg_accuracy": 0.9,
-        "total_cost_usd": 0.00205, "total_input_tokens": 115717,
-        "total_output_tokens": 381, "rows": [],
+        "backend": "openai",
+        "model": "deepseek/deepseek-v4-flash",
+        "repeats": 3,
+        "tool_accuracy": 0.875,
+        "arg_accuracy": 0.9,
+        "total_cost_usd": 0.00205,
+        "total_input_tokens": 115717,
+        "total_output_tokens": 381,
+        "rows": [],
     }
 
     def test_maps_harness_fields_onto_eval_attributes(self):
@@ -54,8 +61,7 @@ class BuildEvalRecordTest(unittest.TestCase):
 
     def test_failure_record_has_no_score_fields(self):
         """An outage must never be stored as a score of zero."""
-        rec = canary.build_failure_record(
-            "deepseek/deepseek-v4-flash", "openai", "v", "r", 1, "connection refused")
+        rec = canary.build_failure_record("deepseek/deepseek-v4-flash", "openai", "v", "r", 1, "connection refused")
         self.assertEqual(rec["eval.status"], "failed")
         self.assertNotIn("eval.tool_accuracy", rec)
         self.assertNotIn("eval.arg_accuracy", rec)
@@ -72,12 +78,19 @@ class RunCanaryProviderRoutingTest(unittest.TestCase):
 
         def fake_run_harness(model, backend, cases_path, repeats, **kwargs):
             captured.update(kwargs)
-            return {"backend": backend, "model": model, "repeats": repeats,
-                    "tool_accuracy": 1.0, "arg_accuracy": 1.0, "rows": []}
+            return {
+                "backend": backend,
+                "model": model,
+                "repeats": repeats,
+                "tool_accuracy": 1.0,
+                "arg_accuracy": 1.0,
+                "rows": [],
+            }
 
-        with mock.patch.object(canary, "_run_harness", fake_run_harness), \
-             mock.patch("parser_factory._hermes_url",
-                        return_value="https://openrouter.ai/api/v1/chat/completions"):
+        with (
+            mock.patch.object(canary, "_run_harness", fake_run_harness),
+            mock.patch("parser_factory._hermes_url", return_value="https://openrouter.ai/api/v1/chat/completions"),
+        ):
             canary.run_canary("deepseek/deepseek-v4-flash")
 
         self.assertEqual(captured["base_url"], "https://openrouter.ai/api/v1")
@@ -89,12 +102,17 @@ class RunCanaryProviderRoutingTest(unittest.TestCase):
 
         def fake_run_harness(model, backend, cases_path, repeats, **kwargs):
             captured.update(kwargs)
-            return {"backend": backend, "model": model, "repeats": repeats,
-                    "tool_accuracy": 1.0, "arg_accuracy": 1.0, "rows": []}
+            return {
+                "backend": backend,
+                "model": model,
+                "repeats": repeats,
+                "tool_accuracy": 1.0,
+                "arg_accuracy": 1.0,
+                "rows": [],
+            }
 
         with mock.patch.object(canary, "_run_harness", fake_run_harness):
-            canary.run_canary("m", base_url="https://x.example/v1",
-                              key_env="MY_KEY", tool_choice="required")
+            canary.run_canary("m", base_url="https://x.example/v1", key_env="MY_KEY", tool_choice="required")
 
         self.assertEqual(captured["base_url"], "https://x.example/v1")
         self.assertEqual(captured["key_env"], "MY_KEY")
@@ -105,8 +123,14 @@ class RunCanaryProviderRoutingTest(unittest.TestCase):
 
         def fake_run_harness(model, backend, cases_path, repeats, **kwargs):
             captured.update(kwargs)
-            return {"backend": backend, "model": model, "repeats": repeats,
-                    "tool_accuracy": 1.0, "arg_accuracy": 1.0, "rows": []}
+            return {
+                "backend": backend,
+                "model": model,
+                "repeats": repeats,
+                "tool_accuracy": 1.0,
+                "arg_accuracy": 1.0,
+                "rows": [],
+            }
 
         with mock.patch.object(canary, "_run_harness", fake_run_harness):
             canary.run_canary("claude-opus-4-8", backend="anthropic")

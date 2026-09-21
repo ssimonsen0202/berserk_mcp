@@ -4,9 +4,17 @@ import kql_validation as kv
 
 
 SCHEMA_FIELDS = {
-    "timestamp", "metric_name", "value", "severity_text", "body",
-    "resource['service.name']", "resource.service.name", "service.name",
-    "resource['host.name']", "resource.host.name", "host.name",
+    "timestamp",
+    "metric_name",
+    "value",
+    "severity_text",
+    "body",
+    "resource['service.name']",
+    "resource.service.name",
+    "service.name",
+    "resource['host.name']",
+    "resource.host.name",
+    "host.name",
 }
 
 
@@ -25,7 +33,9 @@ class KqlValidationTest(unittest.TestCase):
         return [f["code"] for f in report["findings"]]
 
     def test_valid_bounded_query_low_risk(self):
-        r = self.report("default | where resource['service.name'] == 'api' | project timestamp, severity_text | take 20")
+        r = self.report(
+            "default | where resource['service.name'] == 'api' | project timestamp, severity_text | take 20"
+        )
         self.assertTrue(r["valid"])
         self.assertEqual(r["risk"], "low")
 

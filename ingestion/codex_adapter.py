@@ -43,9 +43,7 @@ import _store  # noqa: E402
 
 SERVICE_NAME = "codex-cli"
 
-_SESSION_UUID_RE = re.compile(
-    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
-)
+_SESSION_UUID_RE = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
 
 # A rough OpenAI-style secret-key shape (sk-..., 40+ chars) plus a generic
 # high-entropy-run detector for anything else that looks like a token/secret
@@ -188,21 +186,27 @@ def build_otlp_record(rec, session_id, hostname):
             attrs[f"codex.{key}"] = rec[key]
 
     return {
-        "resourceLogs": [{
-            "resource": {"attributes": [
-                {"key": "service.name", "value": {"stringValue": SERVICE_NAME}},
-                {"key": "host.name", "value": {"stringValue": hostname}},
-            ]},
-            "scopeLogs": [{
-                "logRecords": [{
-                    "timeUnixNano": str(int(time.time() * 1e9)),
-                    "body": {"stringValue": body} if body is not None else {"stringValue": ""},
+        "resourceLogs": [
+            {
+                "resource": {
                     "attributes": [
-                        {"key": k, "value": _otlp_value(v)} for k, v in attrs.items()
-                    ],
-                }],
-            }],
-        }],
+                        {"key": "service.name", "value": {"stringValue": SERVICE_NAME}},
+                        {"key": "host.name", "value": {"stringValue": hostname}},
+                    ]
+                },
+                "scopeLogs": [
+                    {
+                        "logRecords": [
+                            {
+                                "timeUnixNano": str(int(time.time() * 1e9)),
+                                "body": {"stringValue": body} if body is not None else {"stringValue": ""},
+                                "attributes": [{"key": k, "value": _otlp_value(v)} for k, v in attrs.items()],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
     }
 
 
@@ -342,7 +346,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if not args.dry_run and not args.otlp_endpoint:
-        sys.stderr.write("refusing to start: no --otlp-endpoint given and BERSERK_MCP_OTLP_LOGS_ENDPOINT is unset. Use --dry-run to test without one.\n")
+        sys.stderr.write(
+            "refusing to start: no --otlp-endpoint given and BERSERK_MCP_OTLP_LOGS_ENDPOINT is unset. Use --dry-run to test without one.\n"
+        )
         sys.exit(1)
 
     bearer = os.environ.get(args.otlp_bearer_env) if args.otlp_bearer_env else None

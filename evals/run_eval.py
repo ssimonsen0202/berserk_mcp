@@ -24,6 +24,7 @@ Examples:
   # plumbing check, no model/network:
   python run_eval.py --backend mock router_cases.jsonl
 """
+
 import argparse
 import hashlib
 import json
@@ -48,8 +49,11 @@ def get_mcp_tools_and_instructions():
     """Launch berserk_mcp.py, do the MCP handshake, return (tools, instructions)."""
     proc = subprocess.Popen(
         [sys.executable, str(SERVER)],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, bufsize=1,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
     )
 
     def send(obj):
@@ -65,15 +69,21 @@ def get_mcp_tools_and_instructions():
                 proc.terminate()
                 _, stderr = proc.communicate(timeout=2)
             detail = str(stderr or "").strip()[:2000]
-            raise RuntimeError(
-                "MCP server exited before completing the handshake"
-                + (f": {detail}" if detail else "")
-            )
+            raise RuntimeError("MCP server exited before completing the handshake" + (f": {detail}" if detail else ""))
         return json.loads(line)
 
-    send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
-          "params": {"protocolVersion": "2025-06-18", "capabilities": {},
-                     "clientInfo": {"name": "berserk-mcp-eval", "version": "1"}}})
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "berserk-mcp-eval", "version": "1"},
+            },
+        }
+    )
     init = recv()
     instructions = init.get("result", {}).get("instructions", "")
     send({"jsonrpc": "2.0", "method": "notifications/initialized"})
@@ -93,14 +103,17 @@ def get_mcp_tools_and_instructions():
 
 
 def to_openai_tools(tools):
-    return [{"type": "function", "function": {
-        "name": t["name"], "description": t["description"],
-        "parameters": t["inputSchema"]}} for t in tools]
+    return [
+        {
+            "type": "function",
+            "function": {"name": t["name"], "description": t["description"], "parameters": t["inputSchema"]},
+        }
+        for t in tools
+    ]
 
 
 def to_anthropic_tools(tools):
-    return [{"name": t["name"], "description": t["description"],
-             "input_schema": t["inputSchema"]} for t in tools]
+    return [{"name": t["name"], "description": t["description"], "input_schema": t["inputSchema"]} for t in tools]
 
 
 # ---------- backends: return (tool_name, args, latency_s, usage) ----------
@@ -126,8 +139,9 @@ def _http_error_message(error):
 LEDGER_PATH = HERE / "run_ledger.jsonl"
 
 
-def append_to_ledger(*, backend, model, cases_path, tool_count, rows,
-                     tool_accuracy, arg_accuracy, agg, lat, extra=None):
+def append_to_ledger(
+    *, backend, model, cases_path, tool_count, rows, tool_accuracy, arg_accuracy, agg, lat, extra=None
+):
     """Append one distilled, committed record per real-model eval run.
 
     `evals/results/` is gitignored and rotates -- raw per-case JSONs from
@@ -161,8 +175,7 @@ def append_to_ledger(*, backend, model, cases_path, tool_count, rows,
         "tool_count": tool_count,
         "tool_accuracy": round(tool_accuracy, 4),
         "arg_accuracy": round(arg_accuracy, 4),
-        "misses": [{"id": r["id"], "expect": r["expect"], "got": r["got"]}
-                   for r in rows if not r.get("tool_ok")],
+        "misses": [{"id": r["id"], "expect": r["expect"], "got": r["got"]} for r in rows if not r.get("tool_ok")],
         "total_cost_usd": agg.get("total_cost_usd") if agg else None,
         "latency_median_ms": round(statistics.median(lat) * 1000) if lat and any(lat) else None,
     }
@@ -189,9 +202,8 @@ def _call_with_retry(fn, max_retries=3, base_delay=2.0):
         except Exception as e:
             last_err = str(e)
         if attempt < max_retries:
-            delay = base_delay * (2 ** attempt)
-            print(f"  [retry {attempt + 1}/{max_retries} in {delay:.0f}s: {last_err}]",
-                  file=sys.stderr)
+            delay = base_delay * (2**attempt)
+            print(f"  [retry {attempt + 1}/{max_retries} in {delay:.0f}s: {last_err}]", file=sys.stderr)
             time.sleep(delay)
     raise RuntimeError(last_err)
 
@@ -202,8 +214,14 @@ def _openai_chat_call(base_url, api_key, model, messages, tools, tool_choice):
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = "Bearer " + api_key
-    body = {"model": model, "temperature": 0, "max_tokens": 512,
-            "tools": tools, "tool_choice": tool_choice, "messages": messages}
+    body = {
+        "model": model,
+        "temperature": 0,
+        "max_tokens": 512,
+        "tools": tools,
+        "tool_choice": tool_choice,
+        "messages": messages,
+    }
     data, dt = _post(base_url.rstrip("/") + "/chat/completions", headers, body)
     msg = data["choices"][0]["message"]
     calls = msg.get("tool_calls") or []
@@ -222,8 +240,7 @@ def call_openai_compatible(base_url, api_key, model, system, user, tools, tool_c
     return _openai_chat_call(base_url, api_key, model, messages, tools, tool_choice)
 
 
-def call_openai_compatible_multi_turn(base_url, api_key, model, system, prior_messages,
-                                       tools, tool_choice):
+def call_openai_compatible_multi_turn(base_url, api_key, model, system, prior_messages, tools, tool_choice):
     """Like call_openai_compatible, but `prior_messages` is a full OpenAI-shaped
     conversation (user ask, assistant tool_call, tool result) instead of a bare
     user string -- issue #75, testing whether a model continues a multi-hop tool
@@ -234,10 +251,16 @@ def call_openai_compatible_multi_turn(base_url, api_key, model, system, prior_me
 
 def _anthropic_messages_call(api_key, model, system, messages, tools, tool_choice):
     """Shared by the single-turn and multi-turn Anthropic callers."""
-    headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01",
-               "content-type": "application/json"}
-    body = {"model": model, "max_tokens": 512, "temperature": 0, "system": system,
-            "tools": tools, "tool_choice": tool_choice, "messages": messages}
+    headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
+    body = {
+        "model": model,
+        "max_tokens": 512,
+        "temperature": 0,
+        "system": system,
+        "tools": tools,
+        "tool_choice": tool_choice,
+        "messages": messages,
+    }
     data, dt = _post("https://api.anthropic.com/v1/messages", headers, body)
     for block in data.get("content", []):
         if block.get("type") == "tool_use":
@@ -246,8 +269,7 @@ def _anthropic_messages_call(api_key, model, system, messages, tools, tool_choic
 
 
 def call_anthropic(api_key, model, system, user, tools, tool_choice):
-    return _anthropic_messages_call(
-        api_key, model, system, [{"role": "user", "content": user}], tools, tool_choice)
+    return _anthropic_messages_call(api_key, model, system, [{"role": "user", "content": user}], tools, tool_choice)
 
 
 def call_anthropic_multi_turn(api_key, model, system, prior_messages, tools, tool_choice):
@@ -322,6 +344,7 @@ def call_mock(user, tools):
         if host:
             return "list_hosts"
         return "list_containers"
+
     return pick(), {}, 0.0, {}
 
 
@@ -337,10 +360,15 @@ def build_investigate_hop1_fixture(top_service="checkout", top_errors=700, since
     the module directly (rather than going through the MCP stdio protocol
     like the rest of this file does) is the right tool here."""
     import berserk_mcp as bm
-    doc = {"Tables": [{
-        "schema": {"columns": [{"name": "service"}, {"name": "errors"}]},
-        "rows": [[top_service, top_errors]],
-    }]}
+
+    doc = {
+        "Tables": [
+            {
+                "schema": {"columns": [{"name": "service"}, {"name": "errors"}]},
+                "rows": [[top_service, top_errors]],
+            }
+        ]
+    }
     orig_run_bzrk = bm.run_bzrk
     bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: (json.dumps(doc), False)
     try:
@@ -360,20 +388,41 @@ def build_multi_turn_messages(is_anthropic, prompt, hop1_text):
     if is_anthropic:
         return [
             {"role": "user", "content": prompt},
-            {"role": "assistant", "content": [{
-                "type": "tool_use", "id": "toolu_hop1",
-                "name": "investigate_error_rate", "input": {},
-            }]},
-            {"role": "user", "content": [{
-                "type": "tool_result", "tool_use_id": "toolu_hop1", "content": hop1_text,
-            }]},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_hop1",
+                        "name": "investigate_error_rate",
+                        "input": {},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_hop1",
+                        "content": hop1_text,
+                    }
+                ],
+            },
         ]
     return [
         {"role": "user", "content": prompt},
-        {"role": "assistant", "content": None, "tool_calls": [{
-            "id": "call_hop1", "type": "function",
-            "function": {"name": "investigate_error_rate", "arguments": "{}"},
-        }]},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_hop1",
+                    "type": "function",
+                    "function": {"name": "investigate_error_rate", "arguments": "{}"},
+                }
+            ],
+        },
         {"role": "tool", "tool_call_id": "call_hop1", "content": hop1_text},
     ]
 
@@ -415,7 +464,7 @@ def aggregate_usage(rows):
 
 # ---------- scoring ----------
 def score_case(case, tool_name, args):
-    tool_ok = (tool_name == case["expect_tool"])
+    tool_ok = tool_name == case["expect_tool"]
     arg_ok = True
     for k, v in (case.get("expect_args") or {}).items():
         got = str(args.get(k, "")).strip().lower()
@@ -436,13 +485,16 @@ def _make_tier_caller(backend, model, base_url, api_key, system, oa_tools, an_to
     }
     if backend == "anthropic":
         tc = {"type": "any"}
+
         def _call(prompt):
             return call_anthropic(api_key, model, system, prompt, an_tools, tc)
     else:
         url = base_url or _OA_DEFAULTS.get(backend, "http://127.0.0.1:11434/v1")
         tc = "required" if backend == "openai" else "auto"
+
         def _call(prompt):
             return call_openai_compatible(url, api_key, model, system, prompt, oa_tools, tc)
+
     return _call
 
 
@@ -461,8 +513,9 @@ def _run_tier_policy(args_ns, cases):
         sys.exit("--tier-policy requires --deep-model")
 
     tools, instructions = get_mcp_tools_and_instructions()
-    system = (instructions or "Use the provided tools to answer.") + \
-        "\nChoose exactly one tool call that best answers the user's question."
+    system = (
+        instructions or "Use the provided tools to answer."
+    ) + "\nChoose exactly one tool call that best answers the user's question."
     oa_tools = to_openai_tools(tools)
     an_tools = to_anthropic_tools(tools)
 
@@ -479,12 +532,22 @@ def _run_tier_policy(args_ns, cases):
         sys.exit("ANTHROPIC_API_KEY not set in environment.")
 
     small_call = _make_tier_caller(
-        args_ns.small_backend, args_ns.small_model, args_ns.small_url,
-        api_key, system, oa_tools, an_tools,
+        args_ns.small_backend,
+        args_ns.small_model,
+        args_ns.small_url,
+        api_key,
+        system,
+        oa_tools,
+        an_tools,
     )
     deep_call = _make_tier_caller(
-        args_ns.deep_backend, args_ns.deep_model, args_ns.deep_url,
-        api_key, system, oa_tools, an_tools,
+        args_ns.deep_backend,
+        args_ns.deep_model,
+        args_ns.deep_url,
+        api_key,
+        system,
+        oa_tools,
+        an_tools,
     )
 
     label = f"tier-policy:{args_ns.small_model}→{args_ns.deep_model}"
@@ -523,18 +586,26 @@ def _run_tier_policy(args_ns, cases):
 
         total += 1
         tool_hits += tool_ok
-        print(f"{case['id']:<22}{case['expect_tool']:<20}{str(used_name):<20}"
-              f"{handled_by:<7}{'OK' if tool_ok else 'X':<6}{used_dt*1000:>7.0f}")
-        rows.append({
-            "id": case["id"], "expect": case["expect_tool"], "got": used_name,
-            "handled_by": handled_by, "tool_ok": tool_ok,
-            "escalation_reason": decision.reason, "ms": round(used_dt * 1000),
-        })
+        print(
+            f"{case['id']:<22}{case['expect_tool']:<20}{str(used_name):<20}"
+            f"{handled_by:<7}{'OK' if tool_ok else 'X':<6}{used_dt * 1000:>7.0f}"
+        )
+        rows.append(
+            {
+                "id": case["id"],
+                "expect": case["expect_tool"],
+                "got": used_name,
+                "handled_by": handled_by,
+                "tool_ok": tool_ok,
+                "escalation_reason": decision.reason,
+                "ms": round(used_dt * 1000),
+            }
+        )
 
     print("-" * 82)
-    print(f"tool-selection accuracy : {tool_hits}/{total} = {100*tool_hits/total:.0f}%")
-    print(f"small-tier handled      : {small_handled}/{total} = {100*small_handled/total:.0f}%")
-    print(f"deep-tier escalations   : {total-small_handled}/{total}")
+    print(f"tool-selection accuracy : {tool_hits}/{total} = {100 * tool_hits / total:.0f}%")
+    print(f"small-tier handled      : {small_handled}/{total} = {100 * small_handled / total:.0f}%")
+    print(f"deep-tier escalations   : {total - small_handled}/{total}")
 
     outdir = HERE / "results"
     outdir.mkdir(exist_ok=True)
@@ -542,8 +613,10 @@ def _run_tier_policy(args_ns, cases):
     safe = label.replace(":", "_").replace("/", "_").replace("→", "-")
     report = {
         "mode": "tier-policy",
-        "small_model": args_ns.small_model, "small_backend": args_ns.small_backend,
-        "deep_model": args_ns.deep_model, "deep_backend": args_ns.deep_backend,
+        "small_model": args_ns.small_model,
+        "small_backend": args_ns.small_backend,
+        "deep_model": args_ns.deep_model,
+        "deep_backend": args_ns.deep_backend,
         "tool_accuracy": tool_hits / total,
         "small_handled_pct": small_handled / total,
         "rows": rows,
@@ -556,42 +629,57 @@ def _run_tier_policy(args_ns, cases):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cases", help="router_cases.jsonl")
-    ap.add_argument("--backend", default="",
-                    choices=["openai", "anthropic", "ollama", "lmstudio", "mock", ""])
+    ap.add_argument("--backend", default="", choices=["openai", "anthropic", "ollama", "lmstudio", "mock", ""])
     ap.add_argument("--model", default="")
     ap.add_argument("--base-url", default="")
     ap.add_argument("--key-env", default="", help="env var holding the API key")
     ap.add_argument("--repeats", type=int, default=1)
     ap.add_argument("--limit", type=int, default=0, help="run only first N cases")
     ap.add_argument("--tool-choice", default="", help="override tool_choice")
-    ap.add_argument("--call-delay-ms", type=int, default=0,
-                    help="pause this many ms before each backend call (after the first), "
-                         "to throttle request/token rate against a provider route with a "
-                         "tight per-minute cap -- useful for a no-cache model like "
-                         "deepseek-chat that resends the full schema every call")
-    ap.add_argument("--with-foreign-tools", action="store_true",
-                    help="also send a fixture Slack/GitHub-shaped tool schema alongside "
-                         "berserk-mcp's own tools, simulating a real agent that has other, "
-                         "unrelated MCP servers loaded in the same context (issue #78)")
+    ap.add_argument(
+        "--call-delay-ms",
+        type=int,
+        default=0,
+        help="pause this many ms before each backend call (after the first), "
+        "to throttle request/token rate against a provider route with a "
+        "tight per-minute cap -- useful for a no-cache model like "
+        "deepseek-chat that resends the full schema every call",
+    )
+    ap.add_argument(
+        "--with-foreign-tools",
+        action="store_true",
+        help="also send a fixture Slack/GitHub-shaped tool schema alongside "
+        "berserk-mcp's own tools, simulating a real agent that has other, "
+        "unrelated MCP servers loaded in the same context (issue #78)",
+    )
     # Two-tier routing flags (Phase 3.3)
-    ap.add_argument("--tier-policy", action="store_true",
-                    help="enable two-tier routing: small model routes, deep model handles "
-                         "escalations; requires --small-model and --deep-model")
+    ap.add_argument(
+        "--tier-policy",
+        action="store_true",
+        help="enable two-tier routing: small model routes, deep model handles "
+        "escalations; requires --small-model and --deep-model",
+    )
     ap.add_argument("--small-model", default="", help="model ID for the small routing tier")
     ap.add_argument("--small-url", default="", help="base URL for the small model (OpenAI-compat)")
-    ap.add_argument("--small-backend", default="openai",
-                    choices=["openai", "anthropic", "ollama", "lmstudio"],
-                    help="backend type for the small tier (default: openai)")
+    ap.add_argument(
+        "--small-backend",
+        default="openai",
+        choices=["openai", "anthropic", "ollama", "lmstudio"],
+        help="backend type for the small tier (default: openai)",
+    )
     ap.add_argument("--deep-model", default="", help="model ID for the deep generation tier")
     ap.add_argument("--deep-url", default="", help="base URL for the deep model (OpenAI-compat)")
-    ap.add_argument("--deep-backend", default="openai",
-                    choices=["openai", "anthropic", "ollama", "lmstudio"],
-                    help="backend type for the deep tier (default: openai)")
+    ap.add_argument(
+        "--deep-backend",
+        default="openai",
+        choices=["openai", "anthropic", "ollama", "lmstudio"],
+        help="backend type for the deep tier (default: openai)",
+    )
     args_ns = ap.parse_args()
 
     cases = [json.loads(line) for line in Path(args_ns.cases).read_text(encoding="utf-8").splitlines() if line.strip()]
     if args_ns.limit:
-        cases = cases[:args_ns.limit]
+        cases = cases[: args_ns.limit]
 
     if args_ns.tier_policy:
         _run_tier_policy(args_ns, cases)
@@ -601,20 +689,25 @@ def main():
         ap.error("--backend is required (or use --tier-policy for two-tier mode)")
 
     tools, instructions = get_mcp_tools_and_instructions()
-    system = (instructions or "Use the provided tools to answer.") + \
-        "\nChoose exactly one tool call that best answers the user's question."
+    system = (
+        instructions or "Use the provided tools to answer."
+    ) + "\nChoose exactly one tool call that best answers the user's question."
 
     backend = args_ns.backend
     if backend in ("openai", "ollama", "lmstudio"):
         oa_tools = to_openai_tools(tools)
         if args_ns.with_foreign_tools:
             import foreign_tools_fixture
+
             oa_tools = oa_tools + foreign_tools_fixture.to_openai_foreign_tools()
-        base = args_ns.base_url or {
-            "openai": "https://api.openai.com/v1",
-            "ollama": "http://127.0.0.1:11434/v1",
-            "lmstudio": "http://127.0.0.1:1234/v1",
-        }[backend]
+        base = (
+            args_ns.base_url
+            or {
+                "openai": "https://api.openai.com/v1",
+                "ollama": "http://127.0.0.1:11434/v1",
+                "lmstudio": "http://127.0.0.1:1234/v1",
+            }[backend]
+        )
         key_env = args_ns.key_env or ("OPENAI_API_KEY" if backend == "openai" else "")
         key = os.environ.get(key_env, "") if key_env else ""
         tc = args_ns.tool_choice or ("required" if backend == "openai" else "auto")
@@ -623,12 +716,12 @@ def main():
             return call_openai_compatible(base, key, args_ns.model, system, user, oa_tools, tc)
 
         def run_multi_turn(prior_messages):
-            return call_openai_compatible_multi_turn(
-                base, key, args_ns.model, system, prior_messages, oa_tools, tc)
+            return call_openai_compatible_multi_turn(base, key, args_ns.model, system, prior_messages, oa_tools, tc)
     elif backend == "anthropic":
         an_tools = to_anthropic_tools(tools)
         if args_ns.with_foreign_tools:
             import foreign_tools_fixture
+
             an_tools = an_tools + foreign_tools_fixture.to_anthropic_foreign_tools()
         key = os.environ.get(args_ns.key_env or "ANTHROPIC_API_KEY", "")
         if not key:
@@ -639,9 +732,9 @@ def main():
             return call_anthropic(key, args_ns.model, system, user, an_tools, tc)
 
         def run_multi_turn(prior_messages):
-            return call_anthropic_multi_turn(
-                key, args_ns.model, system, prior_messages, an_tools, tc)
+            return call_anthropic_multi_turn(key, args_ns.model, system, prior_messages, an_tools, tc)
     else:  # mock
+
         def run_one(user):
             return call_mock(user, tools)
 
@@ -654,8 +747,7 @@ def main():
             return None, {}, 0.0, {}
 
     label = f"{backend}:{args_ns.model or 'mock'}"
-    print(f"\n=== berserk-mcp router eval — {label} "
-          f"({len(cases)} cases × {args_ns.repeats}) ===\n")
+    print(f"\n=== berserk-mcp router eval — {label} ({len(cases)} cases × {args_ns.repeats}) ===\n")
     print(f"{'case':<22}{'expected':<20}{'got':<20}{'tool':<6}{'arg':<5}{'ms':>7}")
     print("-" * 80)
 
@@ -674,13 +766,10 @@ def main():
                         top_errors=mt.get("top_errors", 700),
                         since=mt.get("since", "1h ago"),
                     )
-                    prior_messages = build_multi_turn_messages(
-                        is_anthropic, case["prompt"], hop1_text)
-                    name, cargs, dt, usage = _call_with_retry(
-                        lambda pm=prior_messages: run_multi_turn(pm))
+                    prior_messages = build_multi_turn_messages(is_anthropic, case["prompt"], hop1_text)
+                    name, cargs, dt, usage = _call_with_retry(lambda pm=prior_messages: run_multi_turn(pm))
                 else:
-                    name, cargs, dt, usage = _call_with_retry(
-                        lambda c=case: run_one(c["prompt"]))
+                    name, cargs, dt, usage = _call_with_retry(lambda c=case: run_one(c["prompt"]))
             except Exception as e:
                 sys.exit(f"\nbackend call failed after retries: {e}")
             tool_ok, arg_ok = score_case(case, name, cargs)
@@ -688,19 +777,32 @@ def main():
             tool_hits += tool_ok
             arg_hits += arg_ok
             lat.append(dt)
-            print(f"{case['id']:<22}{case['expect_tool']:<20}{str(name):<20}"
-                  f"{'OK' if tool_ok else 'X':<6}{'OK' if arg_ok else '-':<5}{dt*1000:>7.0f}")
-            rows.append({"id": case["id"], "expect": case["expect_tool"], "got": name,
-                         "tool_ok": tool_ok, "arg_ok": arg_ok, "args": cargs, "ms": round(dt*1000),
-                         **usage_fields(usage)})
+            print(
+                f"{case['id']:<22}{case['expect_tool']:<20}{str(name):<20}"
+                f"{'OK' if tool_ok else 'X':<6}{'OK' if arg_ok else '-':<5}{dt * 1000:>7.0f}"
+            )
+            rows.append(
+                {
+                    "id": case["id"],
+                    "expect": case["expect_tool"],
+                    "got": name,
+                    "tool_ok": tool_ok,
+                    "arg_ok": arg_ok,
+                    "args": cargs,
+                    "ms": round(dt * 1000),
+                    **usage_fields(usage),
+                }
+            )
 
     agg = aggregate_usage(rows)
     print("-" * 80)
-    print(f"tool-selection accuracy : {tool_hits}/{total} = {100*tool_hits/total:.0f}%")
-    print(f"argument accuracy       : {arg_hits}/{total} = {100*arg_hits/total:.0f}%")
+    print(f"tool-selection accuracy : {tool_hits}/{total} = {100 * tool_hits / total:.0f}%")
+    print(f"argument accuracy       : {arg_hits}/{total} = {100 * arg_hits / total:.0f}%")
     if any(lat):
-        print(f"latency median/p95      : {statistics.median(lat)*1000:.0f} ms / "
-              f"{sorted(lat)[max(0,int(0.95*len(lat))-1)]*1000:.0f} ms")
+        print(
+            f"latency median/p95      : {statistics.median(lat) * 1000:.0f} ms / "
+            f"{sorted(lat)[max(0, int(0.95 * len(lat)) - 1)] * 1000:.0f} ms"
+        )
     if agg["total_input_tokens"] or agg["total_output_tokens"]:
         print(f"tokens in/out           : {agg['total_input_tokens']} / {agg['total_output_tokens']}")
     if agg["total_cost_usd"] is not None:
@@ -710,16 +812,27 @@ def main():
     outdir.mkdir(exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     safe = label.replace(":", "_").replace("/", "_")
-    report = {"backend": backend, "model": args_ns.model, "repeats": args_ns.repeats,
-              "tool_accuracy": tool_hits/total, "arg_accuracy": arg_hits/total,
-              **agg, "rows": rows}
+    report = {
+        "backend": backend,
+        "model": args_ns.model,
+        "repeats": args_ns.repeats,
+        "tool_accuracy": tool_hits / total,
+        "arg_accuracy": arg_hits / total,
+        **agg,
+        "rows": rows,
+    }
     (outdir / f"{safe}-{stamp}.json").write_text(json.dumps(report, indent=2))
     print(f"\nsaved: evals/results/{safe}-{stamp}.json")
     append_to_ledger(
-        backend=backend, model=args_ns.model, cases_path=args_ns.cases,
-        tool_count=len(tools), rows=rows,
-        tool_accuracy=tool_hits/total, arg_accuracy=arg_hits/total,
-        agg=agg, lat=lat,
+        backend=backend,
+        model=args_ns.model,
+        cases_path=args_ns.cases,
+        tool_count=len(tools),
+        rows=rows,
+        tool_accuracy=tool_hits / total,
+        arg_accuracy=arg_hits / total,
+        agg=agg,
+        lat=lat,
     )
 
 

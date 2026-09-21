@@ -131,6 +131,5 @@ def to_openai_foreign_tools():
 
 def to_anthropic_foreign_tools():
     return [
-        {"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
-        for t in FOREIGN_TOOLS
+        {"name": t["name"], "description": t["description"], "input_schema": t["parameters"]} for t in FOREIGN_TOOLS
     ]

@@ -23,6 +23,7 @@ Examples:
   python3 evals/mcp_protocol_smoke.py --server-command berserk-mcp
   python3 evals/mcp_protocol_smoke.py --include-http
 """
+
 import argparse
 import json
 import os
@@ -103,11 +104,13 @@ def modern_meta():
 
 
 def check(report, label, ok, detail=""):
-    report["checks"].append({
-        "label": label,
-        "status": "PASS" if ok else "FAIL",
-        "detail": detail,
-    })
+    report["checks"].append(
+        {
+            "label": label,
+            "status": "PASS" if ok else "FAIL",
+            "detail": detail,
+        }
+    )
     if not ok:
         report["failed"] = True
 
@@ -133,9 +136,7 @@ def run_stdio_smoke(command):
     # not a fixed name in the shared temp dir, which another local user or
     # process could pre-create as a symlink to a victim-writable file and
     # have write_text() follow it.
-    learned_fd, learned_name = tempfile.mkstemp(
-        prefix="berserk-mcp-protocol-smoke-learned-", suffix=".json"
-    )
+    learned_fd, learned_name = tempfile.mkstemp(prefix="berserk-mcp-protocol-smoke-learned-", suffix=".json")
     learned_path = Path(learned_name)
     with os.fdopen(learned_fd, "w") as f:
         json.dump(
@@ -170,8 +171,7 @@ def run_stdio_smoke(command):
         check(
             report,
             "Codex tools/list progress metadata",
-            "error" not in codex_tools
-            and bool(codex_tools.get("result", {}).get("tools")),
+            "error" not in codex_tools and bool(codex_tools.get("result", {}).get("tools")),
             json.dumps(codex_tools)[:300],
         )
 
@@ -192,8 +192,7 @@ def run_stdio_smoke(command):
         check(
             report,
             "modern tools/list cache hints",
-            tools_result.get("cacheScope") == "private"
-            and tools_result.get("ttlMs") == 300000,
+            tools_result.get("cacheScope") == "private" and tools_result.get("ttlMs") == 300000,
             json.dumps(tools_result)[:300],
         )
         check(
@@ -218,9 +217,7 @@ def run_stdio_smoke(command):
             },
         )
         saved_result = saved_call.get("result", {})
-        saved_text = "".join(
-            c.get("text", "") for c in saved_result.get("content", []) if isinstance(c, dict)
-        )
+        saved_text = "".join(c.get("text", "") for c in saved_result.get("content", []) if isinstance(c, dict))
         check(
             report,
             "saved query directly callable",
@@ -229,9 +226,7 @@ def run_stdio_smoke(command):
             # this check -- the substring test alone treats an empty/absent
             # result the same as a real successful reply, since "unknown
             # tool" is trivially absent from "".
-            "error" not in saved_call
-            and "result" in saved_call
-            and "unknown tool" not in saved_text.lower(),
+            "error" not in saved_call and "result" in saved_call and "unknown tool" not in saved_text.lower(),
             json.dumps(saved_call)[:300],
         )
 
@@ -246,8 +241,7 @@ def run_stdio_smoke(command):
         check(
             report,
             "modern tools/call resultType",
-            call.get("result", {}).get("resultType") == "complete"
-            and call.get("result", {}).get("isError") is False,
+            call.get("result", {}).get("resultType") == "complete" and call.get("result", {}).get("isError") is False,
             json.dumps(call)[:300],
         )
 
@@ -297,7 +291,9 @@ def run_stdio_smoke(command):
             check(
                 report,
                 "modern tasks/get",
-                got_task.get("id") == task_id and got_task.get("status") in {
+                got_task.get("id") == task_id
+                and got_task.get("status")
+                in {
                     "pending",
                     "running",
                     "complete",
@@ -451,8 +447,8 @@ def main():
                 print("     " + item["detail"])
     if ns.json_out:
         Path(ns.json_out).write_text(
-            json.dumps({"schema": "berserk-mcp-protocol-smoke/v1", "reports": reports},
-                       indent=2, sort_keys=True) + "\n",
+            json.dumps({"schema": "berserk-mcp-protocol-smoke/v1", "reports": reports}, indent=2, sort_keys=True)
+            + "\n",
             encoding="utf-8",
         )
         print("wrote:", ns.json_out)

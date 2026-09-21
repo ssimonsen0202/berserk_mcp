@@ -6,6 +6,7 @@ per-question accuracy *worse* than today's single hop (95% recall x 95%
 selection = 90%, worse than one call at 95%). Shipping below this threshold
 regresses the product -- this test exists to make that impossible to do by
 accident."""
+
 import sys
 import unittest
 from pathlib import Path
@@ -83,7 +84,8 @@ class RecallGateTest(unittest.TestCase):
         recall = 1 - (len(misses) / total) if total else 0
         detail = "\n".join(f"  {t!r} <- {p!r} -> got {got}" for t, p, got in misses[:25])
         self.assertGreaterEqual(
-            recall, 0.99,
+            recall,
+            0.99,
             f"recall@5 = {recall:.4f} ({len(misses)}/{total} misses), needs >=0.99\n{detail}",
         )
 
@@ -108,7 +110,11 @@ PHRASINGS = {
     "schema": ["what fields are available", "show me the schema", "what columns exist in the data"],
     "list_metrics": ["what metrics are available", "list all metrics", "show me the metric names"],
     "bzrk_query_perf": ["how slow is the query engine", "query performance stats", "bzrk query latency"],
-    "discover_schema": ["find the real field names for a source", "discover schema for a service", "what are the actual field names"],
+    "discover_schema": [
+        "find the real field names for a source",
+        "discover schema for a service",
+        "what are the actual field names",
+    ],
     "self_check": ["run a self diagnostic", "check if the server is wired up correctly", "doctor check"],
     "validate_kql": ["check if this kql query is valid", "validate my query syntax", "lint this kusto query"],
     "search": ["run a raw kql query", "search the logs with kql", "run an arbitrary query"],
@@ -118,57 +124,161 @@ PHRASINGS = {
     "trace_find_errors": ["find traces with errors", "which requests failed", "show me error traces"],
     "trace_analyze": ["analyze this specific trace", "break down a trace by id", "inspect one trace"],
     "sre_error_rate": ["what is the error rate", "error rate trend", "show error rate over time"],
-    "investigate_error_rate": ["investigate why error rate is elevated", "troubleshoot high error rate", "step-by-step error investigation"],
+    "investigate_error_rate": [
+        "investigate why error rate is elevated",
+        "troubleshoot high error rate",
+        "step-by-step error investigation",
+    ],
     "forecast_capacity": ["forecast when we run out of capacity", "predict disk usage trend", "capacity forecast"],
     "sre_host_headroom": ["how much headroom does a host have", "host capacity remaining", "spare host capacity"],
     "sre_ingest_health": ["is ingestion healthy", "check ingest pipeline health", "ingestion lag status"],
     "sre_service_health": ["is this service healthy", "overall health of a service", "service health check"],
-    "sre_top_error_messages": ["what are the most common error messages", "top recurring errors", "most frequent error text"],
+    "sre_top_error_messages": [
+        "what are the most common error messages",
+        "top recurring errors",
+        "most frequent error text",
+    ],
     "soc_high_severity_logs": ["show high severity security logs", "critical severity events", "high severity alerts"],
     "soc_log_spike": ["was there a log volume spike", "sudden increase in logs", "log spike detection"],
     "soc_new_services": ["were any new services seen", "detect a new unexpected service", "new service appeared"],
     "soc_repeated_errors": ["what error keeps repeating", "recurring failures", "errors that keep happening"],
-    "soc_timeline": ["build an incident timeline for a service", "reconstruct what happened for a service", "timeline of events"],
+    "soc_timeline": [
+        "build an incident timeline for a service",
+        "reconstruct what happened for a service",
+        "timeline of events",
+    ],
     "claude_recent": ["recent claude code activity", "what has claude been doing", "latest claude session events"],
     "claude_sessions": ["claude code sessions summary", "rollup of claude sessions", "list claude sessions"],
     "claude_tools": ["which tools does claude use most", "claude tool usage histogram", "how often is bash used"],
     "claude_errors": ["claude code tool errors", "failed tool calls from claude", "claude error results"],
-    "claude_search": ["search claude code messages", "full text search claude sessions", "find text in claude transcripts"],
+    "claude_search": [
+        "search claude code messages",
+        "full text search claude sessions",
+        "find text in claude transcripts",
+    ],
     "claude_loop_check": ["is claude stuck in a loop", "detect claude retry loops", "loop detector for claude"],
-    "claude_model_fit": ["is claude using the wrong model size for the task", "model fit heuristic", "frontier model on trivial work"],
-    "claude_token_burn": ["how many tokens is claude burning", "token burn analysis", "which session used the most tokens"],
-    "claude_quota_status": ["how much of my 5 hour quota is left", "live claude usage window check", "am I about to hit my rate limit"],
+    "claude_model_fit": [
+        "is claude using the wrong model size for the task",
+        "model fit heuristic",
+        "frontier model on trivial work",
+    ],
+    "claude_token_burn": [
+        "how many tokens is claude burning",
+        "token burn analysis",
+        "which session used the most tokens",
+    ],
+    "claude_quota_status": [
+        "how much of my 5 hour quota is left",
+        "live claude usage window check",
+        "am I about to hit my rate limit",
+    ],
     "claude_cost_report": ["claude code cost report", "daily token cost breakdown", "cost per day for claude"],
-    "claude_session_deep_dive": ["deep dive into one claude session", "timeline drilldown for a session", "inspect a single session in detail"],
-    "claude_workflow_insights": ["claude workflow patterns", "common tool sequences", "cross session workflow analysis"],
+    "claude_session_deep_dive": [
+        "deep dive into one claude session",
+        "timeline drilldown for a session",
+        "inspect a single session in detail",
+    ],
+    "claude_workflow_insights": [
+        "claude workflow patterns",
+        "common tool sequences",
+        "cross session workflow analysis",
+    ],
     "claude_spend_overview": ["enterprise claude spend overview", "total ai spend", "native token spend report"],
-    "claude_feature_cost": ["cost of building a feature with ai", "feature delivery economics", "ai cost for a specific feature"],
-    "claude_project_economics": ["project level ai economics", "budget and ai cost for a project", "codebase cost across features"],
-    "claude_efficiency_insights": ["harness efficiency analysis", "cache reuse efficiency", "agent efficiency cohort comparison"],
-    "claude_harness_recommendations": ["recommend harness improvements", "evidence backed harness changes", "suggest agent config changes"],
-    "claude_record_recommendation_decision": ["record that we approved a recommendation", "log a decision on a harness recommendation", "approve or reject a recommendation"],
-    "claude_optimization_impact": ["did the harness change help", "compare before and after harness cohorts", "optimization impact analysis"],
-    "claude_management_report": ["management report on ai usage", "portfolio level ai report", "team level cost report"],
-    "claude_generate_dashboard": ["generate a dashboard", "make an html dashboard of ai usage", "build a markdown report"],
+    "claude_feature_cost": [
+        "cost of building a feature with ai",
+        "feature delivery economics",
+        "ai cost for a specific feature",
+    ],
+    "claude_project_economics": [
+        "project level ai economics",
+        "budget and ai cost for a project",
+        "codebase cost across features",
+    ],
+    "claude_efficiency_insights": [
+        "harness efficiency analysis",
+        "cache reuse efficiency",
+        "agent efficiency cohort comparison",
+    ],
+    "claude_harness_recommendations": [
+        "recommend harness improvements",
+        "evidence backed harness changes",
+        "suggest agent config changes",
+    ],
+    "claude_record_recommendation_decision": [
+        "record that we approved a recommendation",
+        "log a decision on a harness recommendation",
+        "approve or reject a recommendation",
+    ],
+    "claude_optimization_impact": [
+        "did the harness change help",
+        "compare before and after harness cohorts",
+        "optimization impact analysis",
+    ],
+    "claude_management_report": [
+        "management report on ai usage",
+        "portfolio level ai report",
+        "team level cost report",
+    ],
+    "claude_generate_dashboard": [
+        "generate a dashboard",
+        "make an html dashboard of ai usage",
+        "build a markdown report",
+    ],
     "scan_secrets": ["scan for leaked secrets", "check logs for exposed credentials", "find secrets in the data"],
-    "suggest_ingestion": ["what telemetry sources should we add", "recommend ingestion sources", "suggest what to ingest for sre"],
-    "canonloom_run_pipeline": ["run the canonloom pipeline", "kick off a canonloom run", "process a url through canonloom"],
-    "canonloom_list_artifacts": ["list canonloom artifacts", "what artifacts has canonloom produced", "show canonloom outputs"],
+    "suggest_ingestion": [
+        "what telemetry sources should we add",
+        "recommend ingestion sources",
+        "suggest what to ingest for sre",
+    ],
+    "canonloom_run_pipeline": [
+        "run the canonloom pipeline",
+        "kick off a canonloom run",
+        "process a url through canonloom",
+    ],
+    "canonloom_list_artifacts": [
+        "list canonloom artifacts",
+        "what artifacts has canonloom produced",
+        "show canonloom outputs",
+    ],
     "canonloom_get_artifact": ["get a specific canonloom artifact", "fetch one canonloom artifact by id"],
-    "canonloom_freshness_report": ["how fresh is canonloom data", "canonloom freshness report", "is canonloom data stale"],
+    "canonloom_freshness_report": [
+        "how fresh is canonloom data",
+        "canonloom freshness report",
+        "is canonloom data stale",
+    ],
     "canonloom_run_history": ["canonloom run history", "past canonloom runs", "history of pipeline runs"],
     "list_saved": ["what saved queries exist", "list my saved queries", "show saved query packs"],
     "run_saved": ["run a saved query", "execute a saved query by name", "re-run a saved query"],
     "save_query": ["save this query for later", "persist a kql query", "store a named query"],
     "request_discovery": ["kick off telemetry discovery", "request source discovery", "start discovering new sources"],
     "discovery_status": ["what is the discovery job status", "check discovery progress", "is discovery still running"],
-    "detect_new_sources": ["were any new telemetry sources found", "detect new data sources", "check for unknown sources"],
+    "detect_new_sources": [
+        "were any new telemetry sources found",
+        "detect new data sources",
+        "check for unknown sources",
+    ],
     "generate_parser": ["generate a parser for a new source", "create a log parser automatically"],
     "run_discovery_worker": ["run the discovery worker", "process the discovery queue", "advance discovery jobs"],
-    "review_generated": ["review a generated parser", "audit an auto generated parser", "check a generated parser for issues"],
-    "find_tool": ["find the right tool for a task", "search for a tool by what I want to do", "which tool should I use"],
-    "model_drift_check": ["has the model got worse", "check model quality degradation", "did the provider change the model"],
-    "model_drift_history": ["show model quality over time", "investigate model degradation history", "model score trend"],
+    "review_generated": [
+        "review a generated parser",
+        "audit an auto generated parser",
+        "check a generated parser for issues",
+    ],
+    "find_tool": [
+        "find the right tool for a task",
+        "search for a tool by what I want to do",
+        "which tool should I use",
+    ],
+    "model_drift_check": [
+        "has the model got worse",
+        "check model quality degradation",
+        "did the provider change the model",
+    ],
+    "model_drift_history": [
+        "show model quality over time",
+        "investigate model degradation history",
+        "model score trend",
+    ],
 }
 
 

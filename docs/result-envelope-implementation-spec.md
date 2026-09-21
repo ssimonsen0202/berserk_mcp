@@ -136,12 +136,9 @@ step. Use a static table. No LLM, no extra query, no inference.
 
 ```python
 _EMPTY_NEXT_STEP = {
-    "errors_by_service":
-        "Widen with since='24h ago', or confirm the source is reporting with list_services.",
-    "top_cpu":
-        "For whole-machine CPU use host_cpu; top_cpu is per-container.",
-    "host_cpu":
-        "For per-container CPU use top_cpu; host_cpu is per-host.",
+    "errors_by_service": "Widen with since='24h ago', or confirm the source is reporting with list_services.",
+    "top_cpu": "For whole-machine CPU use host_cpu; top_cpu is per-container.",
+    "host_cpu": "For per-container CPU use top_cpu; host_cpu is per-host.",
     # ... one entry per SIMPLE tool
 }
 ```

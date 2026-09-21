@@ -31,9 +31,7 @@ def _sample_payload():
     return {
         "resourceSpans": [
             {
-                "resource": {
-                    "attributes": [_attr("service.name", "openrouter")]
-                },
+                "resource": {"attributes": [_attr("service.name", "openrouter")]},
                 "scopeSpans": [
                     {
                         "spans": [
@@ -79,9 +77,7 @@ class ExtractSpansTest(unittest.TestCase):
 
     def test_keeps_unrecognized_attributes_in_catchall(self):
         rows = extract_spans(_sample_payload())
-        self.assertEqual(
-            rows[0]["attributes"]["trace.metadata.case_id"], "router-07"
-        )
+        self.assertEqual(rows[0]["attributes"]["trace.metadata.case_id"], "router-07")
 
     def test_numeric_token_attributes_are_ints_not_strings(self):
         rows = extract_spans(_sample_payload())
@@ -168,9 +164,11 @@ class SpanToLogRecordTest(unittest.TestCase):
 
     def test_string_attributes_are_redacted(self):
         seen = []
+
         def fake_redact(text):
             seen.append(text)
             return "[REDACTED]"
+
         rec = span_to_log_record(
             _raw_span(**{"gen_ai.prompt": "my api key is sk-proj-realsecret"}),
             redact=fake_redact,
@@ -226,8 +224,10 @@ class PostToBerserkTest(unittest.TestCase):
     class _FakeResponse:
         def __init__(self, status):
             self.status = status
+
         def __enter__(self):
             return self
+
         def __exit__(self, *a):
             return False
 
@@ -242,6 +242,7 @@ class PostToBerserkTest(unittest.TestCase):
     def test_never_raises_on_connection_error(self):
         def opener(req, timeout):
             raise OSError("connection refused")
+
         ok, detail = post_to_berserk("http://x/v1/logs", {"a": 1}, opener=opener)
         self.assertFalse(ok)
         self.assertIn("connection refused", detail)
@@ -308,20 +309,14 @@ class HandlerIntegrationTest(unittest.TestCase):
         self.assertEqual(self._post({"X-Test-Connection": "true"}), 200)
 
     def test_test_connection_with_correct_signature_succeeds(self):
-        self.assertEqual(
-            self._post({"X-Test-Connection": "true", "X-Webhook-Signature": "correct-secret"}), 200
-        )
+        self.assertEqual(self._post({"X-Test-Connection": "true", "X-Webhook-Signature": "correct-secret"}), 200)
 
     def test_test_connection_with_wrong_signature_is_rejected(self):
-        self.assertEqual(
-            self._post({"X-Test-Connection": "true", "X-Webhook-Signature": "wrong"}), 401
-        )
+        self.assertEqual(self._post({"X-Test-Connection": "true", "X-Webhook-Signature": "wrong"}), 401)
 
     def test_real_payload_with_correct_signature_succeeds_and_is_recorded(self):
         payload = json.dumps(_sample_payload()).encode()
-        status = self._post(
-            {"X-Webhook-Signature": "correct-secret", "Content-Type": "application/json"}, body=payload
-        )
+        status = self._post({"X-Webhook-Signature": "correct-secret", "Content-Type": "application/json"}, body=payload)
         self.assertEqual(status, 200)
         with open(self.out_path) as f:
             rows = [json.loads(line) for line in f]
@@ -330,9 +325,7 @@ class HandlerIntegrationTest(unittest.TestCase):
 
     def test_real_payload_with_wrong_signature_is_rejected_and_not_recorded(self):
         payload = json.dumps(_sample_payload()).encode()
-        status = self._post(
-            {"X-Webhook-Signature": "wrong", "Content-Type": "application/json"}, body=payload
-        )
+        status = self._post({"X-Webhook-Signature": "wrong", "Content-Type": "application/json"}, body=payload)
         self.assertEqual(status, 401)
         self.assertFalse(os.path.exists(self.out_path))
 
@@ -355,8 +348,12 @@ class HandlerForwardingIntegrationTest(unittest.TestCase):
 
     def _start(self, post_fn):
         handler = _make_handler(
-            self.out_path, self.raw_path, "correct-secret", threading.Lock(),
-            berserk_endpoint="http://fake-berserk/v1/logs", post_fn=post_fn,
+            self.out_path,
+            self.raw_path,
+            "correct-secret",
+            threading.Lock(),
+            berserk_endpoint="http://fake-berserk/v1/logs",
+            post_fn=post_fn,
         )
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.port = self.server.server_port
@@ -370,7 +367,9 @@ class HandlerForwardingIntegrationTest(unittest.TestCase):
     def _post(self, body):
         conn = HTTPConnection("127.0.0.1", self.port, timeout=5)
         conn.request(
-            "POST", "/", body=body,
+            "POST",
+            "/",
+            body=body,
             headers={"X-Webhook-Signature": "correct-secret", "Content-Type": "application/json"},
         )
         resp = conn.getresponse()
@@ -382,6 +381,7 @@ class HandlerForwardingIntegrationTest(unittest.TestCase):
         def fake_post(endpoint, payload, timeout=10):
             self.forward_calls.append((endpoint, payload))
             return True, "http 200"
+
         self._start(fake_post)
         status, resp = self._post(json.dumps(_sample_payload()).encode())
         self.assertEqual(status, 200)
@@ -394,6 +394,7 @@ class HandlerForwardingIntegrationTest(unittest.TestCase):
     def test_forwarding_failure_does_not_break_response_or_local_write(self):
         def failing_post(endpoint, payload, timeout=10):
             return False, "connection refused"
+
         self._start(failing_post)
         status, resp = self._post(json.dumps(_sample_payload()).encode())
         self.assertEqual(status, 200)
@@ -404,6 +405,7 @@ class HandlerForwardingIntegrationTest(unittest.TestCase):
     def test_forwarding_exception_does_not_break_response_or_local_write(self):
         def raising_post(endpoint, payload, timeout=10):
             raise RuntimeError("unexpected")
+
         self._start(raising_post)
         status, resp = self._post(json.dumps(_sample_payload()).encode())
         self.assertEqual(status, 200)

@@ -32,9 +32,7 @@ class SecretRedactionTest(unittest.TestCase):
         self.assertNotIn("hunter2", json.dumps(findings))
 
     def test_private_key_and_provider_tokens_are_specific_not_generic(self):
-        private_key = (
-            "-----BEGIN PRIVATE KEY-----\nsecret-material\n-----END PRIVATE KEY-----"
-        )
+        private_key = "-----BEGIN PRIVATE KEY-----\nsecret-material\n-----END PRIVATE KEY-----"
         github = "ghp_" + ("a" * 36)
         slack = "xoxb-1234567890-abcdefghij"
         clean, findings = ss.redact(f"{private_key} {github} {slack}", pii_types=())
@@ -48,9 +46,16 @@ class SecretRedactionTest(unittest.TestCase):
         value = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/AB"
         text = f"prefix aws_secret_access_key={value} suffix"
         clean, findings = ss.redact(text, pii_types=())
-        self.assertEqual(findings, [{
-            "type": "aws_secret", "count": 1, "first_offset": len("prefix "),
-        }])
+        self.assertEqual(
+            findings,
+            [
+                {
+                    "type": "aws_secret",
+                    "count": 1,
+                    "first_offset": len("prefix "),
+                }
+            ],
+        )
         self.assertNotIn(value, clean)
         self.assertNotIn(value, repr(findings))
 
@@ -89,9 +94,7 @@ class SecretRedactionTest(unittest.TestCase):
         type vocabulary is small and fixed regardless of match count."""
         text = " ".join([AWS_KEY] * (ss.MAX_MATCHES + 20))
         _clean, findings = ss.redact(text, pii_types=())
-        self.assertEqual(
-            findings, [{"type": "aws_key", "count": ss.MAX_MATCHES + 20, "first_offset": 0}]
-        )
+        self.assertEqual(findings, [{"type": "aws_key", "count": ss.MAX_MATCHES + 20, "first_offset": 0}])
 
     def test_redact_mode_leaves_nothing_past_the_old_cap(self):
         """SEC-004 minimal-evidence reproduction: 101 distinct dummy
@@ -176,8 +179,7 @@ class SecretRedactionTest(unittest.TestCase):
 
 class AuditRowParsingTest(unittest.TestCase):
     def test_parse_valid_bare_array(self):
-        recs = [{"service": "api", "ts": "t1", "body": "x"},
-                {"service": "web", "ts": "t2", "body": "y"}]
+        recs = [{"service": "api", "ts": "t1", "body": "x"}, {"service": "web", "ts": "t2", "body": "y"}]
         result = ss._parse_audit_rows(json.dumps(recs))
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0]["service"], "api")
@@ -189,8 +191,7 @@ class AuditRowParsingTest(unittest.TestCase):
             self.assertEqual(len(result), 1, f"wrapper key={key}")
 
     def test_parse_valid_jsonl(self):
-        recs = [{"service": "api", "ts": "t1", "body": "x"},
-                {"service": "web", "ts": "t2", "body": "y"}]
+        recs = [{"service": "api", "ts": "t1", "body": "x"}, {"service": "web", "ts": "t2", "body": "y"}]
         result = ss._parse_audit_rows("\n".join(json.dumps(r) for r in recs))
         self.assertEqual(len(result), 2)
 
@@ -205,14 +206,18 @@ class AuditRowParsingTest(unittest.TestCase):
 
     def test_parse_valid_tables_shape(self):
         doc = {
-            "Tables": [{
-                "schema": {"columns": [
-                    {"name": "service", "type": 5, "nullable": True},
-                    {"name": "ts", "type": 6, "nullable": True},
-                    {"name": "body", "type": 5, "nullable": True},
-                ]},
-                "rows": [["api", "2026-07-18T00:00:00Z", f"key {AWS_KEY}"]],
-            }],
+            "Tables": [
+                {
+                    "schema": {
+                        "columns": [
+                            {"name": "service", "type": 5, "nullable": True},
+                            {"name": "ts", "type": 6, "nullable": True},
+                            {"name": "body", "type": 5, "nullable": True},
+                        ]
+                    },
+                    "rows": [["api", "2026-07-18T00:00:00Z", f"key {AWS_KEY}"]],
+                }
+            ],
             "stats": {"rows_processed": 1},
         }
         rows = ss._parse_audit_rows(json.dumps(doc))
@@ -221,9 +226,20 @@ class AuditRowParsingTest(unittest.TestCase):
         self.assertIn(AWS_KEY, rows[0]["body"])
 
     def test_parse_valid_tables_zero_rows(self):
-        doc = {"Tables": [{"schema": {"columns": [
-            {"name": "service"}, {"name": "ts"}, {"name": "body"},
-        ]}, "rows": []}]}
+        doc = {
+            "Tables": [
+                {
+                    "schema": {
+                        "columns": [
+                            {"name": "service"},
+                            {"name": "ts"},
+                            {"name": "body"},
+                        ]
+                    },
+                    "rows": [],
+                }
+            ]
+        }
         self.assertEqual(ss._parse_audit_rows(json.dumps(doc)), [])
 
     def test_truncated_whole_json_raises(self):
@@ -242,23 +258,56 @@ class AuditRowParsingTest(unittest.TestCase):
             ss._parse_audit_rows(good + "\nnot json at all")
 
     def test_tables_row_shorter_than_columns_raises(self):
-        doc = {"Tables": [{"schema": {"columns": [
-            {"name": "service"}, {"name": "ts"}, {"name": "body"},
-        ]}, "rows": [["api", "t1"]]}]}
+        doc = {
+            "Tables": [
+                {
+                    "schema": {
+                        "columns": [
+                            {"name": "service"},
+                            {"name": "ts"},
+                            {"name": "body"},
+                        ]
+                    },
+                    "rows": [["api", "t1"]],
+                }
+            ]
+        }
         with self.assertRaises(ss.AuditParseError):
             ss._parse_audit_rows(json.dumps(doc))
 
     def test_tables_row_longer_than_columns_raises(self):
-        doc = {"Tables": [{"schema": {"columns": [
-            {"name": "service"}, {"name": "ts"}, {"name": "body"},
-        ]}, "rows": [["api", "t1", "x", "extra"]]}]}
+        doc = {
+            "Tables": [
+                {
+                    "schema": {
+                        "columns": [
+                            {"name": "service"},
+                            {"name": "ts"},
+                            {"name": "body"},
+                        ]
+                    },
+                    "rows": [["api", "t1", "x", "extra"]],
+                }
+            ]
+        }
         with self.assertRaises(ss.AuditParseError):
             ss._parse_audit_rows(json.dumps(doc))
 
     def test_tables_row_is_scalar_raises(self):
-        doc = {"Tables": [{"schema": {"columns": [
-            {"name": "service"}, {"name": "ts"}, {"name": "body"},
-        ]}, "rows": ["scalar_row"]}]}
+        doc = {
+            "Tables": [
+                {
+                    "schema": {
+                        "columns": [
+                            {"name": "service"},
+                            {"name": "ts"},
+                            {"name": "body"},
+                        ]
+                    },
+                    "rows": ["scalar_row"],
+                }
+            ]
+        }
         with self.assertRaises(ss.AuditParseError):
             ss._parse_audit_rows(json.dumps(doc))
 
@@ -277,9 +326,7 @@ class AuditRowParsingTest(unittest.TestCase):
 
     def test_tables_malformed_schema_raises(self):
         with self.assertRaises(ss.AuditParseError):
-            ss._parse_audit_rows(json.dumps(
-                {"Tables": [{"schema": {}, "rows": "not-a-list"}]}
-            ))
+            ss._parse_audit_rows(json.dumps({"Tables": [{"schema": {}, "rows": "not-a-list"}]}))
 
     def test_jsonl_row_missing_required_field_raises(self):
         with self.assertRaises(ss.AuditParseError):
@@ -293,36 +340,40 @@ class AuditRowParsingTest(unittest.TestCase):
         """FVR-001: a valid-empty first Tables entry must not hide a
         secret-bearing second entry. The parser must reject or aggregate;
         it must never process only tables[0]."""
-        response = json.dumps({
-            "Tables": [
-                {
-                    "schema": {"columns": [{"name": "service"}, {"name": "ts"}, {"name": "body"}]},
-                    "rows": [],
-                },
-                {
-                    "schema": {"columns": [{"name": "service"}, {"name": "ts"}, {"name": "body"}]},
-                    "rows": [["svcX", "2026-07-19T00:00:00Z", "password=hunter2"]],
-                },
-            ]
-        })
+        response = json.dumps(
+            {
+                "Tables": [
+                    {
+                        "schema": {"columns": [{"name": "service"}, {"name": "ts"}, {"name": "body"}]},
+                        "rows": [],
+                    },
+                    {
+                        "schema": {"columns": [{"name": "service"}, {"name": "ts"}, {"name": "body"}]},
+                        "rows": [["svcX", "2026-07-19T00:00:00Z", "password=hunter2"]],
+                    },
+                ]
+            }
+        )
         with self.assertRaises(ss.AuditParseError):
             ss._parse_audit_rows(response)
 
     def test_scan_secrets_multi_table_returns_error_not_clean(self):
         """FVR-001 (end-to-end): scan_secrets must never report clean when the
         response has multiple tables and the second one contains a secret."""
-        response = json.dumps({
-            "Tables": [
-                {
-                    "schema": {"columns": [{"name": "service"}, {"name": "ts"}, {"name": "body"}]},
-                    "rows": [],
-                },
-                {
-                    "schema": {"columns": [{"name": "service"}, {"name": "ts"}, {"name": "body"}]},
-                    "rows": [["svcX", "2026-07-19T00:00:00Z", "password=hunter2 AKIAIOSFODNN7EXAMPLE"]],
-                },
-            ]
-        })
+        response = json.dumps(
+            {
+                "Tables": [
+                    {
+                        "schema": {"columns": [{"name": "service"}, {"name": "ts"}, {"name": "body"}]},
+                        "rows": [],
+                    },
+                    {
+                        "schema": {"columns": [{"name": "service"}, {"name": "ts"}, {"name": "body"}]},
+                        "rows": [["svcX", "2026-07-19T00:00:00Z", "password=hunter2 AKIAIOSFODNN7EXAMPLE"]],
+                    },
+                ]
+            }
+        )
         orig = ss._bzrk_search
         try:
             ss._bzrk_search = lambda q, since: (response, False)
@@ -343,7 +394,8 @@ class OutputFilterTest(unittest.TestCase):
         self.orig_entropy = bm.REDACT_ENTROPY
         self.orig_pii = bm.REDACT_PII_TYPES
         bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: (
-            f"service body password=hunter2 {AWS_KEY}", False,
+            f"service body password=hunter2 {AWS_KEY}",
+            False,
         )
         bm.REDACT_ENTROPY = False
         bm.REDACT_PII_TYPES = frozenset()
@@ -355,10 +407,14 @@ class OutputFilterTest(unittest.TestCase):
         bm.REDACT_PII_TYPES = self.orig_pii
 
     def _call(self):
-        return bm.dispatch({
-            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "list_services", "arguments": {}},
-        })["result"]["content"][0]["text"]
+        return bm.dispatch(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "list_services", "arguments": {}},
+            }
+        )["result"]["content"][0]["text"]
 
     def test_flag_mode_warns_and_preserves_output(self):
         bm.REDACT_MODE = "flag"
@@ -390,11 +446,13 @@ class SecretAuditMcpTest(unittest.TestCase):
 
         def fake_run(args, timeout=bm.DEFAULT_TIMEOUT):
             self.calls.append(list(args))
-            return jsonl([
-                {"service": "api", "ts": "2026-07-12T10:00:00Z", "body": f"key {AWS_KEY}"},
-                {"service": "api", "ts": "2026-07-12T09:00:00Z", "body": "password=hunter2"},
-                {"service": "worker", "ts": "2026-07-12T11:00:00Z", "body": SK_KEY},
-            ]), False
+            return jsonl(
+                [
+                    {"service": "api", "ts": "2026-07-12T10:00:00Z", "body": f"key {AWS_KEY}"},
+                    {"service": "api", "ts": "2026-07-12T09:00:00Z", "body": "password=hunter2"},
+                    {"service": "worker", "ts": "2026-07-12T11:00:00Z", "body": SK_KEY},
+                ]
+            ), False
 
         bm.run_bzrk = fake_run
 
@@ -423,7 +481,8 @@ class SecretAuditMcpTest(unittest.TestCase):
             f"4111111111111111 {AWS_KEY} private incident description"
         )
         bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: (
-            json.dumps({"unexpected_shape": sensitive}), False,
+            json.dumps({"unexpected_shape": sensitive}),
+            False,
         )
         text, err = bm.handle_call("scan_secrets", {})
         self.assertTrue(err)
@@ -442,7 +501,8 @@ class SecretAuditMcpTest(unittest.TestCase):
         good = json.dumps({"service": "a", "ts": "t", "body": "clean"})
         bad = '{"service": "b", "ts": "t2", "body": "password=topsecret'
         bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: (
-            good + "\n" + bad, False,
+            good + "\n" + bad,
+            False,
         )
         text, err = bm.handle_call("scan_secrets", {})
         self.assertTrue(err)
@@ -457,8 +517,9 @@ class SecretAuditMcpTest(unittest.TestCase):
         # in redact mode its counts were corrupted). Run through dispatch with
         # the real default mode and assert the report passes clean.
         bm.REDACT_MODE = "flag"
-        resp = bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                            "params": {"name": "scan_secrets", "arguments": {}}})
+        resp = bm.dispatch(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "scan_secrets", "arguments": {}}}
+        )
         out = resp["result"]["content"][0]["text"]
         self.assertNotIn("potential secrets detected in this result", out)  # the filter banner
         self.assertTrue(out.startswith("Secret scan:"))

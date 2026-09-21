@@ -43,7 +43,8 @@ def _read_state(state_path):
 
 def _write_state(state_path, lines_forwarded):
     tmp_fd, tmp_path = tempfile.mkstemp(
-        dir=os.path.dirname(os.path.abspath(state_path)) or ".", prefix=".ortmp-",
+        dir=os.path.dirname(os.path.abspath(state_path)) or ".",
+        prefix=".ortmp-",
     )
     try:
         with os.fdopen(tmp_fd, "w") as f:
@@ -81,8 +82,9 @@ def iter_raw_lines(raw_path, start_line):
                 yield i, None
 
 
-def run_backfill(raw_path, state_path, endpoint, batch_size=25, dry_run=False,
-                  post_fn=post_to_berserk, redact=default_redact):
+def run_backfill(
+    raw_path, state_path, endpoint, batch_size=25, dry_run=False, post_fn=post_to_berserk, redact=default_redact
+):
     start_line = _read_state(state_path)
     print(f"resuming from line {start_line} (0 = start of file)")
 
@@ -161,8 +163,11 @@ def main(argv=None):
         return 1
 
     ok = run_backfill(
-        args.raw_file, args.state_file, args.berserk_endpoint,
-        batch_size=args.batch_size, dry_run=args.dry_run,
+        args.raw_file,
+        args.state_file,
+        args.berserk_endpoint,
+        batch_size=args.batch_size,
+        dry_run=args.dry_run,
     )
     return 0 if ok else 1
 

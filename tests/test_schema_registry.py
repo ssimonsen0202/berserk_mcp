@@ -44,7 +44,9 @@ class SchemaRegistryTest(unittest.TestCase):
 
     def test_stable_hash_ordering_and_changes(self):
         a = sr.normalize_snapshot(table="default", getschema_text=GETSCHEMA, sample_text=SAMPLE)
-        b = sr.normalize_snapshot(table="default", getschema_text="\n".join(reversed(GETSCHEMA.splitlines())), sample_text=SAMPLE)
+        b = sr.normalize_snapshot(
+            table="default", getschema_text="\n".join(reversed(GETSCHEMA.splitlines())), sample_text=SAMPLE
+        )
         self.assertEqual(sr.schema_hash(a), sr.schema_hash(b))
         c = sr.normalize_snapshot(table="default", getschema_text=GETSCHEMA + "\nnew_col string\n", sample_text=SAMPLE)
         self.assertNotEqual(sr.schema_hash(a), sr.schema_hash(c))
@@ -72,10 +74,14 @@ class SchemaRegistryTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             snap = sr.get_schema_snapshot(table="default", config_dir=d, fetcher=lambda: {"getschema": GETSCHEMA})
             self.assertEqual(snap["source_status"], "fresh")
-            stale = sr.get_schema_snapshot(force=True, table="default", config_dir=d, fetcher=lambda: (_ for _ in ()).throw(RuntimeError("x")))
+            stale = sr.get_schema_snapshot(
+                force=True, table="default", config_dir=d, fetcher=lambda: (_ for _ in ()).throw(RuntimeError("x"))
+            )
             self.assertEqual(stale["source_status"], "stale")
         with tempfile.TemporaryDirectory() as d:
-            unavailable = sr.get_schema_snapshot(table="default", config_dir=d, fetcher=lambda: (_ for _ in ()).throw(RuntimeError("x")))
+            unavailable = sr.get_schema_snapshot(
+                table="default", config_dir=d, fetcher=lambda: (_ for _ in ()).throw(RuntimeError("x"))
+            )
             self.assertEqual(unavailable["source_status"], "unavailable")
 
     def test_suggestions_and_no_secret_context(self):

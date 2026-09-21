@@ -5,6 +5,7 @@ KQL parser; it tokenizes enough structure to catch control commands, malformed
 pipelines, unbounded results, expensive operators, broad raw scans, and schema
 misses before a user-originated query reaches ``bzrk``.
 """
+
 import json
 import re
 
@@ -131,22 +132,73 @@ def _in_clause_hides_tabular_subquery(stripped, max_matches=64):
                 return True
             i += 1
     return False
-_RAW_SCAN_RE = re.compile(r"\b(body|\$raw)\b[^|]{0,80}\b(contains|has_any|matches\s+regex)\b|\b(contains|has_any|matches\s+regex)\b[^|]{0,80}\b(body|\$raw)\b", re.IGNORECASE)
+
+
+_RAW_SCAN_RE = re.compile(
+    r"\b(body|\$raw)\b[^|]{0,80}\b(contains|has_any|matches\s+regex)\b|\b(contains|has_any|matches\s+regex)\b[^|]{0,80}\b(body|\$raw)\b",
+    re.IGNORECASE,
+)
 _FIELD_REF_RE = re.compile(
     r"(resource|attributes)\s*\[\s*['\"]([^'\"]+)['\"]\s*\]|"
     r"\b([A-Za-z_][A-Za-z0-9_]*)\b"
 )
 _FUNCTION_NAMES = {
-    "avg", "count", "countif", "datetime", "extract_log_template", "iff", "isempty",
-    "isnotempty", "isnotnull", "isnull", "max", "min", "not", "now", "strcat",
-    "substring", "sum", "todynamic", "toint", "tolong", "toreal", "tostring",
-    "series_decompose_anomalies", "series_fit_line", "otel_histogram_percentile",
+    "avg",
+    "count",
+    "countif",
+    "datetime",
+    "extract_log_template",
+    "iff",
+    "isempty",
+    "isnotempty",
+    "isnotnull",
+    "isnull",
+    "max",
+    "min",
+    "not",
+    "now",
+    "strcat",
+    "substring",
+    "sum",
+    "todynamic",
+    "toint",
+    "tolong",
+    "toreal",
+    "tostring",
+    "series_decompose_anomalies",
+    "series_fit_line",
+    "otel_histogram_percentile",
 }
 _KQL_WORDS = {
-    "and", "asc", "by", "contains", "default", "desc", "extend", "false",
-    "fieldstats", "has", "in", "limit", "make", "make-series", "on", "or",
-    "order", "project", "project-away", "project-keep", "regex", "sort",
-    "summarize", "tail", "take", "top", "true", "where", "with",
+    "and",
+    "asc",
+    "by",
+    "contains",
+    "default",
+    "desc",
+    "extend",
+    "false",
+    "fieldstats",
+    "has",
+    "in",
+    "limit",
+    "make",
+    "make-series",
+    "on",
+    "or",
+    "order",
+    "project",
+    "project-away",
+    "project-keep",
+    "regex",
+    "sort",
+    "summarize",
+    "tail",
+    "take",
+    "top",
+    "true",
+    "where",
+    "with",
 }
 
 
@@ -245,8 +297,9 @@ def _extract_referenced_fields(kql):
     return refs
 
 
-def validate_kql_static(kql, *, table, since, schema_fields=None, max_chars=50000,
-                        max_rows=2000, suggest=None, schema_info=None):
+def validate_kql_static(
+    kql, *, table, since, schema_fields=None, max_chars=50000, max_rows=2000, suggest=None, schema_info=None
+):
     """Return a deterministic validation report; never runs a subprocess."""
     findings = []
     recommendations = []
@@ -264,47 +317,64 @@ def validate_kql_static(kql, *, table, since, schema_fields=None, max_chars=5000
         if len(query) > max_chars:
             findings.append(_finding("QUERY_TOO_LONG", "error", f"Query exceeds {max_chars} characters."))
             return {
-                "valid": False, "risk": "high", "score": 100,
-                "findings": findings, "recommendations": [],
-                "query_shape": {}, "schema": schema_info,
-                "runtime": None, "validation_version": VALIDATION_VERSION,
+                "valid": False,
+                "risk": "high",
+                "score": 100,
+                "findings": findings,
+                "recommendations": [],
+                "query_shape": {},
+                "schema": schema_info,
+                "runtime": None,
+                "validation_version": VALIDATION_VERSION,
             }
         if not _SINCE_RE.match(since.strip()) or len(since) > 32:
             findings.append(_finding("INVALID_SINCE", "error", f"Invalid since window: {since!r}."))
         if _CONTROL_RE.match(query):
             findings.append(_finding("CONTROL_COMMAND", "error", "Control commands are not allowed for user KQL."))
         if ";" in query:
-            findings.append(_finding(
-                "MULTI_STATEMENT_USER_QUERY", "error",
-                "Semicolons are not allowed in user KQL, including string literals.",
-            ))
+            findings.append(
+                _finding(
+                    "MULTI_STATEMENT_USER_QUERY",
+                    "error",
+                    "Semicolons are not allowed in user KQL, including string literals.",
+                )
+            )
 
         parts = _split_pipeline(query)
         if not parts or parts[0] != table or len(parts) < 2:
-            findings.append(_finding(
-                "WRONG_TABLE", "error",
-                f"Query must begin with '{table} | ...'.",
-                recommendation=f"Start with: {table} | where ... | take 50",
-            ))
+            findings.append(
+                _finding(
+                    "WRONG_TABLE",
+                    "error",
+                    f"Query must begin with '{table} | ...'.",
+                    recommendation=f"Start with: {table} | where ... | take 50",
+                )
+            )
         stripped = _strip_strings(query)
         if _UNSAFE_RE.search(stripped):
             findings.append(_finding("UNSAFE_OPERATOR", "error", "Mutation-like or unsafe syntax is present."))
         source_operator = _SOURCE_INTRODUCING_RE.search(stripped)
         if source_operator:
             operator = next((part for part in source_operator.groups() if part), "externaldata")
-            findings.append(_finding(
-                "SOURCE_INTRODUCING_OPERATOR", "error",
-                f"Source-introducing operator {operator!r} is not allowed in user KQL.",
-                "pipeline",
-                "Query only the configured Berserk table through its existing pipeline.",
-            ))
+            findings.append(
+                _finding(
+                    "SOURCE_INTRODUCING_OPERATOR",
+                    "error",
+                    f"Source-introducing operator {operator!r} is not allowed in user KQL.",
+                    "pipeline",
+                    "Query only the configured Berserk table through its existing pipeline.",
+                )
+            )
         elif _in_clause_hides_tabular_subquery(stripped):
-            findings.append(_finding(
-                "SOURCE_INTRODUCING_OPERATOR", "error",
-                "Source-introducing operator 'in' is not allowed in user KQL.",
-                "pipeline",
-                "Query only the configured Berserk table through its existing pipeline.",
-            ))
+            findings.append(
+                _finding(
+                    "SOURCE_INTRODUCING_OPERATOR",
+                    "error",
+                    "Source-introducing operator 'in' is not allowed in user KQL.",
+                    "pipeline",
+                    "Query only the configured Berserk table through its existing pipeline.",
+                )
+            )
 
         bounds = []
         for m in _BOUND_RE.finditer(stripped):
@@ -314,70 +384,98 @@ def validate_kql_static(kql, *, table, since, schema_fields=None, max_chars=5000
         has_count = bool(_COUNT_RE.search(stripped))
         has_bound = bool(bounds) or has_count
         if not has_bound and query.strip():
-            findings.append(_finding(
-                "UNBOUNDED_RESULT", "warning",
-                "Query has no explicit terminal result bound.",
-                "pipeline",
-                "End with take, top, tail, count, or a bounded summarize.",
-            ))
+            findings.append(
+                _finding(
+                    "UNBOUNDED_RESULT",
+                    "warning",
+                    "Query has no explicit terminal result bound.",
+                    "pipeline",
+                    "End with take, top, tail, count, or a bounded summarize.",
+                )
+            )
         for n in bounds:
             if n > max_rows:
-                findings.append(_finding(
-                    "RESULT_BOUND_TOO_LARGE", "warning",
-                    f"Explicit result bound {n} exceeds max_rows={max_rows}.",
-                    "pipeline",
-                    f"Use {max_rows} rows or fewer for arbitrary queries.",
-                ))
+                findings.append(
+                    _finding(
+                        "RESULT_BOUND_TOO_LARGE",
+                        "warning",
+                        f"Explicit result bound {n} exceeds max_rows={max_rows}.",
+                        "pipeline",
+                        f"Use {max_rows} rows or fewer for arbitrary queries.",
+                    )
+                )
 
         expensive_names = []
         for rx, label in _EXPENSIVE_PATTERNS:
             if rx.search(stripped):
                 expensive_names.append(label)
         if expensive_names:
-            findings.append(_finding(
-                "EXPENSIVE_OPERATOR", "warning",
-                "Potentially expensive operator(s): " + ", ".join(sorted(set(expensive_names))) + ".",
-                "pipeline",
-                "Filter early and bound the result before using expensive operators.",
-            ))
+            findings.append(
+                _finding(
+                    "EXPENSIVE_OPERATOR",
+                    "warning",
+                    "Potentially expensive operator(s): " + ", ".join(sorted(set(expensive_names))) + ".",
+                    "pipeline",
+                    "Filter early and bound the result before using expensive operators.",
+                )
+            )
 
         has_selective = bool(_SELECTIVE_RE.search(stripped))
         stages = [p.lower() for p in parts[1:]]
         first_where = next((i for i, p in enumerate(stages) if p.startswith("where ")), None)
         first_sort = next((i for i, p in enumerate(stages) if re.match(r"sort\s|order\s", p)), None)
         if first_sort is not None and (first_where is None or first_sort < first_where):
-            findings.append(_finding("SORT_BEFORE_FILTER", "warning", "Sort occurs before a selective filter.", "pipeline"))
+            findings.append(
+                _finding("SORT_BEFORE_FILTER", "warning", "Sort occurs before a selective filter.", "pipeline")
+            )
         if first_sort is not None:
-            after_sort = " | ".join(stages[first_sort + 1:])
+            after_sort = " | ".join(stages[first_sort + 1 :])
             if not _BOUND_RE.search(after_sort):
-                findings.append(_finding("SORT_WITHOUT_BOUND", "warning", "Sort is not followed by a small take/top bound.", "pipeline"))
+                findings.append(
+                    _finding(
+                        "SORT_WITHOUT_BOUND", "warning", "Sort is not followed by a small take/top bound.", "pipeline"
+                    )
+                )
         if not has_selective and (expensive_names or len(parts) <= 2 or "summarize" in stripped.lower()):
-            findings.append(_finding(
-                "MISSING_SELECTIVE_FILTER", "warning",
-                "Broad query has no early selective predicate.",
-                "pipeline",
-                "Filter by metric_name, service, host, severity, trace, or another selective field before aggregation.",
-            ))
+            findings.append(
+                _finding(
+                    "MISSING_SELECTIVE_FILTER",
+                    "warning",
+                    "Broad query has no early selective predicate.",
+                    "pipeline",
+                    "Filter by metric_name, service, host, severity, trace, or another selective field before aggregation.",
+                )
+            )
         if _RAW_SCAN_RE.search(stripped):
-            findings.append(_finding(
-                "RAW_CONTAINS_SCAN", "warning",
-                "Broad text search scans raw body or $raw.",
-                "pipeline",
-                "Add a selective predicate and narrow time window before raw text search.",
-            ))
+            findings.append(
+                _finding(
+                    "RAW_CONTAINS_SCAN",
+                    "warning",
+                    "Broad text search scans raw body or $raw.",
+                    "pipeline",
+                    "Add a selective predicate and narrow time window before raw text search.",
+                )
+            )
         if re.search(r"\bproject\b[^|]*(\bbody\b|\bresource\b|\battributes\b|\$raw)", stripped, re.IGNORECASE):
-            findings.append(_finding(
-                "WIDE_PROJECTION", "warning",
-                "Projection includes raw body/resource/attributes/$raw.",
-                "pipeline",
-                "Project specific bounded fields or substring raw text.",
-            ))
+            findings.append(
+                _finding(
+                    "WIDE_PROJECTION",
+                    "warning",
+                    "Projection includes raw body/resource/attributes/$raw.",
+                    "pipeline",
+                    "Project specific bounded fields or substring raw text.",
+                )
+            )
         if re.search(r"\bsummarize\b[^|]*\bby\b[^|]*(body|resource|attributes|\$raw)", stripped, re.IGNORECASE):
-            findings.append(_finding("HIGH_CARDINALITY_GROUP", "warning", "Grouping uses a high-cardinality/raw field.", "pipeline"))
+            findings.append(
+                _finding("HIGH_CARDINALITY_GROUP", "warning", "Grouping uses a high-cardinality/raw field.", "pipeline")
+            )
         if re.search(r"make-series", stripped, re.IGNORECASE):
             dims = re.search(r"\bby\b([^|]+)", stripped, re.IGNORECASE)
             if dims and dims.group(1).count(",") >= 2:
-                findings.append(_finding("SERIES_TOO_WIDE", "warning", "make-series groups by too many dimensions.", "pipeline"))
+                findings.append(
+                    _finding("SERIES_TOO_WIDE", "warning", "make-series groups by too many dimensions.", "pipeline")
+                )
 
         known = _normalize_schema_fields(schema_fields)
         unknown = []
@@ -398,10 +496,15 @@ def validate_kql_static(kql, *, table, since, schema_fields=None, max_chars=5000
             msg = f"Unknown field {ref!r}."
             if suggestions:
                 msg += " Did you mean " + suggestions[0] + "?"
-            findings.append(_finding(
-                "UNKNOWN_FIELD", "warning", msg, "schema",
-                "Use discover_schema or a listed resource/attribute field.",
-            ))
+            findings.append(
+                _finding(
+                    "UNKNOWN_FIELD",
+                    "warning",
+                    msg,
+                    "schema",
+                    "Use discover_schema or a listed resource/attribute field.",
+                )
+            )
 
         for f in findings:
             if f["severity"] == "error":
@@ -422,7 +525,9 @@ def validate_kql_static(kql, *, table, since, schema_fields=None, max_chars=5000
             score += SCORE_WEIGHTS["early_predicate"]
         if bounds and max(bounds) <= min(max_rows, 100):
             score += SCORE_WEIGHTS["small_bound"]
-        if _PROJECT_RE.search(stripped) and not re.search(r"\b(body|resource|attributes|\$raw)\b", stripped, re.IGNORECASE):
+        if _PROJECT_RE.search(stripped) and not re.search(
+            r"\b(body|resource|attributes|\$raw)\b", stripped, re.IGNORECASE
+        ):
             score += SCORE_WEIGHTS["narrow_projection"]
         score = max(0, min(100, score))
 
@@ -494,12 +599,24 @@ def parse_cli_stats(text):
                     except (TypeError, ValueError):
                         result[out_key] = None
                     break
-        result["engine_stats"] = {k: v for k, v in stats.items() if k not in {
-            "rows_returned", "rowsReturned", "result_rows", "rows_processed",
-            "rowsProcessed", "input_rows", "bytes_scanned", "bytesScanned",
-        }}
-        result["stats_available"] = any(result[k] is not None for k in (
-            "rows_returned", "rows_processed", "bytes_scanned"))
+        result["engine_stats"] = {
+            k: v
+            for k, v in stats.items()
+            if k
+            not in {
+                "rows_returned",
+                "rowsReturned",
+                "result_rows",
+                "rows_processed",
+                "rowsProcessed",
+                "input_rows",
+                "bytes_scanned",
+                "bytesScanned",
+            }
+        }
+        result["stats_available"] = any(
+            result[k] is not None for k in ("rows_returned", "rows_processed", "bytes_scanned")
+        )
         return result
     pairs = re.findall(r"(?i)\b(rows returned|rows processed|bytes scanned)\b\s*[:=]\s*([0-9]+)", raw)
     for key, val in pairs:

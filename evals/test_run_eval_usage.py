@@ -4,6 +4,7 @@ pure per-call and aggregate logic gets unit tests, matching this repo's
 existing convention (test_ci_gate.py) of not unit-testing the
 subprocess/network glue -- that's covered by mcp_protocol_smoke.py-style
 integration checks instead."""
+
 import sys
 import unittest
 from pathlib import Path
@@ -48,10 +49,12 @@ class UsageFieldsTest(unittest.TestCase):
         self.assertEqual(f["cost_usd"], 0.00056052)
 
     def test_cached_tokens_extracted_from_nested_prompt_tokens_details(self):
-        f = run_eval.usage_fields({
-            "prompt_tokens": 27327,
-            "prompt_tokens_details": {"cached_tokens": 27296},
-        })
+        f = run_eval.usage_fields(
+            {
+                "prompt_tokens": 27327,
+                "prompt_tokens_details": {"cached_tokens": 27296},
+            }
+        )
         self.assertEqual(f["cached_tokens"], 27296)
 
     def test_missing_prompt_tokens_details_does_not_crash(self):

@@ -1,4 +1,5 @@
 """Data-driven ingestion recommendations and live gap analysis."""
+
 import json
 import os
 from pathlib import Path
@@ -134,10 +135,7 @@ def suggest_ingestion(role_or_usecase, check_gap=False, since="24h ago"):
     # so the gap summary and any inventory warning land predictably.
     header = [f"Ingestion recommendations for {key}:"]
     if check_gap:
-        header.append(
-            f"Gap summary: {present_count} present, "
-            f"{len(catalog[key]) - present_count} missing."
-        )
+        header.append(f"Gap summary: {present_count} present, {len(catalog[key]) - present_count} missing.")
     if inventory_warning:
         header.append(inventory_warning)
     return "\n".join(header + body), False

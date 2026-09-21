@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Offline worker-start collision simulator for fleet-jitter tuning."""
+
 import argparse
 import json
 import random
@@ -22,8 +23,10 @@ def peak_for_offsets(offsets, bucket_seconds=10.0):
 
 def simulate(workers, jitter, trials=1000, seed=20260723, bucket_seconds=10.0):
     rng = random.Random(seed)
-    peaks = [peak_for_offsets([rng.uniform(0, jitter) for _ in range(workers)], bucket_seconds)
-             if jitter > 0 else workers for _ in range(trials)]
+    peaks = [
+        peak_for_offsets([rng.uniform(0, jitter) for _ in range(workers)], bucket_seconds) if jitter > 0 else workers
+        for _ in range(trials)
+    ]
     return {
         "workers": workers,
         "jitter_seconds": jitter,
@@ -35,13 +38,14 @@ def simulate(workers, jitter, trials=1000, seed=20260723, bucket_seconds=10.0):
 
 
 def run_sweep(workers=(10, 100, 500), jitters=(0, 60, 300, 600, 1800, 3600, 7200), trials=1000, seed=20260723):
-    rows = [simulate(f, j, trials=trials, seed=seed + f + int(j))
-            for f in workers for j in jitters]
-    candidates = [r["jitter_seconds"] for r in rows
-                  if r["workers"] == 100 and r["probability_peak_over_3"] < 0.05]
+    rows = [simulate(f, j, trials=trials, seed=seed + f + int(j)) for f in workers for j in jitters]
+    candidates = [r["jitter_seconds"] for r in rows if r["workers"] == 100 and r["probability_peak_over_3"] < 0.05]
     recommendation = min(candidates) if candidates else max(jitters)
-    return {"rows": rows, "recommendation_seconds": recommendation,
-            "rule": "smallest J with P(peak > 3 in 10s) < 5% at F=100"}
+    return {
+        "rows": rows,
+        "recommendation_seconds": recommendation,
+        "rule": "smallest J with P(peak > 3 in 10s) < 5% at F=100",
+    }
 
 
 def main():

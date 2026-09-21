@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Replay identical-failure retries to tune timeout cooldown."""
+
 import argparse
 import json
 from pathlib import Path
@@ -22,9 +23,12 @@ def replay(trace, cooldown):
             legitimate_delay += 1
         if failed:
             last_failure[key] = now
-    return {"cooldown": cooldown, "calls": len(trace),
-            "storm_calls_absorbed": absorbed,
-            "legitimate_retry_delay": legitimate_delay}
+    return {
+        "cooldown": cooldown,
+        "calls": len(trace),
+        "storm_calls_absorbed": absorbed,
+        "legitimate_retry_delay": legitimate_delay,
+    }
 
 
 def synthetic_trace(seed=20260723, retries=5):
@@ -37,11 +41,14 @@ def synthetic_trace(seed=20260723, retries=5):
 
 def run(trace):
     rows = [replay(trace, cooldown) for cooldown in (0, 10, 30, 60, 120)]
-    target = .9 * max((r["storm_calls_absorbed"] for r in rows), default=0)
+    target = 0.9 * max((r["storm_calls_absorbed"] for r in rows), default=0)
     acceptable = [r["cooldown"] for r in rows if r["storm_calls_absorbed"] >= target]
     recommendation = min(acceptable) if acceptable else 0
-    return {"rows": rows, "recommendation_seconds": recommendation,
-            "rule": "smallest cooldown absorbing >=90% of identical-retry storm calls"}
+    return {
+        "rows": rows,
+        "recommendation_seconds": recommendation,
+        "rule": "smallest cooldown absorbing >=90% of identical-retry storm calls",
+    }
 
 
 def main():

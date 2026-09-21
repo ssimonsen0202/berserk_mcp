@@ -8,6 +8,7 @@ cycles (same convention as agent_analytics.py and parser_factory.py).
 
 Design: docs/investigation-decision-tree-implementation-spec.md
 """
+
 import json
 
 import agent_analytics
@@ -114,10 +115,10 @@ def _node_start(since):
     rows, err = _run_json(_q_errors, since)
     if err is not None:
         return (
-            f"Checked: errors_by_service (since={since}) — FAILED\n"
-            f"Error: {err}\n"
-            f"Investigation halted at start.",
-            True, None, None,
+            f"Checked: errors_by_service (since={since}) — FAILED\nError: {err}\nInvestigation halted at start.",
+            True,
+            None,
+            None,
         )
     if not rows:
         return (
@@ -125,7 +126,9 @@ def _node_start(since):
             f"Result: no errors\n"
             f"Investigation complete.\n"
             f"Verdict: no errors in window, nothing to investigate.",
-            False, None, None,
+            False,
+            None,
+            None,
         )
     top = max(rows, key=lambda r: _as_int(r.get("errors")))
     service = str(top.get("service") or "(unknown)")
@@ -140,23 +143,28 @@ def _node_start(since):
             f"Threshold: >{ERROR_RATE_INVESTIGATE_PER_MIN}/min to investigate\n"
             f"Investigation complete.\n"
             f"Verdict: error rate normal, no further checks.",
-            False, None, None,
+            False,
+            None,
+            None,
         )
     return (
         f"Checked: errors_by_service (since={since})\n"
         f"Result: {count} errors for service {service!r} (~{rate:.1f}/min)\n"
         f"Threshold: >{ERROR_RATE_INVESTIGATE_PER_MIN}/min investigate\n"
         f"Branch: investigate (elevated)",
-        False, "check_log_spike", service,
+        False,
+        "check_log_spike",
+        service,
     )
 
 
 def _node_check_log_spike(since, service):
     if not service:
         return (
-            "check_log_spike requires service (pass the value the start "
-            "node's response gave you).",
-            True, None, None,
+            "check_log_spike requires service (pass the value the start node's response gave you).",
+            True,
+            None,
+            None,
         )
     kql = _q_soc_log_spike(service)
     rows, err = _run_json(kql, since)
@@ -166,8 +174,10 @@ def _node_check_log_spike(since, service):
             f"Error: {err}\n"
             f"Investigation halted at check_log_spike. The error-rate "
             f"elevation from the previous step is still valid; this "
-            f"step's result is unknown, not \"no spike.\"",
-            True, None, None,
+            f'step\'s result is unknown, not "no spike."',
+            True,
+            None,
+            None,
         )
     # The query is already scoped to `service`; this lookup is defense in
     # depth (a backend that ignored the filter shouldn't silently pass).
@@ -178,7 +188,9 @@ def _node_check_log_spike(since, service):
             f"No log-volume data for service={service!r} in this window "
             f"— FAILED\n"
             f"Investigation halted at check_log_spike.",
-            True, None, None,
+            True,
+            None,
+            None,
         )
     hits = row.get("hits")
     if not isinstance(hits, list) or len(hits) < _MIN_SPIKE_BUCKETS:
@@ -187,16 +199,15 @@ def _node_check_log_spike(since, service):
             f"Result: insufficient buckets for service={service!r} to "
             f"assess a spike (need >= {_MIN_SPIKE_BUCKETS}) — FAILED\n"
             f"Investigation halted at check_log_spike.",
-            True, None, None,
+            True,
+            None,
+            None,
         )
     recent = hits[-_RECENT_BUCKET_COUNT:]
     baseline = hits[:-_RECENT_BUCKET_COUNT]
     recent_mean = sum(recent) / len(recent)
     baseline_mean = sum(baseline) / len(baseline)
-    is_spike = (
-        recent_mean > 0 if baseline_mean == 0
-        else recent_mean > baseline_mean * _SPIKE_MULTIPLIER
-    )
+    is_spike = recent_mean > 0 if baseline_mean == 0 else recent_mean > baseline_mean * _SPIKE_MULTIPLIER
     if not is_spike:
         return (
             f"Checked: soc_log_spike (since={since})\n"
@@ -206,32 +217,37 @@ def _node_check_log_spike(since, service):
             f"Investigation complete.\n"
             f"Verdict: error rate elevated for {service!r} but no "
             f"correlated log-volume spike; recommend manual review.",
-            False, None, None,
+            False,
+            None,
+            None,
         )
     return (
         f"Checked: soc_log_spike (since={since})\n"
         f"Result: service={service!r} recent volume {recent_mean:.1f}/min "
         f"vs baseline {baseline_mean:.1f}/min — spike confirmed\n"
         f"Branch: correlated spike",
-        False, "check_traces", service,
+        False,
+        "check_traces",
+        service,
     )
 
 
 def _node_check_traces(since, service):
     if not service:
         return (
-            "check_traces requires service (pass the value the previous "
-            "step's response gave you).",
-            True, None, None,
+            "check_traces requires service (pass the value the previous step's response gave you).",
+            True,
+            None,
+            None,
         )
     kql = _q_trace_find_errors(service)
     rows, err = _run_json(kql, since)
     if err is not None:
         return (
-            f"Checked: trace_find_errors (since={since}) — FAILED\n"
-            f"Error: {err}\n"
-            f"Investigation halted at check_traces.",
-            True, None, None,
+            f"Checked: trace_find_errors (since={since}) — FAILED\nError: {err}\nInvestigation halted at check_traces.",
+            True,
+            None,
+            None,
         )
     # The query is already scoped to `service`; this filter is defense in
     # depth. Dedup by trace_id -- Q_TRACE_FIND_ERRORS returns one row per
@@ -252,12 +268,11 @@ def _node_check_traces(since, service):
             f"confirmed for {service!r}, but no failing traces found — "
             f"investigate ingestion lag or a non-trace-instrumented "
             f"failure path.",
-            False, None, None,
+            False,
+            None,
+            None,
         )
-    examples = "; ".join(
-        f"{r.get('span_name')} ({r.get('trace_id')})"
-        for r in distinct_traces[:_MAX_EXAMPLE_TRACES]
-    )
+    examples = "; ".join(f"{r.get('span_name')} ({r.get('trace_id')})" for r in distinct_traces[:_MAX_EXAMPLE_TRACES])
     return (
         f"Checked: trace_find_errors (since={since})\n"
         f"Result: {len(distinct_traces)} failing traces found for "
@@ -267,7 +282,9 @@ def _node_check_traces(since, service):
         f"confirmed, {len(distinct_traces)} failing traces found for "
         f"{service!r} — root cause is likely in {service!r}'s own "
         f"request path, not a downstream dependency.",
-        False, None, None,
+        False,
+        None,
+        None,
     )
 
 
@@ -296,6 +313,8 @@ def run_error_rate_node(node, since, service):
         return _node_check_traces(since, service)
     return (
         f"Unknown node {node!r}. Call investigate_error_rate with no "
-        f"node argument (or node=\"start\") to begin a new investigation.",
-        True, None, None,
+        f'node argument (or node="start") to begin a new investigation.',
+        True,
+        None,
+        None,
     )

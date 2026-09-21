@@ -47,9 +47,9 @@ documented text fallback for older bzrk builds. All fixed below.
 import json
 import os
 
-MIN_HISTORY = 4           # runs at one case-set/role/discovery combination before any verdict
+MIN_HISTORY = 4  # runs at one case-set/role/discovery combination before any verdict
 CONSECUTIVE_REQUIRED = 2  # degraded runs in a row before firing
-MIN_TREND_R2 = 0.6        # matches berserk_mcp.py:2913's forecastability floor
+MIN_TREND_R2 = 0.6  # matches berserk_mcp.py:2913's forecastability floor
 DEFAULT_NOISE_BAND = 0.02  # measured 2026-09-01, see module docstring
 MIN_RELIABLE_REPEATS = 3  # the calibration's own repeats value, see module docstring
 
@@ -153,19 +153,19 @@ def classify(series, noise_band=DEFAULT_NOISE_BAND, fingerprint_changed=None):
     that promise holds even when no accuracy verdict fires."""
     rows = _current_environment_rows(_usable(series))
     if len(rows) < MIN_HISTORY:
-        return {"verdict": "insufficient-data",
-                "reason": "not enough runs at the current case-set version, "
-                          "role, and discovery-mode combination",
-                "confidence": "low", "fingerprint_changed": False,
-                "fingerprint_values": {}}
+        return {
+            "verdict": "insufficient-data",
+            "reason": "not enough runs at the current case-set version, role, and discovery-mode combination",
+            "confidence": "low",
+            "fingerprint_changed": False,
+            "fingerprint_values": {},
+        }
 
     baseline_rows = rows[:-CONSECUTIVE_REQUIRED]
     recent_rows = rows[-CONSECUTIVE_REQUIRED:]
     if fingerprint_changed is None:
         fingerprint_changed = _fingerprint_changed(baseline_rows, recent_rows)
-    fingerprint_values = {
-        k: sorted(v) for k, v in _fingerprint_values(recent_rows).items() if v
-    }
+    fingerprint_values = {k: sorted(v) for k, v in _fingerprint_values(recent_rows).items() if v}
 
     scores = [float(r["tool_accuracy"]) for r in baseline_rows]
     baseline = sum(scores) / len(scores)
@@ -173,10 +173,13 @@ def classify(series, noise_band=DEFAULT_NOISE_BAND, fingerprint_changed=None):
 
     degraded = [s for s in recent if baseline - s > noise_band]
     if len(degraded) < CONSECUTIVE_REQUIRED:
-        return {"verdict": "stable",
-                "reason": "no sustained drop beyond the noise band",
-                "confidence": "medium", "fingerprint_changed": fingerprint_changed,
-                "fingerprint_values": fingerprint_values}
+        return {
+            "verdict": "stable",
+            "reason": "no sustained drop beyond the noise band",
+            "confidence": "medium",
+            "fingerprint_changed": fingerprint_changed,
+            "fingerprint_values": fingerprint_values,
+        }
 
     drop = baseline - min(recent)
     sharp = drop > 2 * noise_band
@@ -196,12 +199,18 @@ def classify(series, noise_band=DEFAULT_NOISE_BAND, fingerprint_changed=None):
     if fingerprint_changed:
         reason += "; provider fingerprint also changed"
     if under_calibrated_sampling:
-        reason += (f"; repeats={min(repeats_values)} is below the noise band's "
-                   f"own calibration ({MIN_RELIABLE_REPEATS}), so this verdict "
-                   "is less reliable than the band alone suggests")
-    return {"verdict": verdict, "reason": reason, "confidence": confidence,
-            "fingerprint_changed": fingerprint_changed,
-            "fingerprint_values": fingerprint_values}
+        reason += (
+            f"; repeats={min(repeats_values)} is below the noise band's "
+            f"own calibration ({MIN_RELIABLE_REPEATS}), so this verdict "
+            "is less reliable than the band alone suggests"
+        )
+    return {
+        "verdict": verdict,
+        "reason": reason,
+        "confidence": confidence,
+        "fingerprint_changed": fingerprint_changed,
+        "fingerprint_values": fingerprint_values,
+    }
 
 
 def series_kql(model=None, since="30d ago"):
@@ -265,15 +274,13 @@ def group_by_model(bzrk_json_text):
     exception's docstring for why this must be loud, not silent. Callers
     are responsible for catching it and reporting a failure."""
     from agent_analytics import _json_records
+
     if not bzrk_json_text.strip():
         return {}
     try:
         parsed = json.loads(bzrk_json_text)
     except json.JSONDecodeError as exc:
-        raise BzrkResultParseError(
-            "bzrk output was not JSON -- an older bzrk build without "
-            "--json support?"
-        ) from exc
+        raise BzrkResultParseError("bzrk output was not JSON -- an older bzrk build without --json support?") from exc
     records = _json_records(parsed) or []
     grouped = {}
     for row in records:

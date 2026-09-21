@@ -44,8 +44,7 @@ def is_loopback_host(host):
         return False
 
 
-def validate_http_url(url, *, label="endpoint",
-                      allow_plaintext_remote=None):
+def validate_http_url(url, *, label="endpoint", allow_plaintext_remote=None):
     """Validate an absolute HTTP(S) URL and its plaintext transport policy.
 
     ``allow_plaintext_remote=None`` uses the explicit
@@ -64,9 +63,7 @@ def validate_http_url(url, *, label="endpoint",
         raise UrlPolicyError(f"{label} url is malformed: {exc}") from None
     scheme = parsed.scheme.lower()
     if scheme not in ALLOWED_SCHEMES:
-        raise UrlPolicyError(
-            f"{label} url scheme must be one of {sorted(ALLOWED_SCHEMES)}"
-        )
+        raise UrlPolicyError(f"{label} url scheme must be one of {sorted(ALLOWED_SCHEMES)}")
     if not parsed.netloc or not parsed.hostname:
         raise UrlPolicyError(f"{label} url missing host")
     if parsed.username is not None or parsed.password is not None:
@@ -75,14 +72,12 @@ def validate_http_url(url, *, label="endpoint",
         raise UrlPolicyError(f"{label} url must not contain a fragment")
     env_controlled_plaintext = allow_plaintext_remote is None
     if env_controlled_plaintext:
-        allow_plaintext_remote = (
-            os.environ.get("BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE") == "1"
-        )
+        allow_plaintext_remote = os.environ.get("BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE") == "1"
     if scheme == "http" and not is_loopback_host(parsed.hostname) and not allow_plaintext_remote:
         suffix = (
             "; use https, point at localhost/127.0.0.1, or set "
-                 "BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE=1 to explicitly allow "
-                 "it on a trusted private network"
+            "BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE=1 to explicitly allow "
+            "it on a trusted private network"
             if env_controlled_plaintext
             else "; use https or a loopback endpoint"
         )
@@ -138,12 +133,22 @@ def read_bounded_json(response, cap=MAX_RESPONSE_BYTES):
     return json.loads(read_bounded(response, cap).decode("utf-8"))
 
 
-def request_json(url, headers, payload=None, *, method="POST", timeout=120,
-                 label="endpoint", allow_plaintext_remote=None,
-                 cap=MAX_RESPONSE_BYTES):
+def request_json(
+    url,
+    headers,
+    payload=None,
+    *,
+    method="POST",
+    timeout=120,
+    label="endpoint",
+    allow_plaintext_remote=None,
+    cap=MAX_RESPONSE_BYTES,
+):
     """Issue one no-redirect JSON request and return its parsed response."""
     validate_http_url(
-        url, label=label, allow_plaintext_remote=allow_plaintext_remote,
+        url,
+        label=label,
+        allow_plaintext_remote=allow_plaintext_remote,
     )
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
@@ -177,7 +182,11 @@ def http_post_json(url, headers, payload, timeout=120):
 def http_get_json(url, headers, timeout=120):
     try:
         return request_json(
-            url, headers, None, method="GET", timeout=timeout,
+            url,
+            headers,
+            None,
+            method="GET",
+            timeout=timeout,
         ), None
     except UrlPolicyError as exc:
         return None, f"invalid endpoint: {exc}"
@@ -193,12 +202,14 @@ def http_get_json(url, headers, timeout=120):
         return None, type(exc).__name__
 
 
-def post_bytes_status(url, headers, data, *, timeout=15, label="endpoint",
-                      allow_plaintext_remote=None,
-                      cap=MAX_STATUS_RESPONSE_BYTES):
+def post_bytes_status(
+    url, headers, data, *, timeout=15, label="endpoint", allow_plaintext_remote=None, cap=MAX_STATUS_RESPONSE_BYTES
+):
     """POST bytes, reject redirects, bound the response, and return status."""
     validate_http_url(
-        url, label=label, allow_plaintext_remote=allow_plaintext_remote,
+        url,
+        label=label,
+        allow_plaintext_remote=allow_plaintext_remote,
     )
     request = urllib.request.Request(
         url,

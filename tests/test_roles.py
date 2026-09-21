@@ -40,12 +40,14 @@ class RoleExpansionTest(unittest.TestCase):
         os.environ["BERSERK_MCP_PRIMERS_DIR"] = self._tmp.name
 
         bm.ACTIVE_ROLE = role
-        bm.TOOLS.append({
-            "name": "incident_timeline",
-            "roles": [role],
-            "description": "A test-only role tool.",
-            "inputSchema": {"type": "object", "properties": {}},
-        })
+        bm.TOOLS.append(
+            {
+                "name": "incident_timeline",
+                "roles": [role],
+                "description": "A test-only role tool.",
+                "inputSchema": {"type": "object", "properties": {}},
+            }
+        )
 
         instructions = bm.build_instructions(role)
         response = bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
@@ -159,10 +161,14 @@ class ToolTierVisibilityTest(unittest.TestCase):
         # F-008's own rule: a hidden tool must not leak that it exists.
         bm.ACTIVE_ROLE = "sre"
         bm.ACTIVE_TIER_RESOLVED = bm._resolve_tier("", "sre")
-        response = bm.dispatch({
-            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "search", "arguments": {"kql": "default | take 1"}},
-        })
+        response = bm.dispatch(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "search", "arguments": {"kql": "default | take 1"}},
+            }
+        )
         content = response["result"]["content"][0]["text"]
         self.assertEqual(content, "unknown tool: search")
         self.assertTrue(response["result"].get("isError"))
@@ -175,6 +181,7 @@ class ToolTierVisibilityTest(unittest.TestCase):
         orig_learned = bm.LEARNED_PATH
         import tempfile
         from pathlib import Path as _Path
+
         tmp = tempfile.TemporaryDirectory()
         try:
             bm.LEARNED_PATH = _Path(tmp.name) / "learned.json"

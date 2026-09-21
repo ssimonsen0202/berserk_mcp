@@ -14,6 +14,7 @@ berserk_mcp.py calls `configure(...)` once at import time to hand over its
 callables (run_bzrk-backed `bzrk_search`, store helpers, TABLE, etc.) rather
 than this module importing berserk_mcp, which would create a cycle.
 """
+
 import hashlib
 import json
 import os
@@ -26,19 +27,19 @@ import _store
 LLM_TIMEOUT = int(os.environ.get("BERSERK_LLM_TIMEOUT", "120"))
 
 # ---------- configuration seam (set once by berserk_mcp.configure()) ----------
-_bzrk_search = None      # callable(kql, since) -> (text, is_error)
-_table = None            # str: configured Berserk table name
-_get_store_dir = None    # callable() -> Path: directory learned.json/etc. live in.
-                          # A callable, not a captured Path, because berserk_mcp's
-                          # test suite monkeypatches bm.LEARNED_PATH per-test to
-                          # isolate stores into a tempdir; a Path frozen at
-                          # configure()/import time would miss that and leak
-                          # writes into the real default config directory.
+_bzrk_search = None  # callable(kql, since) -> (text, is_error)
+_table = None  # str: configured Berserk table name
+_get_store_dir = None  # callable() -> Path: directory learned.json/etc. live in.
+# A callable, not a captured Path, because berserk_mcp's
+# test suite monkeypatches bm.LEARNED_PATH per-test to
+# isolate stores into a tempdir; a Path frozen at
+# configure()/import time would miss that and leak
+# writes into the real default config directory.
 _ensure_private_dir = None  # callable(path) -> None
-_now_iso = None          # callable() -> str
-_log = None              # callable(msg) -> None
+_now_iso = None  # callable() -> str
+_log = None  # callable(msg) -> None
 _persist_learned_query = None  # callable(entry, action_source) -> log_entry dict
-_sanitize_name = None    # callable(name) -> str
+_sanitize_name = None  # callable(name) -> str
 _redact = None  # mandatory callable(str) -> str; set by configure()
 _validate_static = None  # optional callable(kql, since)->report
 _schema_context_provider = None  # optional callable()->(context, schema_hash, status)
@@ -53,9 +54,19 @@ SCHEMA_CACHE_TTL_SECONDS = 60
 KQL_IDIOMS = ""  # set by configure() once TABLE is known
 
 
-def configure(bzrk_search, table, get_store_dir, ensure_private_dir, now_iso, log,
-              persist_learned_query, sanitize_name, redact=None,
-              validate_static=None, schema_context_provider=None):
+def configure(
+    bzrk_search,
+    table,
+    get_store_dir,
+    ensure_private_dir,
+    now_iso,
+    log,
+    persist_learned_query,
+    sanitize_name,
+    redact=None,
+    validate_static=None,
+    schema_context_provider=None,
+):
     """Called once by berserk_mcp at import time.
 
     get_store_dir must be a zero-arg callable (not a Path) — see the
@@ -263,6 +274,8 @@ def _cached_getschema(since):
     if not err:
         _schema_cache[cache_key] = (out, time.monotonic() + SCHEMA_CACHE_TTL_SECONDS)
     return out, err
+
+
 # Fail-safe: a single detect_new_sources pass auto-queues at most this many new
 # services, so an empty/partial baseline against a large cluster can never flood
 # the queue. Internal metrics are never auto-queued at all (they are infra the
@@ -358,11 +371,7 @@ def _llm_config():
 
 
 def _hermes_url():
-    return (
-        os.environ.get("BERSERK_LLM_HERMES_URL")
-        or _llm_config().get("hermes_url")
-        or HERMES_URL_DEFAULT
-    )
+    return os.environ.get("BERSERK_LLM_HERMES_URL") or _llm_config().get("hermes_url") or HERMES_URL_DEFAULT
 
 
 def save_hermes_url(url):
@@ -544,14 +553,8 @@ def _q_discover_keys(source):
 def _q_fieldstats(source, kind):
     """Return native field metadata for a bounded source slice."""
     if kind == "service":
-        return (
-            f"{_table} | where resource['service.name'] == '{source}' "
-            f"| fieldstats resource with limit=50 depth=2"
-        )
-    return (
-        f"{_table} | where metric_name == '{source}' "
-        f"| fieldstats $raw with limit=50 depth=2"
-    )
+        return f"{_table} | where resource['service.name'] == '{source}' | fieldstats resource with limit=50 depth=2"
+    return f"{_table} | where metric_name == '{source}' | fieldstats $raw with limit=50 depth=2"
 
 
 def _parse_fieldstats_keys(raw_text):
@@ -695,9 +698,7 @@ def build_source_profile(source, kind, since):
     if not parts:
         return None, "; ".join(errors) or "profiling failed: no data returned"
 
-    resource_keys = parts.get("resource_keys") or _safe_resource_keys(
-        parts.get("resource_keys_raw", "")
-    )
+    resource_keys = parts.get("resource_keys") or _safe_resource_keys(parts.get("resource_keys_raw", ""))
 
     profile = {
         "kind": kind,
@@ -729,7 +730,7 @@ def build_source_profile(source, kind, since):
 def _build_kql_idioms():
     return (
         "Berserk KQL dialect notes (differs from Azure Data Explorer):\n"
-        f"- Rows live in one table: {_table}. Every query MUST start \"{_table} | ...\".\n"
+        f'- Rows live in one table: {_table}. Every query MUST start "{_table} | ...".\n'
         "- Nested fields are dynamic bags: resource['service.name'],\n"
         "  attributes['state'], resource['container.name']. Wrap in tostring() when\n"
         "  grouping or projecting: by service=tostring(resource['service.name']).\n"
@@ -738,13 +739,13 @@ def _build_kql_idioms():
         "- OTel cumulative histograms have value == null; use\n"
         "  otel_histogram_percentile($raw, 50|95|99) to read them.\n"
         "- Time filtering is handled OUTSIDE the query by a --since flag; do NOT add\n"
-        "  \"| where timestamp > ago(...)\" clauses.\n"
+        '  "| where timestamp > ago(...)" clauses.\n'
         "- Supported: where, project, extend, summarize (count, countif, avg, max,\n"
         "  min, sum), sort by, take, tail, top, bin(), make-series,\n"
         "  series_fit_line, series_decompose_anomalies, extract_log_template,\n"
         "  fieldstats, mv-expand, split, substring, iff, bag_keys. Not supported:\n"
         "  joins across tables, let statements, and unverified functions.\n"
-        "- Keep result sets bounded: end detail queries with \"| take 50\" or less."
+        '- Keep result sets bounded: end detail queries with "| take 50" or less.'
     )
 
 
@@ -783,18 +784,22 @@ def _hash_keys(keys):
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
-def detect_new_sources(since="24h ago", auto_queue=False, check_drift=False,
-                        load_json_list=None, save_json_list=None,
-                        discovery_queue_path=None, active_role="all"):
+def detect_new_sources(
+    since="24h ago",
+    auto_queue=False,
+    check_drift=False,
+    load_json_list=None,
+    save_json_list=None,
+    discovery_queue_path=None,
+    active_role="all",
+):
     """Diff currently-visible services/metrics against a baseline. Returns
     a human-readable summary string."""
     services_kql = (
-        f"{_table} | summarize total=count() by service=tostring(resource['service.name']) "
-        f"| sort by service asc"
+        f"{_table} | summarize total=count() by service=tostring(resource['service.name']) | sort by service asc"
     )
     metrics_kql = (
-        f"{_table} | where isnotnull(metric_name) "
-        f"| summarize samples=count() by metric_name | sort by metric_name asc"
+        f"{_table} | where isnotnull(metric_name) | summarize samples=count() by metric_name | sort by metric_name asc"
     )
     svc_out, svc_err = _bzrk_search(services_kql, since)
     met_out, met_err = _bzrk_search(metrics_kql, since)
@@ -820,10 +825,7 @@ def detect_new_sources(since="24h ago", auto_queue=False, check_drift=False,
                 "Retry when the backend is healthy."
             )
 
-        live_services = (
-            {s for s in _parse_source_rows(svc_out) if _looks_like_service(s)}
-            if not svc_err else None
-        )
+        live_services = {s for s in _parse_source_rows(svc_out) if _looks_like_service(s)} if not svc_err else None
         live_metrics = set(_parse_source_rows(met_out)) if not met_err else None
 
         known_services = set(baseline.get("services", {}).keys())
@@ -888,10 +890,7 @@ def detect_new_sources(since="24h ago", auto_queue=False, check_drift=False,
         save_json_dict(_known_sources_path(), baseline)
 
     if is_first_run:
-        return (
-            f"baseline initialized with {len(live_services)} services, "
-            f"{len(live_metrics)} metrics (queued nothing)"
-        )
+        return f"baseline initialized with {len(live_services)} services, {len(live_metrics)} metrics (queued nothing)"
 
     warnings = []
     if svc_err:
@@ -915,18 +914,23 @@ def detect_new_sources(since="24h ago", auto_queue=False, check_drift=False,
         lines.append(f"new_metrics ({len(new_metrics)}) recorded, not queued (infra)")
     if queued:
         deferred = (len(new_services) + len(drifted_services)) - len(queued)
-        lines.append(f"queued {len(queued)} service(s) this run (cap {MAX_AUTOQUEUE_PER_RUN})"
-                     + (f", {deferred} deferred to next run" if deferred > 0 else "")
-                     + ": " + ", ".join(queued))
+        lines.append(
+            f"queued {len(queued)} service(s) this run (cap {MAX_AUTOQUEUE_PER_RUN})"
+            + (f", {deferred} deferred to next run" if deferred > 0 else "")
+            + ": "
+            + ", ".join(queued)
+        )
     return "\n".join(lines)
 
 
 def _enqueue_job(queue, target, kind, requested_by, active_role):
     job = {
-        "source": target, "kind": kind,
+        "source": target,
+        "kind": kind,
         "role_hint": active_role if active_role != "all" else "",
         "requested_by": requested_by,
-        "status": "pending", "ts": _now_iso(),
+        "status": "pending",
+        "ts": _now_iso(),
     }
     for i in range(len(queue) - 1, -1, -1):
         it = queue[i]
@@ -984,8 +988,7 @@ _GENERATED_SINCE_RE = re.compile(
 
 def _normalize_generated_description(value):
     """Make model-authored descriptions bounded, inert persistent data."""
-    text = "".join(" " if ord(char) < 32 or ord(char) == 127 else char
-                   for char in str(value or ""))
+    text = "".join(" " if ord(char) < 32 or ord(char) == 127 else char for char in str(value or ""))
     text = re.sub(r"\s+", " ", text.replace("`", " ")).strip()
     return text[:MAX_GENERATED_DESCRIPTION_CHARS].rstrip()
 
@@ -1036,12 +1039,14 @@ def _parse_generated_reply(text, source):
         since = _normalize_generated_since(q.get("since") or "1h ago")
         if since is None:
             return None, "a query entry has an invalid 'since' value"
-        out.append({
-            "name": name,
-            "description": description,
-            "kql": str(q["kql"]).strip(),
-            "since": since,
-        })
+        out.append(
+            {
+                "name": name,
+                "description": description,
+                "kql": str(q["kql"]).strip(),
+                "since": since,
+            }
+        )
     return out, None
 
 
@@ -1119,7 +1124,9 @@ def validate_generated_query(q):
     if _validate_static is not None:
         validation_report = _validate_static(kql, q.get("since") or "1h ago")
         if any(f.get("severity") == "error" for f in validation_report.get("findings", [])):
-            codes = ", ".join(f.get("code", "?") for f in validation_report.get("findings", []) if f.get("severity") == "error")
+            codes = ", ".join(
+                f.get("code", "?") for f in validation_report.get("findings", []) if f.get("severity") == "error"
+            )
             return False, f"static validation failed: {codes}", None
         if validation_report.get("risk") == "high":
             codes = ", ".join(f.get("code", "?") for f in validation_report.get("findings", [])[:3])
@@ -1159,10 +1166,12 @@ def generate_parser_for(job):
         source = job["source"]
         kind = job["kind"]
     except (KeyError, TypeError) as e:
-        return _bound_report({
-            "status": "needs_human",
-            "reason": f"malformed job entry: missing {e}",
-        }), False
+        return _bound_report(
+            {
+                "status": "needs_human",
+                "reason": f"malformed job entry: missing {e}",
+            }
+        ), False
     role_hint = job.get("role_hint") or ""
 
     # F-005: one monotonic deadline spans the whole job -- profiling, model
@@ -1172,16 +1181,20 @@ def generate_parser_for(job):
 
     profile, err = build_source_profile(source, kind, "24h ago")
     if err:
-        return _bound_report({
-            "status": "needs_human",
-            "reason": f"profiling failed: {err}",
-        }), False
+        return _bound_report(
+            {
+                "status": "needs_human",
+                "reason": f"profiling failed: {err}",
+            }
+        ), False
 
     if time.monotonic() >= deadline:
-        return _bound_report({
-            "status": "needs_human",
-            "reason": f"job deadline ({JOB_DEADLINE_SECONDS}s) exceeded during profiling",
-        }), False
+        return _bound_report(
+            {
+                "status": "needs_human",
+                "reason": f"job deadline ({JOB_DEADLINE_SECONDS}s) exceeded during profiling",
+            }
+        ), False
 
     schema_context = ""
     schema_hash = ""
@@ -1228,7 +1241,7 @@ def generate_parser_for(job):
             text, llm_err = llm_complete(provider, GEN_SYSTEM, user_prompt_base + feedback)
             if llm_err:
                 last_errors = [llm_err]
-                provider_failed_immediately = (attempt == 1)
+                provider_failed_immediately = attempt == 1
                 break
 
             queries, parse_err = _parse_generated_reply(text, source)
@@ -1275,15 +1288,19 @@ def generate_parser_for(job):
 
     if not validated_queries:
         reason = (
-            "job deadline exceeded" if time.monotonic() >= deadline
-            else "attempt budget exhausted" if budget_exhausted
+            "job deadline exceeded"
+            if time.monotonic() >= deadline
+            else "attempt budget exhausted"
+            if budget_exhausted
             else "all providers exhausted"
         )
-        return _bound_report({
-            "status": "needs_human",
-            "reason": reason,
-            "last_errors": last_errors,
-        }), False
+        return _bound_report(
+            {
+                "status": "needs_human",
+                "reason": reason,
+                "last_errors": last_errors,
+            }
+        ), False
 
     saved_names = []
     for q in validated_queries:
@@ -1304,25 +1321,30 @@ def generate_parser_for(job):
         validation_report = q.get("_validation_report") or {}
         if validation_report:
             schema_info = validation_report.get("schema", {})
-            entry.update({
-                "validation_version": validation_report.get("validation_version", 1),
-                "validation_risk": validation_report.get("risk"),
-                "schema_hash": schema_info.get("schema_hash") or schema_hash,
-                "schema_status": schema_info.get("schema_status") or schema_status,
-                "validated_at": _now_iso(),
-                "validation_report": validation_report,
-            })
+            entry.update(
+                {
+                    "validation_version": validation_report.get("validation_version", 1),
+                    "validation_risk": validation_report.get("risk"),
+                    "schema_hash": schema_info.get("schema_hash") or schema_hash,
+                    "schema_status": schema_info.get("schema_status") or schema_status,
+                    "validated_at": _now_iso(),
+                    "validation_report": validation_report,
+                }
+            )
         if role_hint:
             entry["roles"] = [role_hint]
         try:
             log_entry = _persist_learned_query(entry, action_source="generated")
         except Exception as e:
-            return _bound_report({
-                "status": "needs_human",
-                "reason": f"persistence failed for {q['name']}: {type(e).__name__}: {e}",
-                "provider": used_provider, "model": used_model,
-                "attempts": attempts_used,
-            }), False
+            return _bound_report(
+                {
+                    "status": "needs_human",
+                    "reason": f"persistence failed for {q['name']}: {type(e).__name__}: {e}",
+                    "provider": used_provider,
+                    "model": used_model,
+                    "attempts": attempts_used,
+                }
+            ), False
         saved_names.append(log_entry.get("name", q["name"]))
 
     with _FileLock(_schema_knowledge_path()):  # F-007: whole RMW cycle, not just the save
