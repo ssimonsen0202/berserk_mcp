@@ -280,11 +280,10 @@ def _make_handler(out_path, raw_out_path, expected_secret, lock, berserk_endpoin
                 return
 
             rows = extract_spans(payload)
-            with lock:
-                with open(out_path, "a") as f:
-                    for row in rows:
-                        row["received_at"] = received_at
-                        f.write(json.dumps(row) + "\n")
+            with lock, open(out_path, "a") as f:
+                for row in rows:
+                    row["received_at"] = received_at
+                    f.write(json.dumps(row) + "\n")
 
             forwarded, forward_detail = None, None
             if berserk_endpoint:

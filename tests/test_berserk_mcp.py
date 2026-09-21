@@ -4218,7 +4218,7 @@ class DoctorPreflightTest(unittest.TestCase):
         self._orig_which = bm.shutil.which
         bm.shutil.which = lambda name: "/usr/bin/bzrk"
         self._orig_llm_config = bm.parser_factory._llm_config
-        bm.parser_factory._llm_config = lambda: {}
+        bm.parser_factory._llm_config = dict
         self._orig_hermes_env = os.environ.pop("BERSERK_LLM_HERMES_URL", None)
         self._orig_canonloom_env = os.environ.pop("CANONLOOM_SERVER_URL", None)
 
@@ -4488,7 +4488,7 @@ class DoctorPreflightTest(unittest.TestCase):
         # per-user config file -- not something a test should depend on).
         orig_env = os.environ.pop("BERSERK_LLM_HERMES_URL", None)
         orig_llm_config = bm.parser_factory._llm_config
-        bm.parser_factory._llm_config = lambda: {}
+        bm.parser_factory._llm_config = dict
         try:
             result = bm._doctor_check_llm_reachability()
             self.assertNotEqual(result["status"], "skip")

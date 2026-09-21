@@ -7,7 +7,6 @@ and returns plausible output, proving the tool descriptions are unambiguous enou
 Each test is named after the prompt intent. The "expected tool" is what the model should call.
 Run with BERSERK_MCP_ROLE=sre / soc / claude to verify lane-specific routing works.
 """
-import os
 import sys
 import tempfile
 import unittest

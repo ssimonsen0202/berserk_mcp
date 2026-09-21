@@ -86,8 +86,7 @@ class RunBackfillTest(unittest.TestCase):
 
     def _write_raw(self, n):
         with open(self.raw_path, "w") as f:
-            for i in range(n):
-                f.write(_raw_line(_otlp_payload(trace_id=f"t{i}")) + "\n")
+            f.writelines(_raw_line(_otlp_payload(trace_id=f"t{i}")) + "\n" for i in range(n))
 
     def _fake_post(self, endpoint, payload):
         self.posted.append(payload)

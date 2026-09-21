@@ -40,3 +40,42 @@ py-modules = ["berserk_mcp", "parser_factory", "agent_analytics", "ai_finops", "
 
 [tool.setuptools.dynamic]
 version = { attr = "berserk_mcp.__version__" }
+
+# ── ruff ──────────────────────────────────────────────────────────────
+[tool.ruff]
+target-version = "py39"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",       # pycodestyle errors
+    "W",       # pycodestyle warnings
+    "F",       # pyflakes
+    "B",       # flake8-bugbear (common pitfalls)
+    "C901",    # McCabe complexity
+    "S",       # flake8-bandit (security)
+    "PIE",     # flake8-pie (misc. lints)
+    "SIM",     # flake8-simplify
+    "PERF",    # perflint
+    "FURB",    # refurb
+    "UP",      # pyupgrade
+]
+ignore = [
+    "E501",    # line length — handled by formatter
+    "S101",    # assert used — fine in tests and internal code
+    "S603",    # subprocess without shell=True — we use it intentionally
+    "S607",    # partial path to executable — acceptable for CLI tools
+    "UP035",   # deprecated typing imports — still need py3.9 compat
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "B017"]     # security + assert-raises in tests
+"evals/*" = ["S"]             # evals are trusted code
+"scripts/*" = ["S"]           # scripts are trusted code
+
+[tool.ruff.lint.mccabe]
+max-complexity = 20
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

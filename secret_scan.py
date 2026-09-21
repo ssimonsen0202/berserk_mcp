@@ -14,7 +14,6 @@ ALL_PII_TYPES = frozenset({"email", "ipv4", "ipv6", "credit_card"})
 
 class AuditParseError(ValueError):
     """Raised when audit response cannot be fully decoded as a supported format."""
-    pass
 
 # Ordered most-specific-first. Later matches never replace an earlier overlap.
 _SECRET_PATTERNS = (

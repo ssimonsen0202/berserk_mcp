@@ -300,7 +300,7 @@ def _duration_seconds(events):
 def _oscillation_count(seq):
     count = 0
     for size in (2, 3):
-        for i in range(0, max(0, len(seq) - (size * 2) + 1)):
+        for i in range(max(0, len(seq) - (size * 2) + 1)):
             if seq[i:i + size] == seq[i + size:i + (size * 2)]:
                 count += 1
     return count

@@ -466,7 +466,7 @@ def _load_json(path, expected_type, empty_value, logger=None):
             logger(f"load_json refused: {exc}")
         return empty_value
     try:
-        with open(safe, "r", encoding="utf-8") as handle:
+        with open(safe, encoding="utf-8") as handle:
             value = json.load(handle)
         return value if isinstance(value, expected_type) else empty_value
     except FileNotFoundError:

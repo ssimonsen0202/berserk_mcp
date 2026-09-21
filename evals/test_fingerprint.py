@@ -3,12 +3,10 @@
 import sys
 import unittest
 from pathlib import Path
-from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fingerprint  # noqa: E402
 import _http  # noqa: E402
-import parser_factory as pf  # noqa: E402
 
 
 PAYLOAD = {"data": [

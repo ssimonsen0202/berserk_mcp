@@ -3,7 +3,6 @@
 import argparse
 import json
 import math
-import statistics
 import sys
 import time
 from pathlib import Path

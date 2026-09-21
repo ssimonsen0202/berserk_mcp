@@ -77,7 +77,7 @@ def _run_json(kql, since):
     # of correctly concluding "no errors, nothing to investigate."
     if str(out or "").strip() == "(no rows)":
         return [], None
-    if not str(out or "").strip()[:1] in "[{":
+    if str(out or "").strip()[:1] not in "[{":
         # Codex review finding, 2026-08-28: bzrk_search_json deliberately
         # falls back to plain aligned-table text on older bzrk builds that
         # reject --json (see its own docstring in berserk_mcp.py). That

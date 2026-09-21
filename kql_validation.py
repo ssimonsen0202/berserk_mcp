@@ -56,22 +56,22 @@ _SINCE_RE = re.compile(
 )
 
 _STRING_RE = re.compile(r"'(?:''|[^'])*'|\"(?:\\.|[^\"])*\"")
-_BOUND_RE = re.compile(r"\b(take|tail|limit)\s+(\d+)\b|\btop\s+(\d+)\s+by\b", re.I)
-_COUNT_RE = re.compile(r"\bcount\s*\(\s*\)|\bsummarize\s+[^|]*\bcount\s*\(", re.I)
+_BOUND_RE = re.compile(r"\b(take|tail|limit)\s+(\d+)\b|\btop\s+(\d+)\s+by\b", re.IGNORECASE)
+_COUNT_RE = re.compile(r"\bcount\s*\(\s*\)|\bsummarize\s+[^|]*\bcount\s*\(", re.IGNORECASE)
 _SELECTIVE_RE = re.compile(
     r"\bwhere\b[^|]*(metric_name|severity_text|trace_id|span_id|status_code|"
     r"resource\s*\[\s*['\"](?:service\.name|host\.name|container\.name)['\"]\s*\]|"
     r"attributes\s*\[)",
-    re.I,
+    re.IGNORECASE,
 )
-_PROJECT_RE = re.compile(r"\bproject(?:-away|-keep)?\b", re.I)
+_PROJECT_RE = re.compile(r"\bproject(?:-away|-keep)?\b", re.IGNORECASE)
 _EXPENSIVE_PATTERNS = [
-    (re.compile(r"\bmv-expand\b", re.I), "mv-expand"),
-    (re.compile(r"\bbag_keys\s*\(", re.I), "bag_keys"),
-    (re.compile(r"\bparse\b", re.I), "parse"),
-    (re.compile(r"\bmatches\s+regex\b", re.I), "regex"),
+    (re.compile(r"\bmv-expand\b", re.IGNORECASE), "mv-expand"),
+    (re.compile(r"\bbag_keys\s*\(", re.IGNORECASE), "bag_keys"),
+    (re.compile(r"\bparse\b", re.IGNORECASE), "parse"),
+    (re.compile(r"\bmatches\s+regex\b", re.IGNORECASE), "regex"),
 ]
-_UNSAFE_RE = re.compile(r"\b(set|drop|alter|delete|update|ingest|create)\b", re.I)
+_UNSAFE_RE = re.compile(r"\b(set|drop|alter|delete|update|ingest|create)\b", re.IGNORECASE)
 _CONTROL_RE = re.compile(r"^\s*\.")
 # `join` reads a second table within the pipeline; `cluster()`/`database()`/
 # `table()` reference an arbitrary cluster/database/table by name. All are
@@ -94,7 +94,7 @@ _CONTROL_RE = re.compile(r"^\s*\.")
 _SOURCE_INTRODUCING_RE = re.compile(
     r"(?:^|\|)\s*(union|evaluate|find|search|join|lookup)\b|"
     r"\b(externaldata|cluster|database|table|toscalar)\s*\(",
-    re.I,
+    re.IGNORECASE,
 )
 
 # `in (TableName | ...)` / `!in (TableName | ...)`: real Kusto's `in`
@@ -112,7 +112,7 @@ _SOURCE_INTRODUCING_RE = re.compile(
 # paren-nesting depth. `_strip_strings` has already blanked string-literal
 # contents by the time this runs, so a `|` inside a quoted value can't
 # produce a false positive.
-_IN_OPEN_RE = re.compile(r"\b!?in~?\s*\(", re.I)
+_IN_OPEN_RE = re.compile(r"\b!?in~?\s*\(", re.IGNORECASE)
 
 
 def _in_clause_hides_tabular_subquery(stripped, max_matches=64):
@@ -131,7 +131,7 @@ def _in_clause_hides_tabular_subquery(stripped, max_matches=64):
                 return True
             i += 1
     return False
-_RAW_SCAN_RE = re.compile(r"\b(body|\$raw)\b[^|]{0,80}\b(contains|has_any|matches\s+regex)\b|\b(contains|has_any|matches\s+regex)\b[^|]{0,80}\b(body|\$raw)\b", re.I)
+_RAW_SCAN_RE = re.compile(r"\b(body|\$raw)\b[^|]{0,80}\b(contains|has_any|matches\s+regex)\b|\b(contains|has_any|matches\s+regex)\b[^|]{0,80}\b(body|\$raw)\b", re.IGNORECASE)
 _FIELD_REF_RE = re.compile(
     r"(resource|attributes)\s*\[\s*['\"]([^'\"]+)['\"]\s*\]|"
     r"\b([A-Za-z_][A-Za-z0-9_]*)\b"
@@ -365,17 +365,17 @@ def validate_kql_static(kql, *, table, since, schema_fields=None, max_chars=5000
                 "pipeline",
                 "Add a selective predicate and narrow time window before raw text search.",
             ))
-        if re.search(r"\bproject\b[^|]*(\bbody\b|\bresource\b|\battributes\b|\$raw)", stripped, re.I):
+        if re.search(r"\bproject\b[^|]*(\bbody\b|\bresource\b|\battributes\b|\$raw)", stripped, re.IGNORECASE):
             findings.append(_finding(
                 "WIDE_PROJECTION", "warning",
                 "Projection includes raw body/resource/attributes/$raw.",
                 "pipeline",
                 "Project specific bounded fields or substring raw text.",
             ))
-        if re.search(r"\bsummarize\b[^|]*\bby\b[^|]*(body|resource|attributes|\$raw)", stripped, re.I):
+        if re.search(r"\bsummarize\b[^|]*\bby\b[^|]*(body|resource|attributes|\$raw)", stripped, re.IGNORECASE):
             findings.append(_finding("HIGH_CARDINALITY_GROUP", "warning", "Grouping uses a high-cardinality/raw field.", "pipeline"))
-        if re.search(r"make-series", stripped, re.I):
-            dims = re.search(r"\bby\b([^|]+)", stripped, re.I)
+        if re.search(r"make-series", stripped, re.IGNORECASE):
+            dims = re.search(r"\bby\b([^|]+)", stripped, re.IGNORECASE)
             if dims and dims.group(1).count(",") >= 2:
                 findings.append(_finding("SERIES_TOO_WIDE", "warning", "make-series groups by too many dimensions.", "pipeline"))
 
@@ -422,7 +422,7 @@ def validate_kql_static(kql, *, table, since, schema_fields=None, max_chars=5000
             score += SCORE_WEIGHTS["early_predicate"]
         if bounds and max(bounds) <= min(max_rows, 100):
             score += SCORE_WEIGHTS["small_bound"]
-        if _PROJECT_RE.search(stripped) and not re.search(r"\b(body|resource|attributes|\$raw)\b", stripped, re.I):
+        if _PROJECT_RE.search(stripped) and not re.search(r"\b(body|resource|attributes|\$raw)\b", stripped, re.IGNORECASE):
             score += SCORE_WEIGHTS["narrow_projection"]
         score = max(0, min(100, score))
 

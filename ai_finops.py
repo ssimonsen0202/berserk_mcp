@@ -750,7 +750,7 @@ def load_pricing_catalog(path=None):
     for candidate in candidates:
         try:
             safe_candidate = _safe_absolute(candidate, "pricing catalog")
-            with open(safe_candidate, "r", encoding="utf-8") as handle:
+            with open(safe_candidate, encoding="utf-8") as handle:
                 data = json.load(handle)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             last_error = exc
@@ -932,7 +932,7 @@ def load_business_store(path=None):
         return _empty_business_store()
     try:
         safe = _safe_absolute(target, "business store")
-        with open(safe, "r", encoding="utf-8") as handle:
+        with open(safe, encoding="utf-8") as handle:
             data = json.load(handle)
     except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
         return _empty_business_store()
@@ -967,9 +967,9 @@ def _load_import_file(path, fmt=None):
     source = _safe_absolute(path, "business import")
     chosen = (fmt or source.suffix.lstrip(".")).lower()
     if chosen == "csv":
-        with open(source, "r", encoding="utf-8-sig", newline="") as handle:
+        with open(source, encoding="utf-8-sig", newline="") as handle:
             return list(csv.DictReader(handle))
-    with open(source, "r", encoding="utf-8") as handle:
+    with open(source, encoding="utf-8") as handle:
         raw = handle.read().strip()
     if not raw:
         return []
@@ -1832,7 +1832,7 @@ def _load_decisions(path=None):
         return []
     try:
         safe = _safe_absolute(target, "decision store")
-        with open(safe, "r", encoding="utf-8") as handle:
+        with open(safe, encoding="utf-8") as handle:
             value = json.load(handle)
     except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
         return []

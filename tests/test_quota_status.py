@@ -3,7 +3,6 @@ import subprocess
 import sys
 import threading
 import unittest
-import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 

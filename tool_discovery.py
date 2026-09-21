@@ -42,11 +42,7 @@ def _stem(word):
 # between them. Filtered from queries only -- the index keeps full
 # description text, since a stopword appearing in a description isn't the
 # problem; a stopword in the *query* diluting the score is.
-_STOPWORDS = frozenset("""
-a an the is are was were be been being to of for on in at by with from
-what which who how do does did show me my get find list all any some this
-that these those and or not
-""".split())
+_STOPWORDS = frozenset(["a", "an", "the", "is", "are", "was", "were", "be", "been", "being", "to", "of", "for", "on", "in", "at", "by", "with", "from", "what", "which", "who", "how", "do", "does", "did", "show", "me", "my", "get", "find", "list", "all", "any", "some", "this", "that", "these", "those", "and", "or", "not"])
 
 # A small, general domain-synonym table -- not one entry per failing test
 # case, kept to genuinely common alternate phrasings an engineer would

@@ -10,7 +10,6 @@ P2-B: C1 control characters (0x80-0x9f) not being escaped
 """
 
 import unittest
-import json
 import tempfile
 from pathlib import Path
 import berserk_mcp as bm
@@ -336,7 +335,7 @@ class Round3ControlCharactersTest(unittest.TestCase):
         terminal/log rendering.
         """
         # CSI is 0x9b
-        raw = f"before\x9bafter"
+        raw = "before\x9bafter"
         sanitized = bm._sanitize_log_line(raw)
         # C1 controls should be escaped
         self.assertNotIn("\x9b", sanitized)
