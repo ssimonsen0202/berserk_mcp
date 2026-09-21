@@ -57,7 +57,7 @@ def _entropy(value):
     for char in value:
         counts[char] += 1
     length = float(len(value))
-    return -sum((count / length) * math.log(count / length, 2) for count in counts.values())
+    return -sum((count / length) * math.log2(count / length) for count in counts.values())
 
 
 def _luhn(value):

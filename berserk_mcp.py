@@ -659,9 +659,7 @@ def tool_visible(tool):
     roles = tool.get("roles")
     if roles and ACTIVE_ROLE != "all" and ACTIVE_ROLE not in roles:
         return False
-    if ACTIVE_TIER_RESOLVED == TIER_SMALL and tool["name"] in _DEEP_TIER_TOOLS:
-        return False
-    return True
+    return not (ACTIVE_TIER_RESOLVED == TIER_SMALL and tool["name"] in _DEEP_TIER_TOOLS)
 
 
 def item_visible(item):
@@ -1650,9 +1648,7 @@ def _blocking_validation(report, *, persistence=False):
         return True
     if KQL_VALIDATION_MODE == "strict" and report.get("risk") == "high":
         return True
-    if persistence and report.get("risk") == "high":
-        return True
-    return False
+    return bool(persistence and report.get("risk") == "high")
 
 
 def _format_validation_rejection(report):
@@ -1670,7 +1666,7 @@ def _format_validation_warnings(report):
     warnings = [f for f in report.get("findings", []) if f.get("severity") != "error"]
     if not warnings:
         return ""
-    return "KQL validation warnings (risk=%s):\n" % report.get("risk") + "\n".join(
+    return "KQL validation warnings (risk={}):\n".format(report.get("risk")) + "\n".join(
         f"- {f.get('code')}: {f.get('message')}" for f in warnings[:8]
     )
 
@@ -4370,7 +4366,7 @@ def _parse_http_bind(bind):
     try:
         port = int(port_text)
     except (TypeError, ValueError):
-        raise HttpConfigError("BERSERK_MCP_HTTP_BIND port must be an integer")
+        raise HttpConfigError("BERSERK_MCP_HTTP_BIND port must be an integer") from None
     if not 1 <= port <= 65535:
         raise HttpConfigError("BERSERK_MCP_HTTP_BIND port must be 1..65535")
     return host, port
@@ -4894,10 +4890,7 @@ def _doctor_check_llm_reachability():
         parser_factory._llm_config().get("hermes_url")
     )
     url = parser_factory._hermes_url()
-    if not configured:
-        url_note = f" (using the unconfigured default {url!r})"
-    else:
-        url_note = ""
+    url_note = f" (using the unconfigured default {url!r})" if not configured else ""
     models_url = parser_factory.hermes_models_url(url)
     if not models_url:
         return _doctor_result(

@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import contextlib
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SERVER = [sys.executable, str(ROOT / "berserk_mcp.py")]
@@ -70,10 +71,8 @@ class McpClient:
 
     def close(self):
         if self.proc.poll() is None:
-            try:
+            with contextlib.suppress(Exception):
                 self.proc.stdin.close()
-            except Exception:
-                pass
             try:
                 self.proc.wait(timeout=2)
             except subprocess.TimeoutExpired:

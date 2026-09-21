@@ -59,7 +59,7 @@ def validate_http_url(url, *, label="endpoint",
     try:
         parsed = urllib.parse.urlsplit(url)
         # Accessing port makes malformed/non-numeric ports fail here.
-        parsed.port
+        _ = parsed.port  # noqa: B018 — side-effect: raises ValueError on malformed port
     except ValueError as exc:
         raise UrlPolicyError(f"{label} url is malformed: {exc}") from None
     scheme = parsed.scheme.lower()
@@ -78,19 +78,18 @@ def validate_http_url(url, *, label="endpoint",
         allow_plaintext_remote = (
             os.environ.get("BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE") == "1"
         )
-    if scheme == "http" and not is_loopback_host(parsed.hostname):
-        if not allow_plaintext_remote:
-            suffix = (
-                "; use https, point at localhost/127.0.0.1, or set "
-                     "BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE=1 to explicitly allow "
-                     "it on a trusted private network"
-                if env_controlled_plaintext
-                else "; use https or a loopback endpoint"
-            )
-            raise UrlPolicyError(
-                "plaintext http to a non-loopback host is rejected by default "
-                "(credentials would cross the network unencrypted)" + suffix
-            )
+    if scheme == "http" and not is_loopback_host(parsed.hostname) and not allow_plaintext_remote:
+        suffix = (
+            "; use https, point at localhost/127.0.0.1, or set "
+                 "BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE=1 to explicitly allow "
+                 "it on a trusted private network"
+            if env_controlled_plaintext
+            else "; use https or a loopback endpoint"
+        )
+        raise UrlPolicyError(
+            "plaintext http to a non-loopback host is rejected by default "
+            "(credentials would cross the network unencrypted)" + suffix
+        )
     return url
 
 

@@ -4786,7 +4786,7 @@ class SavedQueryProjectionTest(unittest.TestCase):
     def test_role_hidden_entry_is_unknown_tool_on_direct_call(self):
         self._seed("sre_only_query", roles=["sre"])
         bm.ACTIVE_ROLE = "soc"
-        text, err = bm.dispatch({
+        text, _err = bm.dispatch({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "saved__sre_only_query", "arguments": {}},
         })["result"], None

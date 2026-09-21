@@ -212,7 +212,7 @@ JOB_DEADLINE_SECONDS = int(os.environ.get("BERSERK_LLM_JOB_DEADLINE_SECONDS", "3
 # character tokens outright rather than trying to sanitize them.
 MAX_RESOURCE_KEYS = 50
 MAX_RESOURCE_KEY_LEN = 80
-_RESOURCE_KEY_RE = re.compile(r"^[A-Za-z0-9._-]{1,%d}$" % MAX_RESOURCE_KEY_LEN)
+_RESOURCE_KEY_RE = re.compile(f"^[A-Za-z0-9._-]{{1,{MAX_RESOURCE_KEY_LEN}}}$")
 
 
 def _safe_resource_keys(raw_lines_text):

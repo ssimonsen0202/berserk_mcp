@@ -15,6 +15,7 @@ import threading
 import time
 import warnings
 from pathlib import Path
+import contextlib
 
 
 LOCK_STALE_SECONDS = 30
@@ -380,17 +381,15 @@ class FileLock:
                     raise TimeoutError(
                         f"could not acquire lock {self.lock_path} within "
                         f"{self.timeout_seconds:g}s"
-                    )
+                    ) from None
                 time.sleep(self.retry_interval)
 
     def __exit__(self, exc_type, exc, tb):
         if self._fd is not None:
             os.close(self._fd)
             self._fd = None
-        try:
+        with contextlib.suppress(OSError):
             os.remove(self.lock_path)
-        except OSError:
-            pass
         return False
 
 
@@ -421,10 +420,8 @@ def atomic_write_text(path, text, *, private=True, logger=None, purpose="output"
     mode = 0o600 if private else 0o666
     existing_mode = None
     if not private and safe.exists() and os.name != "nt":
-        try:
+        with contextlib.suppress(OSError):
             existing_mode = stat.S_IMODE(safe.stat().st_mode)
-        except OSError:
-            pass
     fd = os.open(tmp, flags, mode)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
@@ -440,10 +437,8 @@ def atomic_write_text(path, text, *, private=True, logger=None, purpose="output"
     finally:
         if fd is not None:
             os.close(fd)
-        try:
+        with contextlib.suppress(OSError):
             os.remove(tmp)
-        except OSError:
-            pass
     return safe
 
 

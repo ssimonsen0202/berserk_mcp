@@ -242,7 +242,7 @@ def _provided_signature(headers):
 def _make_handler(out_path, raw_out_path, expected_secret, lock, berserk_endpoint=None, post_fn=post_to_berserk):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
-            sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+            sys.stderr.write(f"{self.address_string()} - {fmt % args}\n")
 
         def do_POST(self):
             headers = {k: v for k, v in self.headers.items()}

@@ -147,7 +147,7 @@ class LlmClientTest(ParserFactoryTestBase):
         self.assertEqual(pf._hermes_url(), "http://localhost:3000/api/chat/completions")
 
     def test_hermes_url_precedence_env_over_config_over_default(self):
-        path = pf.save_hermes_url("https://config-host:3000/api/chat/completions")
+        pf.save_hermes_url("https://config-host:3000/api/chat/completions")
         # config used when no env var is set
         self.assertEqual(pf._hermes_url(), "https://config-host:3000/api/chat/completions")
         # env var wins over the config file

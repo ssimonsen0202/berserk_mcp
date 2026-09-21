@@ -32,8 +32,10 @@ _SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 _search = None
 _table = "default"
-_redact = lambda value: str(value)
-_redact_aggressive = lambda value: str(value)
+def _redact(value):
+    return str(value)
+def _redact_aggressive(value):
+    return str(value)
 _catalog_path = None
 _business_store_path = None
 _decision_store_path = None
@@ -986,7 +988,7 @@ def _load_import_file(path, fmt=None):
             try:
                 row = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise ValueError(f"invalid NDJSON at line {number}: {exc.msg}")
+                raise ValueError(f"invalid NDJSON at line {number}: {exc.msg}") from None
             if not isinstance(row, dict):
                 raise ValueError(f"NDJSON line {number} must be an object")
             rows.append(row)
@@ -1025,7 +1027,7 @@ def _validated_number(value, field, maximum=None):
     try:
         number = float(value)
     except (TypeError, ValueError):
-        raise ValueError(f"{field} must be a finite nonnegative number")
+        raise ValueError(f"{field} must be a finite nonnegative number") from None
     if not math.isfinite(number) or number < 0 or (maximum is not None and number > maximum):
         upper = f" no greater than {maximum}" if maximum is not None else ""
         raise ValueError(f"{field} must be a finite nonnegative number{upper}")
@@ -1037,7 +1039,7 @@ def _source_timestamp(value):
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
-        raise ValueError("source_updated_at must be an ISO 8601 timestamp")
+        raise ValueError("source_updated_at must be an ISO 8601 timestamp") from None
     if parsed.tzinfo is None:
         raise ValueError("source_updated_at must include a timezone")
     return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")

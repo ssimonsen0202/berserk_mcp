@@ -39,6 +39,7 @@ HERE = Path(__file__).resolve().parent
 SERVER = HERE.parent / "berserk_mcp.py"
 sys.path.insert(0, str(HERE.parent))
 
+import contextlib  # noqa: E402
 import _http  # noqa: E402
 
 
@@ -86,10 +87,8 @@ def get_mcp_tools_and_instructions():
         proc.wait(timeout=2)
     finally:
         for stream in (proc.stdout, proc.stderr):
-            try:
+            with contextlib.suppress(Exception):
                 stream.close()
-            except Exception:
-                pass
     return tools, instructions
 
 
@@ -590,7 +589,7 @@ def main():
                     help="backend type for the deep tier (default: openai)")
     args_ns = ap.parse_args()
 
-    cases = [json.loads(l) for l in Path(args_ns.cases).read_text(encoding="utf-8").splitlines() if l.strip()]
+    cases = [json.loads(line) for line in Path(args_ns.cases).read_text(encoding="utf-8").splitlines() if line.strip()]
     if args_ns.limit:
         cases = cases[:args_ns.limit]
 
@@ -678,10 +677,10 @@ def main():
                     prior_messages = build_multi_turn_messages(
                         is_anthropic, case["prompt"], hop1_text)
                     name, cargs, dt, usage = _call_with_retry(
-                        lambda: run_multi_turn(prior_messages))
+                        lambda pm=prior_messages: run_multi_turn(pm))
                 else:
                     name, cargs, dt, usage = _call_with_retry(
-                        lambda: run_one(case["prompt"]))
+                        lambda c=case: run_one(c["prompt"]))
             except Exception as e:
                 sys.exit(f"\nbackend call failed after retries: {e}")
             tool_ok, arg_ok = score_case(case, name, cargs)

@@ -30,6 +30,7 @@ from openrouter_webhook_receiver import (  # noqa: E402
     post_to_berserk,
     spans_to_berserk_payload,
 )
+import contextlib
 
 
 def _read_state(state_path):
@@ -49,10 +50,8 @@ def _write_state(state_path, lines_forwarded):
             json.dump({"lines_forwarded": lines_forwarded}, f)
         os.replace(tmp_path, state_path)
     except Exception:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp_path)
-        except OSError:
-            pass
         raise
 
 
@@ -128,7 +127,7 @@ def run_backfill(raw_path, state_path, endpoint, batch_size=25, dry_run=False,
         batch_payloads, batch_line_count = [], 0
         return True
 
-    for line_idx, raw_obj in iter_raw_lines(raw_path, start_line):
+    for _line_idx, raw_obj in iter_raw_lines(raw_path, start_line):
         if raw_obj is not None:
             raw = raw_obj.get("raw")
             try:
@@ -138,9 +137,8 @@ def run_backfill(raw_path, state_path, endpoint, batch_size=25, dry_run=False,
             if isinstance(otlp_payload, dict):
                 batch_payloads.append(spans_to_berserk_payload(otlp_payload, redact=redact))
         batch_line_count += 1
-        if batch_line_count >= batch_size:
-            if not flush():
-                return False
+        if batch_line_count >= batch_size and not flush():
+            return False
 
     if not flush():
         return False

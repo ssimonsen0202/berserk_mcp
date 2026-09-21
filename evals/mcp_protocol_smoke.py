@@ -34,6 +34,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+import contextlib
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SERVER = [sys.executable, str(ROOT / "berserk_mcp.py")]
@@ -59,10 +60,8 @@ class StdioClient:
 
     def close(self):
         if self.proc.poll() is None:
-            try:
+            with contextlib.suppress(Exception):
                 self.proc.stdin.close()
-            except Exception:
-                pass
             try:
                 self.proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
