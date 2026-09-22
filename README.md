@@ -547,8 +547,8 @@ Every query tool takes an optional `since` argument (`"15m ago"`, `"1h ago"`,
 | Tool | What it answers |
 |---|---|
 | `soc_high_severity_logs` | Recent CRITICAL/FATAL log lines with service and message text. |
-| `soc_log_spike` | Services with the largest minute-level log bursts — "anything spiking?" |
-| `soc_new_services` | Recently first-seen services and sources — "what is new?" |
+| `soc_log_spike` | Per-minute log volume for each service, raw counts — "which source is spiking?" For statistical anomalies, use `detect_anomalies`. |
+| `soc_new_services` | Services ordered by first event inside the query window (not first ever). For sources never seen before, use `detect_new_sources`. |
 | `soc_repeated_errors` | Error messages that repeat persistently — probes, loops, stuck processes. |
 | `soc_timeline` | Full incident timeline for one named service: timestamps, severity, metric names, message snippets. |
 | `detect_anomalies` | Statistical service-volume anomaly detection using zero-filled series. |

@@ -2474,7 +2474,7 @@ TOOLS = [
     {
         "name": "detect_anomalies",
         "roles": ["sre", "soc"],
-        "description": "Statistical anomaly detection for service event volume over time. Uses zero-filled make-series and series_decompose_anomalies; use for 'is anything behaving abnormally?' rather than guessing a threshold. Optional service filter.",
+        "description": "Statistical anomaly detection for service event volume over time. Uses zero-filled make-series and series_decompose_anomalies; use for 'is anything behaving abnormally?' or 'anything anomalous?' rather than guessing a threshold. Optional service filter. For raw per-minute volume without statistics, see soc_log_spike.",
         "inputSchema": {
             "type": "object",
             "properties": dict(
@@ -2637,13 +2637,13 @@ TOOLS = [
     {
         "name": "soc_log_spike",
         "roles": ["soc"],
-        "description": "SOC view of services with the largest log volume per minute. Use for 'anything anomalous', 'which source is spiking', or 'suspicious burst of logs'.",
+        "description": "SOC view of per-minute log volume for each service over the window: raw counts, no statistics. Use for 'which source is spiking', 'log volume per minute', or 'suspicious burst of logs'. To test whether volume is statistically abnormal, use detect_anomalies.",
         "inputSchema": {"type": "object", "properties": _since()},
     },
     {
         "name": "soc_new_services",
         "roles": ["soc"],
-        "description": "SOC view of services ordered by first-seen time. Use for 'what is new', 'anything first-seen', or 'did a new source appear'.",
+        "description": "SOC view of services ordered by their earliest event inside the query window (first seen in this window, not first ever), with last-seen and event counts. Use for 'list services by when they first appeared in the last N hours'. To find sources Berserk has never seen before, use detect_new_sources.",
         "inputSchema": {"type": "object", "properties": _since()},
     },
     {
@@ -3148,7 +3148,7 @@ MGMT_TOOLS = [
     },
     {
         "name": "detect_new_sources",
-        "description": "Scan Berserk for services/metrics never seen before (and optionally schema drift on known ones). Use for 'anything new reporting?', or run with auto_queue=true to queue newcomers for parser generation.",
+        "description": "Scan Berserk for services/metrics never seen before by comparing against a stored baseline (the first run only records the baseline), and optionally schema drift on known ones. Use for 'anything new reporting?' or 'did a new source appear?', or run with auto_queue=true to queue newcomers for parser generation. For services ordered by first-seen time within a window, see soc_new_services.",
         "inputSchema": {
             "type": "object",
             "properties": dict(
