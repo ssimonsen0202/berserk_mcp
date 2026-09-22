@@ -157,6 +157,56 @@ class MockRouteTest(unittest.TestCase):
         # claude_session_deep_dive instead of claude_loop_check.
         self.assertEqual(self._route("claude code loop check for session 12345"), "claude_session_deep_dive")
 
+    # One prompt per _MOCK_ROUTES entry, in table order, with the tool the original
+    # if/elif chain returned. The mock is the CI gate's baseline, so every entry is pinned.
+    ROUTE_CASES = [
+        ("search the exact phrase timeout", "search"),
+        ("show me logs for the auth service", "logs_for_service"),
+        ("forecast disk usage", "forecast_capacity"),
+        ("find similar messages", "find_similar"),
+        ("anything abnormal", "detect_anomalies"),
+        ("list saved queries", "list_saved"),
+        ("save this", "save_query"),
+        ("run this kql", "search"),
+        ("what tables exist", "schema"),
+        ("cost per successful outcome", "claude_efficiency_insights"),
+        ("token burn", "claude_token_burn"),
+        ("which tool breaks most", "claude_workflow_insights"),
+        ("claude hotspot", "claude_workflow_insights"),
+        ("claude loop", "claude_loop_check"),
+        ("claude error", "claude_errors"),
+        ("claude tool use", "claude_tools"),
+        ("claude session", "claude_sessions"),
+        ("claude search timeout", "claude_search"),
+        ("what did codex do", "claude_recent"),
+        ("is checkout healthy", "sre_service_health"),
+        ("nginx log", "logs_for_service"),
+        ("root cause of errors", "investigate_error_rate"),
+        ("are errors climbing", "sre_error_rate"),
+        ("any error", "errors_by_service"),
+        ("cpu", "top_cpu"),
+        ("memory", "top_memory"),
+        ("list service names", "list_services"),
+        ("which host", "list_hosts"),
+        ("hello", "list_containers"),
+    ]
+
+    def _matched_index(self, prompt):
+        p = prompt.lower()
+        host = any(w in p for w in ("host", "vm", "machine", "node"))
+        cc = "claude" in p or "codex" in p
+        for i, (condition, _result) in enumerate(run_eval._MOCK_ROUTES):
+            if condition(p, host, cc):
+                return i
+        return None
+
+    def test_every_mock_route_is_reached_with_its_original_result(self):
+        self.assertEqual(len(self.ROUTE_CASES), len(run_eval._MOCK_ROUTES))
+        for index, (prompt, expected) in enumerate(self.ROUTE_CASES):
+            with self.subTest(route=index, prompt=prompt):
+                self.assertEqual(self._matched_index(prompt), index)
+                self.assertEqual(self._route(prompt), expected)
+
 
 # ---------- score_case ----------
 class ScoreCaseTest(unittest.TestCase):

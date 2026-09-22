@@ -348,8 +348,10 @@ class FileLockTest(unittest.TestCase):
         lock_path = Path(str(self.target) + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with mock.patch("os.open", side_effect=FileExistsError()), \
-                mock.patch("os.path.getmtime", side_effect=OSError("vanished")):
+        with (
+            mock.patch("os.open", side_effect=FileExistsError()),
+            mock.patch("os.path.getmtime", side_effect=OSError("vanished")),
+        ):
             with self.assertRaises(TimeoutError):
                 with _store.FileLock(self.target, timeout_seconds=0.15, retry_interval=0.05):
                     pass
@@ -369,8 +371,10 @@ class FileLockTest(unittest.TestCase):
                 raise FileExistsError()
             return real_open(path, flags, mode)
 
-        with mock.patch("os.open", side_effect=flaky_open), \
-                mock.patch("os.path.getmtime", side_effect=OSError("vanished")):
+        with (
+            mock.patch("os.open", side_effect=flaky_open),
+            mock.patch("os.path.getmtime", side_effect=OSError("vanished")),
+        ):
             with _store.FileLock(self.target, timeout_seconds=2, retry_interval=0.01):
                 pass
         self.assertGreaterEqual(calls["n"], 2)
@@ -428,8 +432,7 @@ class AtomicReplaceTest(unittest.TestCase):
                 raise PermissionError("transient")
             return real_replace(src, dst)
 
-        with mock.patch("os.replace", side_effect=flaky_replace), \
-                mock.patch("time.sleep", return_value=None):
+        with mock.patch("os.replace", side_effect=flaky_replace), mock.patch("time.sleep", return_value=None):
             _store.atomic_replace(tmp, target)
         self.assertEqual(calls["n"], 3)
         self.assertEqual(target.read_text(), "new")
@@ -440,8 +443,10 @@ class AtomicReplaceTest(unittest.TestCase):
         tmp = Path(self.tmp_dir) / "file.txt.tmp"
         tmp.write_text("new")
 
-        with mock.patch("os.replace", side_effect=PermissionError("stuck")), \
-                mock.patch("time.sleep", return_value=None):
+        with (
+            mock.patch("os.replace", side_effect=PermissionError("stuck")),
+            mock.patch("time.sleep", return_value=None),
+        ):
             with self.assertRaises(PermissionError):
                 _store.atomic_replace(tmp, target)
 
@@ -478,9 +483,27 @@ class AtomicWriteTextTest(unittest.TestCase):
         # If os.fdopen raises before `fd = None` runs, the finally block
         # must still close the raw fd and clean up the tmp file.
         target = Path(self.tmp_dir) / "out.txt"
-        with mock.patch("os.fdopen", side_effect=OSError("boom")):
+        real_open, real_close = os.open, os.close
+        opened, closed = [], []
+
+        def tracking_open(*args, **kwargs):
+            fd = real_open(*args, **kwargs)
+            opened.append(fd)
+            return fd
+
+        def tracking_close(fd):
+            closed.append(fd)
+            return real_close(fd)
+
+        with (
+            mock.patch("os.fdopen", side_effect=OSError("boom")),
+            mock.patch("os.open", side_effect=tracking_open),
+            mock.patch("os.close", side_effect=tracking_close),
+        ):
             with self.assertRaises(OSError):
                 _store.atomic_write_text(target, "hello")
+        self.assertTrue(opened, "atomic_write_text never opened a temp file")
+        self.assertEqual(sorted(closed), sorted(opened), "raw fd leaked after os.fdopen failed")
         self.assertFalse(target.exists())
         leftovers = list(Path(self.tmp_dir).glob(".out.txt.*.tmp"))
         self.assertEqual(leftovers, [])
