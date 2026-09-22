@@ -173,6 +173,23 @@ class RunHarnessResultsFileTest(unittest.TestCase):
             report = canary._run_harness("vendor/model", "mock", Path("cases.jsonl"), 1)
         self.assertEqual(report, {"tool_accuracy": 0.9})
 
+    def test_model_id_cannot_steer_out_path_outside_results_dir(self):
+        seen = []
+
+        def fake_run(cmd, **kwargs):
+            out = self._out_path(cmd)
+            seen.append(out)
+            out.write_text(json.dumps({"tool_accuracy": 1.0}))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with mock.patch.object(canary.subprocess, "run", fake_run):
+            for model in ("x\\..\\..\\outside", "../../outside", "~/x", "a b:c/d"):
+                canary._run_harness(model, "mock", Path("cases.jsonl"), 1)
+        for out in seen:
+            with self.subTest(out=out.name):
+                self.assertEqual(out.parent, self.results_dir)
+                self.assertRegex(out.name, r"^canary-[A-Za-z0-9._-]+\.json$")
+
     def test_raises_when_out_path_missing(self):
         def fake_run(cmd, **kwargs):
             (self.results_dir / "someone-else.json").write_text(json.dumps({"tool_accuracy": 0.9}))

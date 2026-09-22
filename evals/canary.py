@@ -21,6 +21,7 @@ its internals.
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -137,7 +138,7 @@ def _run_harness(model, backend, cases_path, repeats, base_url=None, key_env=Non
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     # A caller-chosen, never-before-used path: snapshot-diffing RESULTS_DIR
     # raced concurrent runs whose second-resolution filenames collided.
-    safe_model = model.replace(":", "_").replace("/", "_")
+    safe_model = re.sub(r"[^A-Za-z0-9._-]", "_", model)
     out_path = RESULTS_DIR / f"canary-{safe_model}-{uuid.uuid4().hex}.json"
     cmd = [
         sys.executable,

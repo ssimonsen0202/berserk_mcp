@@ -481,6 +481,31 @@ class AppendToLedgerTest(unittest.TestCase):
         self.assertIsNone(record["latency_median_ms"])
 
 
+class ResultsPathTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.orig_here = run_eval.HERE
+        run_eval.HERE = Path(tmp.name)
+        self.addCleanup(setattr, run_eval, "HERE", self.orig_here)
+
+    def test_auto_name_stays_inside_results_dir_for_any_label(self):
+        results = run_eval.HERE / "results"
+        for label in ("openai_x\\..\\..\\outside", "openai_.._.._outside", "mock_mock", "a b~c"):
+            with self.subTest(label=label):
+                path = run_eval._results_path("", label)
+                self.assertEqual(path.parent, results)
+                self.assertRegex(path.name, r"^[A-Za-z0-9._-]+\.json$")
+
+    def test_mock_label_keeps_its_existing_prefix(self):
+        self.assertTrue(run_eval._results_path("", "mock_mock").name.startswith("mock_mock-"))
+
+    def test_explicit_out_is_used_as_given(self):
+        target = run_eval.HERE / "custom" / "r.json"
+        self.assertEqual(run_eval._results_path(str(target), "ignored"), target)
+        self.assertTrue(target.parent.is_dir())
+
+
 class PromptCachingTest(unittest.TestCase):
     TOOLS = [{"name": "t", "description": "d", "inputSchema": {"type": "object"}}]
 

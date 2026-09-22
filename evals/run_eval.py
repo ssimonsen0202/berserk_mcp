@@ -29,6 +29,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import secrets
 import statistics
 import subprocess
@@ -737,6 +738,9 @@ def _build_backend_runners(args_ns, tools, system):
     return run_one, run_multi_turn, label
 
 
+_SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
 def _results_path(out, safe_label):
     """Where to write this run's results JSON. An explicit --out wins;
     otherwise an auto-named file in evals/results/. The random suffix keeps
@@ -746,7 +750,9 @@ def _results_path(out, safe_label):
         path = Path(out)
     else:
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        path = HERE / "results" / f"{safe_label}-{stamp}-{secrets.token_hex(4)}.json"
+        # Allowlist, not a denylist: "\\" is a separator on Windows and model ids are free text.
+        name = _SAFE_FILENAME_RE.sub("_", safe_label)
+        path = HERE / "results" / f"{name}-{stamp}-{secrets.token_hex(4)}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
