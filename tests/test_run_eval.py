@@ -451,9 +451,11 @@ class PromptCachingTest(unittest.TestCase):
             run_eval._post = orig
         return sent["body"]
 
-    def _openai(self, model):
+    OPENROUTER = "https://openrouter.ai/api/v1"
+
+    def _openai(self, model, base_url=OPENROUTER):
         return self._capture(
-            lambda: run_eval.call_openai_compatible("http://x/v1", "", model, "SYS", "question", self.TOOLS, "auto")
+            lambda: run_eval.call_openai_compatible(base_url, "", model, "SYS", "question", self.TOOLS, "auto")
         )
 
     def test_openrouter_anthropic_model_marks_system_as_cache_breakpoint(self):
@@ -470,11 +472,21 @@ class PromptCachingTest(unittest.TestCase):
             with self.subTest(model=model):
                 self.assertEqual(self._openai(model)["messages"][0]["content"], "SYS")
 
+    def test_anthropic_model_on_other_openai_compatible_endpoint_is_not_marked(self):
+        for base_url in (
+            "http://127.0.0.1:4000/v1",
+            "https://openrouter.ai.evil.example/v1",
+            "https://api.openai.com/v1",
+        ):
+            with self.subTest(base_url=base_url):
+                body = self._openai("anthropic/claude-haiku-4.5", base_url)
+                self.assertEqual(body["messages"][0]["content"], "SYS")
+
     def test_multi_turn_caches_system_without_mutating_prior_messages(self):
         prior = [{"role": "user", "content": "q"}]
         body = self._capture(
             lambda: run_eval.call_openai_compatible_multi_turn(
-                "http://x/v1", "", "anthropic/claude-haiku-4.5", "SYS", prior, self.TOOLS, "auto"
+                self.OPENROUTER, "", "anthropic/claude-haiku-4.5", "SYS", prior, self.TOOLS, "auto"
             )
         )
         self.assertIn("cache_control", body["messages"][0]["content"][0])

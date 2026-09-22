@@ -211,6 +211,13 @@ def _call_with_retry(fn, max_retries=3, base_delay=2.0):
 _CACHE_BREAKPOINT = {"type": "ephemeral"}
 
 
+def _is_openrouter(base_url):
+    from urllib.parse import urlsplit
+
+    host = urlsplit(base_url).hostname or ""
+    return host == "openrouter.ai" or host.endswith(".openrouter.ai")
+
+
 def _with_cached_system(messages):
     """Mark the system message as an Anthropic cache breakpoint. Anthropic renders
     tools before system, so this one marker caches the whole tool list; OpenRouter
@@ -230,7 +237,7 @@ def _openai_chat_call(base_url, api_key, model, messages, tools, tool_choice):
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = "Bearer " + api_key
-    if model.lstrip("~").startswith("anthropic/"):
+    if model.lstrip("~").startswith("anthropic/") and _is_openrouter(base_url):
         messages = _with_cached_system(messages)
     body = {
         "model": model,
