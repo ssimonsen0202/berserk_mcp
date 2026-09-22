@@ -29,6 +29,7 @@ import argparse
 import hashlib
 import json
 import os
+import secrets
 import statistics
 import subprocess
 import sys
@@ -659,9 +660,6 @@ def _run_tier_policy(args_ns, cases):
     print(f"small-tier handled      : {small_handled}/{total} = {100 * small_handled / total:.0f}%")
     print(f"deep-tier escalations   : {total - small_handled}/{total}")
 
-    outdir = HERE / "results"
-    outdir.mkdir(exist_ok=True)
-    stamp = time.strftime("%Y%m%d-%H%M%S")
     safe = label.replace(":", "_").replace("/", "_").replace("→", "-")
     report = {
         "mode": "tier-policy",
@@ -673,9 +671,9 @@ def _run_tier_policy(args_ns, cases):
         "small_handled_pct": small_handled / total,
         "rows": rows,
     }
-    out_path = outdir / f"{safe}-{stamp}.json"
+    out_path = _results_path(args_ns.out, safe)
     out_path.write_text(json.dumps(report, indent=2))
-    print(f"\nsaved: evals/results/{out_path.name}")
+    print(f"\nsaved: {out_path}")
 
 
 def _build_backend_runners(args_ns, tools, system):
@@ -739,6 +737,20 @@ def _build_backend_runners(args_ns, tools, system):
     return run_one, run_multi_turn, label
 
 
+def _results_path(out, safe_label):
+    """Where to write this run's results JSON. An explicit --out wins;
+    otherwise an auto-named file in evals/results/. The random suffix keeps
+    two runs of the same label in the same second from sharing (and
+    overwriting) one filename -- second-resolution stamps alone collided."""
+    if out:
+        path = Path(out)
+    else:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        path = HERE / "results" / f"{safe_label}-{stamp}-{secrets.token_hex(4)}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cases", help="router_cases.jsonl")
@@ -749,6 +761,13 @@ def main():
     ap.add_argument("--repeats", type=int, default=1)
     ap.add_argument("--limit", type=int, default=0, help="run only first N cases")
     ap.add_argument("--tool-choice", default="", help="override tool_choice")
+    ap.add_argument(
+        "--out",
+        default="",
+        help="write the results JSON to exactly this path instead of an "
+        "auto-named file in evals/results/ -- lets a caller (ci_gate.py, "
+        "canary.py) read back its own run without racing concurrent runs",
+    )
     ap.add_argument(
         "--call-delay-ms",
         type=int,
@@ -868,9 +887,6 @@ def main():
     if agg["total_cost_usd"] is not None:
         print(f"total cost              : ${agg['total_cost_usd']:.4f}")
 
-    outdir = HERE / "results"
-    outdir.mkdir(exist_ok=True)
-    stamp = time.strftime("%Y%m%d-%H%M%S")
     safe = label.replace(":", "_").replace("/", "_")
     report = {
         "backend": args_ns.backend,
@@ -881,8 +897,9 @@ def main():
         **agg,
         "rows": rows,
     }
-    (outdir / f"{safe}-{stamp}.json").write_text(json.dumps(report, indent=2))
-    print(f"\nsaved: evals/results/{safe}-{stamp}.json")
+    out_path = _results_path(args_ns.out, safe)
+    out_path.write_text(json.dumps(report, indent=2))
+    print(f"\nsaved: {out_path}")
     append_to_ledger(
         backend=args_ns.backend,
         model=args_ns.model,

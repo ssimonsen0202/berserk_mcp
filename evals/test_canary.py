@@ -1,5 +1,8 @@
+import json
 import os
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -138,6 +141,46 @@ class RunCanaryProviderRoutingTest(unittest.TestCase):
         self.assertIsNone(captured["base_url"])
         self.assertIsNone(captured["key_env"])
         self.assertIsNone(captured["tool_choice"])
+
+
+class RunHarnessResultsFileTest(unittest.TestCase):
+    """_run_harness must read the report run_eval.py wrote to the --out path
+    it was given, not diff a shared dir that concurrent runs also write to."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.results_dir = Path(tmp.name)
+        patcher = mock.patch.object(canary, "RESULTS_DIR", self.results_dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def _out_path(cmd):
+        return Path(cmd[cmd.index("--out") + 1])
+
+    def test_reads_own_out_path_despite_concurrent_file(self):
+        def fake_run(cmd, **kwargs):
+            out = self._out_path(cmd)
+            self.assertFalse(out.exists())
+            self.assertEqual(out.parent, self.results_dir)
+            self.assertIn("vendor_model", out.name)
+            (self.results_dir / "zzz-newer-concurrent.json").write_text(json.dumps({"tool_accuracy": 0.1}))
+            out.write_text(json.dumps({"tool_accuracy": 0.9}))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with mock.patch.object(canary.subprocess, "run", fake_run):
+            report = canary._run_harness("vendor/model", "mock", Path("cases.jsonl"), 1)
+        self.assertEqual(report, {"tool_accuracy": 0.9})
+
+    def test_raises_when_out_path_missing(self):
+        def fake_run(cmd, **kwargs):
+            (self.results_dir / "someone-else.json").write_text(json.dumps({"tool_accuracy": 0.9}))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with mock.patch.object(canary.subprocess, "run", fake_run):
+            with self.assertRaisesRegex(RuntimeError, "no results file"):
+                canary._run_harness("m", "mock", Path("cases.jsonl"), 1)
 
 
 class EmitTest(unittest.TestCase):

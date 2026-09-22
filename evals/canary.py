@@ -135,8 +135,22 @@ def build_failure_record(model, backend, version, run_id, started_ns, error):
 def _run_harness(model, backend, cases_path, repeats, base_url=None, key_env=None, tool_choice=None, timeout=900):
     """Invoke run_eval.py and return its saved report. Mirrors ci_gate.py."""
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    before = set(RESULTS_DIR.glob("*.json"))
-    cmd = [sys.executable, str(HERE / "run_eval.py"), "--backend", backend, "--model", model, "--repeats", str(repeats)]
+    # A caller-chosen, never-before-used path: snapshot-diffing RESULTS_DIR
+    # raced concurrent runs whose second-resolution filenames collided.
+    safe_model = model.replace(":", "_").replace("/", "_")
+    out_path = RESULTS_DIR / f"canary-{safe_model}-{uuid.uuid4().hex}.json"
+    cmd = [
+        sys.executable,
+        str(HERE / "run_eval.py"),
+        "--backend",
+        backend,
+        "--model",
+        model,
+        "--repeats",
+        str(repeats),
+        "--out",
+        str(out_path),
+    ]
     if base_url:
         cmd += ["--base-url", base_url]
     if key_env:
@@ -147,11 +161,9 @@ def _run_harness(model, backend, cases_path, repeats, base_url=None, key_env=Non
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
         raise RuntimeError(f"run_eval.py exited {proc.returncode}: {proc.stderr[:500]}")
-    new_files = set(RESULTS_DIR.glob("*.json")) - before
-    if not new_files:
-        raise RuntimeError("run_eval.py produced no new results file")
-    newest = max(new_files, key=lambda p: p.stat().st_mtime)
-    return json.loads(newest.read_text(encoding="utf-8"))
+    if not out_path.is_file():
+        raise RuntimeError(f"run_eval.py produced no results file at {out_path}")
+    return json.loads(out_path.read_text(encoding="utf-8"))
 
 
 def run_canary(

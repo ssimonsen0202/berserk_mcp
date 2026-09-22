@@ -20,13 +20,13 @@ import json
 import math
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 MIN_TOOL_ACCURACY = 0.65
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CASES_PATH = REPO_ROOT / "evals" / "router_cases.jsonl"
-RESULTS_DIR = REPO_ROOT / "evals" / "results"
 
 
 def check_accuracy(results, min_accuracy=MIN_TOOL_ACCURACY):
@@ -49,26 +49,38 @@ def check_accuracy(results, min_accuracy=MIN_TOOL_ACCURACY):
     return True, f"router eval OK: {pct:.1f}% >= {min_pct:.0f}% threshold"
 
 
-def _run_eval_and_load_results():
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    before = set(RESULTS_DIR.glob("mock_*.json"))
-    result = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "evals" / "run_eval.py"), "--backend", "mock", str(CASES_PATH)],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    print(result.stdout)
-    if result.stderr:
-        print(result.stderr, file=sys.stderr)
-    if result.returncode != 0:
-        sys.exit(f"run_eval.py exited {result.returncode}")
-    after = set(RESULTS_DIR.glob("mock_*.json"))
-    new_files = after - before
-    if not new_files:
-        sys.exit("run_eval.py did not produce a new results file")
-    results_path = max(new_files, key=lambda p: p.stat().st_mtime)
-    return json.loads(results_path.read_text(encoding="utf-8"))
+def _run_eval_and_load_results(run=subprocess.run):
+    """Run the mock eval into a private temp file and load exactly that file.
+
+    Snapshot-diffing the shared evals/results/ dir raced any other mock run:
+    run_eval.py stamps filenames to the second, so a run landing in the same
+    second produced an already-present name and the gate saw "no new file"
+    (or could read another run's report). A fresh temp dir cannot collide,
+    and the gate still fails closed if run_eval.py writes nothing there."""
+    with tempfile.TemporaryDirectory(prefix="ci_gate-") as tmp:
+        results_path = Path(tmp) / "results.json"
+        result = run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "evals" / "run_eval.py"),
+                "--backend",
+                "mock",
+                "--out",
+                str(results_path),
+                str(CASES_PATH),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        print(result.stdout)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+        if result.returncode != 0:
+            sys.exit(f"run_eval.py exited {result.returncode}")
+        if not results_path.is_file():
+            sys.exit(f"run_eval.py did not produce a results file at {results_path}")
+        return json.loads(results_path.read_text(encoding="utf-8"))
 
 
 def main():
