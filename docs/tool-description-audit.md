@@ -159,6 +159,50 @@ case before a description gets touched — that discipline is what keeps this
 proactive pass from becoming the speculative churn the rest of this document
 already warns against.
 
+## Addendum, 2026-09-22: SOC spike and new-services descriptions
+
+**Changed:** `soc_log_spike`, `detect_anomalies`, `soc_new_services`,
+`detect_new_sources` (commit `85f14ef`).
+
+**Reason: accuracy, not a routing miss.** Two descriptions claimed behaviour
+their queries do not have:
+
+- `soc_log_spike` claimed "largest log volume" and "anything anomalous".
+  `Q_SOC_LOG_SPIKE` returns a raw per-minute count series for each service. It
+  does no ranking and no statistics; `detect_anomalies` does the statistics.
+- `soc_new_services` claimed "did a new source appear". `Q_SOC_NEW_SERVICES`
+  takes `min(timestamp)` inside the query window, so a quiet long-lived
+  service looks new. `detect_new_sources` compares against a stored baseline
+  (`parser_factory.detect_new_sources`; the first run only records it).
+
+Each description now states what its query does and names its pair.
+
+**Evidence.** Two cases use the phrases both tools claimed:
+`nm_anything_anomalous` and `nm_did_new_source_appear`
+(`evals/router_cases_nearmiss.jsonl`). `nm_volume_not_statistical` and
+`nm_first_seen_order` are the guard rails for the other side of each pair.
+Runs are in `evals/run_ledger.jsonl`, 2026-09-22.
+
+| Model | Before (`e2f1ca4`) | After (`85f14ef`) | The 4 cases |
+|---|---|---|---|
+| Haiku 4.5 | 39/40 | 39/40 | 4/4 before and after |
+| DeepSeek V4.1 Flash | 40/40 | 40/40 | 4/4 before and after |
+
+Both models routed the shared phrases correctly before the change. The change
+fixed no routing miss and caused no regression. Haiku's one miss is the same in
+both runs (`nm_drain_not_generate_one` → `discovery_status`) and is not related
+to these tools.
+
+**Side effects to know about:**
+
+- `evals/tool_collisions.py` now joins `soc_log_spike` and `detect_anomalies`
+  (description ratio 0.57). The cross-references add shared words. This is the
+  same effect as the `claude_loop_check` cross-reference in the addendum above.
+  It does not mean the pair is more confusable.
+- `detect_anomalies` has one frozen canary case (`detect_anomalies_volume`),
+  and the canary does not fingerprint the tool schema. A small canary score
+  change after `85f14ef` comes from this description change, not model drift.
+
 ## Follow-up
 
 The SOC, core, discovery, learning-loop, parser-factory, and CanonLoom
