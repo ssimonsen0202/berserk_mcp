@@ -1,0 +1,45 @@
+{"id": "container_host_map", "prompt": "Which VM is the checkout-api container actually running on?", "expect_tool": "container_hosts"}
+{"id": "list_metric_names", "prompt": "What metric names are we ingesting right now? I want to know what telemetry exists before I write a query.", "expect_tool": "list_metrics"}
+{"id": "bzrk_latency", "prompt": "How fast is Berserk itself? Give me the p95 and p99 query execution time.", "expect_tool": "bzrk_query_perf"}
+{"id": "discover_schema_svc", "prompt": "What fields and resource keys does the payments service send? I need the data shape before querying it.", "expect_tool": "discover_schema", "expect_args": {"service": "payments"}}
+{"id": "self_check", "prompt": "Every tool call keeps failing. Run a preflight check on this MCP server's setup and auth.", "expect_tool": "self_check"}
+{"id": "validate_kql", "prompt": "Before I save it, will this KQL work? Logs | where severity_text == 'ERROR' | take 10", "expect_tool": "validate_kql"}
+{"id": "trace_slow", "prompt": "Find the slowest requests in the last hour.", "expect_tool": "trace_find_slow"}
+{"id": "trace_failed", "prompt": "Which traced requests failed recently? Show me the error spans.", "expect_tool": "trace_find_errors"}
+{"id": "trace_analyze_hex", "prompt": "Break down trace 4bf92f3577b34da6a3ce929d0e0e4736 span by span, with its logs.", "expect_tool": "trace_analyze", "expect_args": {"trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"}}
+{"id": "trace_analyze_short", "prompt": "Show every span for trace id abc123def456.", "expect_tool": "trace_analyze", "expect_args": {"trace_id": "abc123def456"}}
+{"id": "sre_headroom", "prompt": "Which host is closest to saturation on CPU and memory together?", "expect_tool": "sre_host_headroom"}
+{"id": "sre_ingest", "prompt": "Are we dropping telemetry? Is Berserk ingest lagging on any host?", "expect_tool": "sre_ingest_health"}
+{"id": "sre_top_messages", "prompt": "What error message is dominating right now? Give me the top error signatures by service.", "expect_tool": "sre_top_error_messages"}
+{"id": "soc_severe", "prompt": "Show me recent CRITICAL and FATAL log events.", "expect_tool": "soc_high_severity_logs"}
+{"id": "soc_spike", "prompt": "Is any source spiking? I'm seeing a suspicious burst of log volume.", "expect_tool": "soc_log_spike"}
+{"id": "soc_new", "prompt": "Did a new log source appear today? Show services by first-seen time.", "expect_tool": "soc_new_services", "expect_since_any": ["24", "1d", "day", "today"]}
+{"id": "soc_repeat", "prompt": "What error keeps repeating? Could be a probe or a retry loop.", "expect_tool": "soc_repeated_errors"}
+{"id": "soc_timeline_svc", "prompt": "Reconstruct the incident timeline for the auth-gateway service.", "expect_tool": "soc_timeline", "expect_args": {"service": "auth-gateway"}}
+{"id": "cc_model_fit", "prompt": "Am I using Opus on trivial Claude Code work? Check whether my model choice fits the tasks.", "expect_tool": "claude_model_fit"}
+{"id": "cc_quota", "prompt": "How much of my Claude Code 5-hour quota window have I used?", "expect_tool": "claude_quota_status"}
+{"id": "cc_spend_team", "prompt": "Give me an overview of Claude spend this month grouped by team.", "expect_tool": "claude_spend_overview", "expect_args": {"group_by": "team"}}
+{"id": "cc_feature_cost", "prompt": "What did feature FEAT-142 cost in AI spend and developer hours?", "expect_tool": "claude_feature_cost", "expect_args": {"feature_id": "FEAT-142"}}
+{"id": "cc_project_econ", "prompt": "Show the economics for project billing-platform: budget, AI cost and hours per feature.", "expect_tool": "claude_project_economics", "expect_args": {"project_id": "billing-platform"}}
+{"id": "cc_harness_recs", "prompt": "Suggest evidence-backed changes to my Claude Code harness configuration.", "expect_tool": "claude_harness_recommendations"}
+{"id": "cc_record_decision", "prompt": "Record that I approve recommendation rec-017, owner alice, rationale: cuts retries in half.", "expect_tool": "claude_record_recommendation_decision", "expect_args": {"recommendation_id": "rec-017", "decision": "approved", "owner": "alice"}}
+{"id": "cc_opt_impact", "prompt": "Did switching the reviewer agent from harness v1 to harness v2 help? Should I keep it or roll back?", "expect_tool": "claude_optimization_impact", "expect_args": {"agent_profile": "reviewer", "before_harness": "v1", "after_harness": "v2"}}
+{"id": "cc_mgmt_report", "prompt": "Produce a management report on AI usage for the platform team.", "expect_tool": "claude_management_report"}
+{"id": "cc_dashboard", "prompt": "Generate an HTML dashboard of our Claude usage that I can open locally.", "expect_tool": "claude_generate_dashboard"}
+{"id": "drift_check", "prompt": "Has any canaried model started routing tools worse than it used to?", "expect_tool": "model_drift_check"}
+{"id": "drift_history", "prompt": "Show the canary score history for model gpt-4o so I can see when the drift began.", "expect_tool": "model_drift_history", "expect_args": {"model": "gpt-4o"}}
+{"id": "scan_secrets", "prompt": "Are any API keys or passwords leaking into our log bodies?", "expect_tool": "scan_secrets"}
+{"id": "suggest_ingest", "prompt": "I'm a SOC analyst. What telemetry sources should we be ingesting for my role?", "expect_tool": "suggest_ingestion"}
+{"id": "canon_run", "prompt": "Send https://example.com/runbooks/postgres-failover through the CanonLoom pipeline.", "expect_tool": "canonloom_run_pipeline", "expect_args": {"url": "https://example.com/runbooks/postgres-failover"}}
+{"id": "canon_list", "prompt": "List the skill artifacts in the CanonLoom knowledge repository.", "expect_tool": "canonloom_list_artifacts"}
+{"id": "canon_get", "prompt": "Fetch the CanonLoom artifact manifest for artifact art-9f2c.", "expect_tool": "canonloom_get_artifact", "expect_args": {"artifact_id": "art-9f2c"}}
+{"id": "canon_fresh", "prompt": "Which CanonLoom skills are going stale and should be deprecated?", "expect_tool": "canonloom_freshness_report"}
+{"id": "canon_history", "prompt": "Show recent CanonLoom pipeline runs and how they ended.", "expect_tool": "canonloom_run_history"}
+{"id": "run_saved", "prompt": "Run my saved query called nightly_errors.", "expect_tool": "run_saved", "expect_args": {"name": "nightly_errors"}}
+{"id": "request_discovery", "prompt": "I just started shipping logs from a new service called ledger-sync. Queue it for integration.", "expect_tool": "request_discovery", "expect_args": {"service": "ledger-sync"}}
+{"id": "discovery_status", "prompt": "What discovery jobs are pending or finished?", "expect_tool": "discovery_status"}
+{"id": "detect_new", "prompt": "Is anything new reporting into Berserk that we have never seen before?", "expect_tool": "detect_new_sources"}
+{"id": "generate_parser", "prompt": "Generate and verify a query pack for the ledger-sync service right now.", "expect_tool": "generate_parser", "expect_args": {"service": "ledger-sync"}}
+{"id": "run_worker", "prompt": "Drain the queued discovery jobs and author query packs for them.", "expect_tool": "run_discovery_worker"}
+{"id": "review_generated", "prompt": "Before I trust them, list the LLM-generated saved queries and which model wrote each.", "expect_tool": "review_generated"}
+{"id": "find_tool", "prompt": "I don't see a tool for this in my list. Find me a tool that can compare cost before and after a harness change.", "expect_tool": "find_tool"}
