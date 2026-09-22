@@ -22,7 +22,7 @@
 {"id": "cc_feature_cost", "prompt": "What did feature FEAT-142 cost in AI spend and developer hours?", "expect_tool": "claude_feature_cost", "expect_args": {"feature_id": "FEAT-142"}}
 {"id": "cc_project_econ", "prompt": "Show the economics for project billing-platform: budget, AI cost and hours per feature.", "expect_tool": "claude_project_economics", "expect_args": {"project_id": "billing-platform"}}
 {"id": "cc_harness_recs", "prompt": "Suggest evidence-backed changes to my Claude Code harness configuration.", "expect_tool": "claude_harness_recommendations"}
-{"id": "cc_record_decision", "prompt": "Record that I approve recommendation rec-017, owner alice, rationale: cuts retries in half.", "expect_tool": "claude_record_recommendation_decision", "expect_args": {"recommendation_id": "rec-017", "decision": "approved", "owner": "alice"}}
+{"id": "cc_record_decision", "prompt": "Record that I approve recommendation rec_3f9a0c1d2e4b5a67, owner platform-team, rationale: cuts retries in half.", "expect_tool": "claude_record_recommendation_decision", "expect_args": {"recommendation_id": "rec_3f9a0c1d2e4b5a67", "decision": "approved", "owner": "platform-team"}}
 {"id": "cc_opt_impact", "prompt": "Did switching the reviewer agent from harness v1 to harness v2 help? Should I keep it or roll back?", "expect_tool": "claude_optimization_impact", "expect_args": {"agent_profile": "reviewer", "before_harness": "v1", "after_harness": "v2"}}
 {"id": "cc_mgmt_report", "prompt": "Produce a management report on AI usage for the platform team.", "expect_tool": "claude_management_report"}
 {"id": "cc_dashboard", "prompt": "Generate an HTML dashboard of our Claude usage that I can open locally.", "expect_tool": "claude_generate_dashboard"}

@@ -78,6 +78,8 @@ class RouterCaseCoverageTest(unittest.TestCase):
                     self.assertIn(arg, props)
                     if "enum" in props[arg]:
                         self.assertIn(value, props[arg]["enum"])
+                    if "pattern" in props[arg]:
+                        self.assertRegex(str(value), props[arg]["pattern"])
 
 
 if __name__ == "__main__":
