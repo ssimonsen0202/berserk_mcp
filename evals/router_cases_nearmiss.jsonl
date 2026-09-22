@@ -1,0 +1,38 @@
+{"id": "nm_error_counts_not_text", "prompt": "How many ERROR lines has each service logged in the last hour? Just the counts, no log text.", "expect_tool": "errors_by_service"}
+{"id": "nm_error_text_not_counts", "prompt": "Don't count them, show me the actual error messages the billing service is logging.", "expect_tool": "logs_for_service", "expect_args": {"service": "billing"}}
+{"id": "nm_rate_not_root_cause", "prompt": "Is any service's error rate climbing minute by minute? I don't need a root cause yet, just the rate.", "expect_tool": "sre_error_rate"}
+{"id": "nm_root_cause_not_rate", "prompt": "Checkout errors jumped ten minutes ago. Walk me through what is causing them.", "expect_tool": "investigate_error_rate"}
+{"id": "nm_health_not_rate", "prompt": "Give me a health rollup for the search-api service: total events, errors and when it was last seen.", "expect_tool": "sre_service_health", "expect_args": {"service": "search-api"}}
+{"id": "nm_statistical_not_volume", "prompt": "Run statistical anomaly detection on the event volume of the orders service over time.", "expect_tool": "detect_anomalies", "expect_args": {"service": "orders"}}
+{"id": "nm_volume_not_statistical", "prompt": "Which service is writing the highest number of log lines per minute right now?", "expect_tool": "soc_log_spike"}
+{"id": "nm_meaning_not_exact", "prompt": "Find log messages that mean the same thing as 'payment declined', even if they are worded differently.", "expect_tool": "find_similar"}
+{"id": "nm_dominant_not_repeated", "prompt": "Which single error message is dominating each service right now, so I know what to investigate first?", "expect_tool": "sre_top_error_messages"}
+{"id": "nm_repeated_not_dominant", "prompt": "Show error messages that recur more than five times; I suspect a scanner probing us or a retry loop.", "expect_tool": "soc_repeated_errors"}
+{"id": "nm_failed_spans_not_log_errors", "prompt": "Which requests failed? I want failing spans that I can open by trace id, not log error counts.", "expect_tool": "trace_find_errors"}
+{"id": "nm_headroom_not_cpu", "prompt": "Put CPU load and memory used side by side for every host so I can see which one has the least headroom.", "expect_tool": "sre_host_headroom"}
+{"id": "nm_cpu_not_headroom", "prompt": "Just the 1-minute load average for each host, nothing about memory.", "expect_tool": "host_cpu"}
+{"id": "nm_forecast_not_current", "prompt": "At the current growth rate, when will memory on the database host run out?", "expect_tool": "forecast_capacity"}
+{"id": "nm_container_host_not_host_cpu", "prompt": "The redis container is slow. Which machine is it actually running on?", "expect_tool": "container_hosts"}
+{"id": "nm_tables_not_source_shape", "prompt": "Not for any particular service: list Berserk's tables and their column schema.", "expect_tool": "schema"}
+{"id": "nm_source_shape_not_tables", "prompt": "What resource keys does the newly ingested kafka-connect source send? I need its shape before I query it.", "expect_tool": "discover_schema", "expect_args": {"service": "kafka-connect"}}
+{"id": "nm_register_not_scan", "prompt": "I connected a new source called edge-proxy yesterday. Register it so someone writes a parser for it.", "expect_tool": "request_discovery", "expect_args": {"service": "edge-proxy"}}
+{"id": "nm_scan_and_queue", "prompt": "Scan for services and metrics we have never seen before and queue any newcomers for parser generation.", "expect_tool": "detect_new_sources"}
+{"id": "nm_first_seen_order", "prompt": "List our services ordered by when each one first appeared.", "expect_tool": "soc_new_services"}
+{"id": "nm_drain_not_generate_one", "prompt": "Work through everything waiting in the discovery queue.", "expect_tool": "run_discovery_worker"}
+{"id": "nm_generate_now_not_queue", "prompt": "Don't queue it. Author and verify a query pack for the metric kafka.consumer.lag right now.", "expect_tool": "generate_parser", "expect_args": {"metric": "kafka.consumer.lag"}}
+{"id": "nm_check_saved_first", "prompt": "Before anyone writes new KQL: do we already have a saved query about slow checkouts?", "expect_tool": "list_saved"}
+{"id": "nm_run_saved_not_list", "prompt": "Execute the saved query slow_checkouts.", "expect_tool": "run_saved", "expect_args": {"name": "slow_checkouts"}}
+{"id": "nm_audit_generated_not_list", "prompt": "Which of our saved queries were written by an LLM, and by which provider and model?", "expect_tool": "review_generated"}
+{"id": "nm_validate_not_run", "prompt": "Don't run it, just tell me if this is valid KQL: Logs | summarize count() by bin(timestamp, 5m)", "expect_tool": "validate_kql"}
+{"id": "nm_run_not_validate", "prompt": "Run this KQL and show the rows: Logs | where resource['service.name'] == 'cart' | take 20", "expect_tool": "search"}
+{"id": "nm_selfcheck_not_ingest", "prompt": "Is this MCP server's bzrk binary, auth and store directory set up correctly?", "expect_tool": "self_check"}
+{"id": "nm_timeline_not_logs", "prompt": "Reconstruct what happened to the auth service during last night's incident, in time order with severities.", "expect_tool": "soc_timeline", "expect_args": {"service": "auth"}}
+{"id": "nm_severe_all_not_one", "prompt": "Across every service, show CRITICAL and FATAL events with their message text.", "expect_tool": "soc_high_severity_logs"}
+{"id": "nm_quota_not_cost", "prompt": "Am I about to hit my Claude Code usage limit in the current window?", "expect_tool": "claude_quota_status"}
+{"id": "nm_cost_trend_not_burn", "prompt": "Over the last week, is my Claude Code daily cost growing, flat or declining?", "expect_tool": "claude_cost_report"}
+{"id": "nm_spend_by_repo", "prompt": "Break down enterprise Claude spend by repository and tell me how much of it has pricing coverage.", "expect_tool": "claude_spend_overview", "expect_args": {"group_by": "repository"}}
+{"id": "nm_efficiency_not_recs", "prompt": "Compare cache reuse and cost per successful outcome across our agent cohorts.", "expect_tool": "claude_efficiency_insights"}
+{"id": "nm_recs_not_impact", "prompt": "Nothing has been changed yet. What harness amendments does the evidence support?", "expect_tool": "claude_harness_recommendations"}
+{"id": "nm_project_not_feature", "prompt": "Roll up AI cost and developer hours across all features in the checkout-rewrite project.", "expect_tool": "claude_project_economics", "expect_args": {"project_id": "checkout-rewrite"}}
+{"id": "nm_mgmt_not_economics", "prompt": "I need a management-ready report on the payments team that I can hand to leadership.", "expect_tool": "claude_management_report"}
+{"id": "nm_drift_history_not_check", "prompt": "The drift check flagged mistral-small as a step change. Show that model's score history over time.", "expect_tool": "model_drift_history", "expect_args": {"model": "mistral-small"}}
