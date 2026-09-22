@@ -431,5 +431,74 @@ class AppendToLedgerTest(unittest.TestCase):
         self.assertIsNone(record["latency_median_ms"])
 
 
+class PromptCachingTest(unittest.TestCase):
+    TOOLS = [{"name": "t", "description": "d", "inputSchema": {"type": "object"}}]
+
+    def _capture(self, call):
+        sent = {}
+
+        def fake_post(url, headers, body, timeout=120):
+            sent["body"] = body
+            if "anthropic.com" in url:
+                return {"content": [], "usage": {}}, 0.0
+            return {"choices": [{"message": {}}], "usage": {}}, 0.0
+
+        orig = run_eval._post
+        run_eval._post = fake_post
+        try:
+            call()
+        finally:
+            run_eval._post = orig
+        return sent["body"]
+
+    def _openai(self, model):
+        return self._capture(
+            lambda: run_eval.call_openai_compatible("http://x/v1", "", model, "SYS", "question", self.TOOLS, "auto")
+        )
+
+    def test_openrouter_anthropic_model_marks_system_as_cache_breakpoint(self):
+        for model in ("anthropic/claude-haiku-4.5", "~anthropic/claude-haiku-latest"):
+            with self.subTest(model=model):
+                system, user = self._openai(model)["messages"]
+                self.assertEqual(
+                    system["content"], [{"type": "text", "text": "SYS", "cache_control": {"type": "ephemeral"}}]
+                )
+                self.assertEqual(user["content"], "question")
+
+    def test_non_anthropic_models_keep_plain_string_system(self):
+        for model in ("deepseek/deepseek-v4.1-flash", "qwen2.5:7b", "gpt-4o"):
+            with self.subTest(model=model):
+                self.assertEqual(self._openai(model)["messages"][0]["content"], "SYS")
+
+    def test_multi_turn_caches_system_without_mutating_prior_messages(self):
+        prior = [{"role": "user", "content": "q"}]
+        body = self._capture(
+            lambda: run_eval.call_openai_compatible_multi_turn(
+                "http://x/v1", "", "anthropic/claude-haiku-4.5", "SYS", prior, self.TOOLS, "auto"
+            )
+        )
+        self.assertIn("cache_control", body["messages"][0]["content"][0])
+        self.assertEqual(prior, [{"role": "user", "content": "q"}])
+
+    def test_direct_anthropic_marks_system_as_cache_breakpoint(self):
+        body = self._capture(
+            lambda: run_eval.call_anthropic("k", "claude-haiku-4-5", "SYS", "question", self.TOOLS, {"type": "any"})
+        )
+        self.assertEqual(body["system"], [{"type": "text", "text": "SYS", "cache_control": {"type": "ephemeral"}}])
+
+    def test_usage_fields_counts_anthropic_cache_reads_and_writes(self):
+        f = run_eval.usage_fields(
+            {"input_tokens": 40, "cache_read_input_tokens": 30000, "cache_creation_input_tokens": 0, "output_tokens": 9}
+        )
+        self.assertEqual(f["prompt_tokens"], 30040)
+        self.assertEqual(f["cached_tokens"], 30000)
+        self.assertEqual(f["completion_tokens"], 9)
+
+    def test_usage_fields_anthropic_first_call_counts_cache_write_as_input(self):
+        f = run_eval.usage_fields({"input_tokens": 40, "cache_creation_input_tokens": 30000, "output_tokens": 9})
+        self.assertEqual(f["prompt_tokens"], 30040)
+        self.assertIsNone(f["cached_tokens"])
+
+
 if __name__ == "__main__":
     unittest.main()

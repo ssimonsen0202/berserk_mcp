@@ -11,7 +11,7 @@
 {"id": "nm_failed_spans_not_log_errors", "prompt": "Which requests failed? I want failing spans that I can open by trace id, not log error counts.", "expect_tool": "trace_find_errors"}
 {"id": "nm_headroom_not_cpu", "prompt": "Put CPU load and memory used side by side for every host so I can see which one has the least headroom.", "expect_tool": "sre_host_headroom"}
 {"id": "nm_cpu_not_headroom", "prompt": "Just the 1-minute load average for each host, nothing about memory.", "expect_tool": "host_cpu"}
-{"id": "nm_forecast_not_current", "prompt": "At the current growth rate, when will memory on the database host run out?", "expect_tool": "forecast_capacity"}
+{"id": "nm_forecast_not_current", "prompt": "At the current growth rate, when will memory on host db-01 run out?", "expect_tool": "forecast_capacity", "expect_args": {"host": "db-01", "metric": "system.memory.usage"}}
 {"id": "nm_container_host_not_host_cpu", "prompt": "The redis container is slow. Which machine is it actually running on?", "expect_tool": "container_hosts"}
 {"id": "nm_tables_not_source_shape", "prompt": "Not for any particular service: list Berserk's tables and their column schema.", "expect_tool": "schema"}
 {"id": "nm_source_shape_not_tables", "prompt": "What resource keys does the newly ingested kafka-connect source send? I need its shape before I query it.", "expect_tool": "discover_schema", "expect_args": {"service": "kafka-connect"}}

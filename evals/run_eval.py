@@ -208,12 +208,30 @@ def _call_with_retry(fn, max_retries=3, base_delay=2.0):
     raise RuntimeError(last_err)
 
 
+_CACHE_BREAKPOINT = {"type": "ephemeral"}
+
+
+def _with_cached_system(messages):
+    """Mark the system message as an Anthropic cache breakpoint. Anthropic renders
+    tools before system, so this one marker caches the whole tool list; OpenRouter
+    forwards content-part cache_control to Anthropic. Other providers cache
+    automatically or may reject content arrays, so only anthropic/* models get it."""
+    out = []
+    for msg in messages:
+        if msg.get("role") == "system" and isinstance(msg.get("content"), str):
+            msg = {**msg, "content": [{"type": "text", "text": msg["content"], "cache_control": _CACHE_BREAKPOINT}]}
+        out.append(msg)
+    return out
+
+
 def _openai_chat_call(base_url, api_key, model, messages, tools, tool_choice):
     """Shared by the single-turn and multi-turn OpenAI-compatible callers --
     both just build a different `messages` list and hand it here."""
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = "Bearer " + api_key
+    if model.lstrip("~").startswith("anthropic/"):
+        messages = _with_cached_system(messages)
     body = {
         "model": model,
         "temperature": 0,
@@ -256,7 +274,7 @@ def _anthropic_messages_call(api_key, model, system, messages, tools, tool_choic
         "model": model,
         "max_tokens": 512,
         "temperature": 0,
-        "system": system,
+        "system": [{"type": "text", "text": system, "cache_control": _CACHE_BREAKPOINT}],
         "tools": tools,
         "tool_choice": tool_choice,
         "messages": messages,
@@ -452,10 +470,20 @@ def usage_fields(usage):
     their absence means "this backend doesn't report it", not "it was free"
     or "nothing was cached"; a fabricated 0 there would be misleading."""
     usage = usage or {}
-    prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0
+    cache_read = usage.get("cache_read_input_tokens")
+    if "prompt_tokens" in usage:
+        prompt_tokens = usage.get("prompt_tokens") or 0
+    else:
+        # Anthropic's input_tokens excludes cache reads and writes; add them back so
+        # prompt_tokens means total input tokens on every backend.
+        prompt_tokens = (
+            (usage.get("input_tokens") or 0) + (cache_read or 0) + (usage.get("cache_creation_input_tokens") or 0)
+        )
+    cached_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+    if cached_tokens is None:
+        cached_tokens = cache_read
     completion_tokens = usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0
     cost_usd = usage.get("cost")
-    cached_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
     return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
