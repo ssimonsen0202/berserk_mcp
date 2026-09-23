@@ -7259,5 +7259,127 @@ class ModelDriftDispatcherFingerprintTest(unittest.TestCase):
             bm.bzrk_search_json = orig
 
 
+class SubscriptionsListenTest(unittest.TestCase):
+    """2026-07-28 subscriptions/listen on stdio (MCP SDK SubscriptionsListenRequest)."""
+
+    def setUp(self):
+        self._saved = (
+            bm._TRANSPORT,
+            bm.ENABLE_MCP_2026_07_28,
+            bm._MODERN_STDIO_CLIENT,
+            dict(bm._LISTEN_SUBSCRIPTIONS),
+            bm.send,
+        )
+        bm._TRANSPORT = "stdio"
+        bm.ENABLE_MCP_2026_07_28 = True
+        bm._MODERN_STDIO_CLIENT = False
+        bm._LISTEN_SUBSCRIPTIONS.clear()
+        self.sent = []
+        bm.send = self.sent.append
+
+    def tearDown(self):
+        bm._TRANSPORT, bm.ENABLE_MCP_2026_07_28, bm._MODERN_STDIO_CLIENT, subs, bm.send = self._saved
+        bm._LISTEN_SUBSCRIPTIONS.clear()
+        bm._LISTEN_SUBSCRIPTIONS.update(subs)
+
+    def _meta(self, version="2026-07-28"):
+        return {
+            bm.MCP_META_PROTOCOL_VERSION: version,
+            bm.MCP_META_CLIENT_INFO: {"name": "t", "version": "1"},
+            bm.MCP_META_CLIENT_CAPABILITIES: {},
+        }
+
+    def _listen(self, id_, notifications, version="2026-07-28"):
+        return bm.dispatch(
+            {
+                "jsonrpc": "2.0",
+                "id": id_,
+                "method": "subscriptions/listen",
+                "params": {"_meta": self._meta(version), "notifications": notifications},
+            }
+        )
+
+    def test_listen_acknowledges_with_subscription_id_and_holds_request_open(self):
+        self.assertIsNone(self._listen("s1", {"toolsListChanged": True}))
+        self.assertEqual(
+            self.sent,
+            [
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/subscriptions/acknowledged",
+                    "params": {
+                        "_meta": {bm.MCP_META_SUBSCRIPTION_ID: "s1"},
+                        "notifications": {"toolsListChanged": True},
+                    },
+                }
+            ],
+        )
+
+    def test_listen_agrees_only_to_types_the_server_can_honor(self):
+        self._listen(7, {"promptsListChanged": True, "resourcesListChanged": True, "resourceSubscriptions": ["x://y"]})
+        self.assertEqual(self.sent[0]["params"]["notifications"], {})
+
+    def test_modern_client_gets_list_changed_only_on_opted_in_streams(self):
+        self._listen("tools", {"toolsListChanged": True})
+        self._listen("other", {"promptsListChanged": True})
+        self.sent.clear()
+        bm._notify_tools_list_changed()
+        self.assertEqual(
+            self.sent,
+            [
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/tools/list_changed",
+                    "params": {"_meta": {bm.MCP_META_SUBSCRIPTION_ID: "tools"}},
+                }
+            ],
+        )
+
+    def test_modern_client_without_listen_gets_no_unsolicited_notification(self):
+        bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": self._meta()}})
+        self.sent.clear()
+        bm._notify_tools_list_changed()
+        self.assertEqual(self.sent, [])
+
+    def test_legacy_client_still_gets_unsolicited_notification(self):
+        bm.dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+        bm._notify_tools_list_changed()
+        self.assertEqual(self.sent, [{"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}])
+
+    def test_cancelled_notification_ends_the_subscription(self):
+        self._listen(5, {"toolsListChanged": True})
+        bm.dispatch({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 5}})
+        self.assertNotIn(5, bm._LISTEN_SUBSCRIPTIONS)
+        self.sent.clear()
+        bm._notify_tools_list_changed()
+        self.assertEqual(self.sent, [])
+
+    def test_invalid_listen_params_are_rejected(self):
+        bad = [
+            {"toolsListChanged": "yes"},
+            {"unknownType": True},
+            {"resourceSubscriptions": "x://y"},
+            "not-an-object",
+        ]
+        for i, notifications in enumerate(bad):
+            with self.subTest(notifications=notifications):
+                resp = self._listen(f"bad{i}", notifications)
+                self.assertEqual(resp["error"]["code"], -32602)
+        self.assertEqual(self.sent, [])
+
+    def test_duplicate_listen_id_is_rejected(self):
+        self._listen("dup", {"toolsListChanged": True})
+        resp = self._listen("dup", {"toolsListChanged": True})
+        self.assertEqual(resp["error"]["code"], -32602)
+
+    def test_listen_is_method_not_found_for_legacy_and_http(self):
+        resp = self._listen("legacy", {"toolsListChanged": True}, version="2025-06-18")
+        self.assertEqual(resp["error"]["code"], -32601)
+        bm._TRANSPORT = "http"
+        resp = self._listen("http", {"toolsListChanged": True})
+        self.assertEqual(resp["error"]["code"], -32601)
+        self.assertEqual(self.sent, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

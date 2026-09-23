@@ -245,6 +245,18 @@ def run_stdio_smoke(command):
             json.dumps(call)[:300],
         )
 
+        listen_id = client.next_id
+        # No response while the subscription lives; the next line is the acknowledgement.
+        ack = client.request("subscriptions/listen", {"_meta": meta, "notifications": {"toolsListChanged": True}})
+        check(
+            report,
+            "modern subscriptions/listen acknowledged with subscription id",
+            ack.get("method") == "notifications/subscriptions/acknowledged"
+            and ack.get("params", {}).get("_meta", {}).get("io.modelcontextprotocol/subscriptionId") == listen_id
+            and ack.get("params", {}).get("notifications") == {"toolsListChanged": True},
+            json.dumps(ack)[:300],
+        )
+
         broad = client.request(
             "tools/call",
             {

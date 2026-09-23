@@ -392,6 +392,7 @@ MCP_META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion"
 MCP_META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo"
 MCP_META_CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities"
 MCP_META_SERVER_INFO = "io.modelcontextprotocol/serverInfo"
+MCP_META_SUBSCRIPTION_ID = "io.modelcontextprotocol/subscriptionId"
 ENABLE_MCP_2026_07_28 = os.environ.get("BERSERK_MCP_ENABLE_2026_07_28", "").strip().lower() in {
     "1",
     "true",
@@ -1986,11 +1987,10 @@ def persist_learned_query(entry, action_source):
     # advertised as unsupported, e.g. SAVED_TOOL_PROJECTION_CAP=0. Best-
     # effort: a notification failure must never undo or fail a save that
     # already landed on disk.
-    if _list_changed_supported():
-        try:
-            send({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
-        except Exception as exc:
-            log(f"failed to send tools/list_changed notification: {type(exc).__name__}: {exc}")
+    try:
+        _notify_tools_list_changed()
+    except Exception as exc:
+        log(f"failed to send tools/list_changed notification: {type(exc).__name__}: {exc}")
     return log_entry
 
 
@@ -4635,6 +4635,82 @@ def _list_changed_supported():
     return _TRANSPORT == "stdio" and SAVED_TOOL_PROJECTION_CAP > 0
 
 
+# 2026-07-28 delivers list-changed notifications only on a subscriptions/listen
+# stream the client opened, and the server MUST NOT send a type the client did
+# not request. A stdio process serves one client, so this is per-process state.
+_LISTEN_FILTER_BOOL_KEYS = frozenset({"toolsListChanged", "promptsListChanged", "resourcesListChanged"})
+_LISTEN_SUBSCRIPTIONS = {}
+_MODERN_STDIO_CLIENT = False
+
+
+def _note_request_mode(mode):
+    global _MODERN_STDIO_CLIENT
+    if mode == PROTOCOL_MODE_MODERN and _TRANSPORT == "stdio":
+        _MODERN_STDIO_CLIENT = True
+
+
+def _valid_listen_filter(requested):
+    if not isinstance(requested, dict) or set(requested) - _LISTEN_FILTER_BOOL_KEYS - {"resourceSubscriptions"}:
+        return False
+    if any(not isinstance(requested[k], bool) for k in _LISTEN_FILTER_BOOL_KEYS & set(requested)):
+        return False
+    uris = requested.get("resourceSubscriptions", [])
+    return isinstance(uris, list) and all(isinstance(u, str) for u in uris)
+
+
+def _dispatch_listen(params, id_, is_notification, mode):
+    """subscriptions/listen: acknowledge on stdio, then hold the request open.
+
+    The listen request gets no response while the subscription lives; the spec
+    answers it only on graceful teardown. Tools are the only list this server
+    changes, so only toolsListChanged is ever agreed to.
+    """
+    if is_notification:
+        return None
+    if mode != PROTOCOL_MODE_MODERN or _TRANSPORT != "stdio":
+        return _jsonrpc_error(-32601, "Method not found", id_)
+    requested = params.get("notifications")
+    if (
+        set(params) - {"_meta", "notifications"}
+        or not _valid_modern_meta(params)
+        or not _valid_listen_filter(requested)
+    ):
+        return _jsonrpc_error(-32602, "Invalid params", id_)
+    if id_ in _LISTEN_SUBSCRIPTIONS:
+        return _jsonrpc_error(-32602, "Invalid params", id_)
+    agreed = (
+        {"toolsListChanged": True} if requested.get("toolsListChanged") is True and _list_changed_supported() else {}
+    )
+    _LISTEN_SUBSCRIPTIONS[id_] = agreed
+    send(
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/subscriptions/acknowledged",
+            "params": {"_meta": {MCP_META_SUBSCRIPTION_ID: id_}, "notifications": agreed},
+        }
+    )
+    return None
+
+
+def _notify_tools_list_changed():
+    """Legacy clients get the unsolicited notification; a modern client gets it
+    only on each listen stream that opted in to toolsListChanged."""
+    if not _list_changed_supported():
+        return
+    if not _MODERN_STDIO_CLIENT:
+        send({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+        return
+    for sub_id, agreed in list(_LISTEN_SUBSCRIPTIONS.items()):
+        if agreed.get("toolsListChanged"):
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/tools/list_changed",
+                    "params": {"_meta": {MCP_META_SUBSCRIPTION_ID: sub_id}},
+                }
+            )
+
+
 def _discover_result():
     capabilities = {
         "tools": {"listChanged": _list_changed_supported()},
@@ -4971,6 +5047,7 @@ def dispatch(req):
 
     try:
         mode = _protocol_mode_for_request(method, params)
+        _note_request_mode(mode)
         return _dispatch_validated(method, params, id_, is_notification, mode=mode)
     except Exception as exc:
         log(f"dispatch failed: {type(exc).__name__}")
@@ -5138,6 +5215,13 @@ def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE
     result = _dispatch_protocol(method, params, id_, is_notification, mode)
     if result != "NOT_MATCHED":
         return result
+    if method == "subscriptions/listen":
+        return _dispatch_listen(params, id_, is_notification, mode)
+    if method == "notifications/cancelled" and is_notification:
+        request_id = params.get("requestId")
+        if isinstance(request_id, (str, int)) and not isinstance(request_id, bool):
+            _LISTEN_SUBSCRIPTIONS.pop(request_id, None)
+        return None
     if method == "tools/list":
         return _dispatch_tools_list(params, id_, is_notification, mode)
     if method == "tools/call":
