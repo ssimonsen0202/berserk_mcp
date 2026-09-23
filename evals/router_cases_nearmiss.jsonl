@@ -38,3 +38,4 @@
 {"id": "nm_drift_history_not_check", "prompt": "The drift check flagged mistral-small as a step change. Show that model's score history over time.", "expect_tool": "model_drift_history", "expect_args": {"model": "mistral-small"}}
 {"id": "nm_anything_anomalous", "prompt": "Is anything anomalous in our services right now?", "expect_tool": "detect_anomalies"}
 {"id": "nm_did_new_source_appear", "prompt": "Did a new source appear that we have not had before?", "expect_tool": "detect_new_sources"}
+{"id": "nm_queue_status_not_drain", "prompt": "Just show me what is sitting in the discovery queue. Don't process anything.", "expect_tool": "discovery_status"}

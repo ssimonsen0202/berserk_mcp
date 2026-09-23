@@ -203,6 +203,30 @@ to these tools.
   and the canary does not fingerprint the tool schema. A small canary score
   change after `85f14ef` comes from this description change, not model drift.
 
+## Addendum, 2026-09-23: discovery queue status vs worker
+
+**The miss.** Haiku 4.5 routed `nm_drain_not_generate_one` ("Work through
+everything waiting in the discovery queue.") to `discovery_status` instead of
+`run_discovery_worker` in both near-miss runs on 2026-09-22 (39/40 each;
+`evals/run_ledger.jsonl`). DeepSeek V4.1 Flash routed it correctly both times.
+
+**Changed.** `discovery_status` now says it is read-only and processes nothing;
+`run_discovery_worker` says it processes up to `max_jobs` pending jobs (default
+1, maximum 5). Each names the other. The rewrite avoids the eval prompt's own
+words. Guard rail added: `nm_queue_status_not_drain` ("Just show me what is
+sitting in the discovery queue. Don't process anything." → `discovery_status`).
+
+**Result: the miss remains.** After-run 2026-09-23T20:22 (Haiku 4.5, 41
+cases): 40/41, the same single miss, and the guard rail passes, so no
+regression. That run used the first rewrite ("drain the pending jobs"); a review
+then corrected it to the `max_jobs` wording, which changes no routing cue.
+
+**Reading.** Kept for accuracy, not as a routing fix. Haiku appears to check
+the queue before starting a slow, LLM-backed worker even when asked to
+process it. That is a defensible cautious habit, not a wording gap, like the
+`mistral-saba` residual case in the first addendum. Do not tune the
+description further for this case without a second model showing the miss.
+
 ## Follow-up
 
 The SOC, core, discovery, learning-loop, parser-factory, and CanonLoom

@@ -3145,7 +3145,7 @@ MGMT_TOOLS = [
     },
     {
         "name": "discovery_status",
-        "description": "List pending and completed discovery jobs for new services or metrics.",
+        "description": "Read-only: list pending and completed discovery jobs for new services or metrics. Use for 'what is in the discovery queue' or 'did that job finish'. It processes nothing; to process the pending jobs, use run_discovery_worker.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -3185,7 +3185,7 @@ MGMT_TOOLS = [
     },
     {
         "name": "run_discovery_worker",
-        "description": "Drain queued discovery jobs: for each one, an LLM authors a verified query pack for the new source. Requires at least one configured LLM provider; may take minutes per job.",
+        "description": "Process the discovery queue: take up to max_jobs pending jobs (default 1, maximum 5), and for each one an LLM authors a verified query pack for the new source. Use for 'process the queue' or 'run the queued discovery jobs'. Requires at least one configured LLM provider; may take minutes per job. To only look at the queue without processing it, use discovery_status.",
         "inputSchema": {
             "type": "object",
             "properties": {
