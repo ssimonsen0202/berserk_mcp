@@ -27,6 +27,7 @@ Examples:
 import argparse
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -86,6 +87,26 @@ class StdioClient:
             stderr = self.proc.stderr.read()[:2000]
             raise RuntimeError(f"MCP server exited before response: {stderr}")
         return json.loads(line)
+
+    def request_collecting(self, method, params=None):
+        """Send a request; return (response, notifications written before it)."""
+        req_id = self.next_id
+        self.next_id += 1
+        obj = {"jsonrpc": "2.0", "id": req_id, "method": method}
+        if params is not None:
+            obj["params"] = params
+        self.proc.stdin.write(json.dumps(obj) + "\n")
+        self.proc.stdin.flush()
+        notifications = []
+        while True:
+            line = self.proc.stdout.readline()
+            if not line:
+                stderr = self.proc.stderr.read()[:2000]
+                raise RuntimeError(f"MCP server exited before response: {stderr}")
+            msg = json.loads(line)
+            if msg.get("id") == req_id and ("result" in msg or "error" in msg):
+                return msg, notifications
+            notifications.append(msg)
 
     def notify(self, method, params=None):
         obj = {"jsonrpc": "2.0", "method": method}
@@ -320,6 +341,89 @@ def run_stdio_smoke(command):
     return report
 
 
+_BZRK_STUB = """#!/usr/bin/env python3
+import json, sys
+if "--version" in sys.argv:
+    print("bzrk 0.0.0-protocol-smoke-stub")
+else:
+    print(json.dumps({"Tables": [{"schema": {"columns": [{"name": "n"}]}, "rows": [[1]]}]}))
+"""
+
+
+def run_list_changed_smoke(command):
+    """A real save must reach a modern client as notifications/tools/list_changed
+    on its subscriptions/listen stream, stamped with the subscription id.
+
+    save_query verifies its query with bzrk before persisting, so this run
+    points BZRK_BIN at a stub and the saved-query store at a private temp dir:
+    offline, and no real store or Berserk is touched.
+    """
+    report = {"transport": "stdio (list_changed delivery)", "checks": [], "failed": False}
+    if os.name == "nt":
+        # A .cmd stub would route arguments through cmd.exe; not worth the risk
+        # for a smoke check. Linux CI covers this path.
+        report["checks"].append(
+            {"label": "modern save delivers tools/list_changed on listen stream", "status": "SKIP", "detail": ""}
+        )
+        return report
+    tmp = tempfile.mkdtemp(prefix="berserk-mcp-list-changed-")
+    client = None
+    meta = modern_meta()
+    try:
+        stub = Path(tmp) / "bzrk"
+        stub.write_text(_BZRK_STUB, encoding="utf-8")
+        stub.chmod(0o700)
+        env = os.environ.copy()
+        env.update(
+            {
+                "BERSERK_MCP_ENABLE_2026_07_28": "1",
+                "BERSERK_MCP_TIER": "deep",
+                "BERSERK_MCP_ROLE": "all",
+                "BZRK_BIN": str(stub),
+                "BERSERK_MCP_LEARNED_PATH": str(Path(tmp) / "learned.json"),
+                "BERSERK_MCP_REPORT_DIR": str(Path(tmp) / "reports"),
+            }
+        )
+        client = StdioClient(command, env)
+        listen_id = client.next_id
+        ack = client.request("subscriptions/listen", {"_meta": meta, "notifications": {"toolsListChanged": True}})
+        check(
+            report,
+            "listen acknowledged before save",
+            ack.get("method") == "notifications/subscriptions/acknowledged",
+            json.dumps(ack)[:300],
+        )
+        resp, notes = client.request_collecting(
+            "tools/call",
+            {
+                "_meta": meta,
+                "name": "save_query",
+                "arguments": {"name": "smoke_saved", "description": "list_changed smoke", "kql": "default | take 1"},
+            },
+        )
+        saved = "result" in resp and resp["result"].get("isError") is False
+        check(report, "save_query succeeds against stub bzrk", saved, json.dumps(resp)[:300])
+        changed = [n for n in notes if n.get("method") == "notifications/tools/list_changed"]
+        check(
+            report,
+            "modern save delivers tools/list_changed on listen stream",
+            len(changed) == 1
+            and changed[0].get("params", {}).get("_meta", {}).get("io.modelcontextprotocol/subscriptionId")
+            == listen_id,
+            json.dumps(notes)[:300],
+        )
+        listed = client.request("tools/list", {"_meta": meta})
+        names = {t.get("name") for t in listed.get("result", {}).get("tools", [])}
+        check(report, "saved query now in tools/list", "saved__smoke_saved" in names, "")
+    except Exception as exc:
+        check(report, "list_changed smoke completed", False, f"{type(exc).__name__}: {exc}")
+    finally:
+        if client is not None:
+            client.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+    return report
+
+
 def free_loopback_port():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -446,7 +550,7 @@ def parse_args():
 
 def main():
     ns = parse_args()
-    reports = [run_stdio_smoke(ns.server_command)]
+    reports = [run_stdio_smoke(ns.server_command), run_list_changed_smoke(ns.server_command)]
     if ns.include_http:
         reports.append(run_http_smoke(ns.server_command))
     failed = any(report["failed"] for report in reports)
