@@ -1,4 +1,4 @@
-.PHONY: lint lint-fix lint-ci format format-check test coverage coverage-ci typecheck typecheck-strict
+.PHONY: lint lint-fix lint-ci format format-check test coverage coverage-ci typecheck typecheck-strict inspector-check
 
 lint:
 	ruff check .
@@ -32,3 +32,7 @@ typecheck:
 
 typecheck-strict:
 	mypy --config-file pyproject.toml --disallow-untyped-defs berserk_mcp.py ai_finops.py kql_validation.py parser_factory.py _store.py _http.py
+
+# Optional, needs Node >= 22.19; not part of required CI. See scripts/inspector_check.py.
+inspector-check:
+	python3 scripts/inspector_check.py
