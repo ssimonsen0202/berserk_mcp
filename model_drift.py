@@ -71,7 +71,10 @@ def _usable(series):
 def _current_environment_rows(rows):
     """Only rows sharing the most recent case_set_version, role, and
     discovery_mode combination (rows are timestamp-ascending, so rows[-1]
-    is the latest).
+    is the latest). tier and tool_schema_version are part of the key too: a
+    tool description or schema edit changes what the model is shown, so it
+    must start a new comparison window, not read as model drift. Rows from
+    before tool_schema_version was recorded carry "" and form their own window.
 
     This replaces an earlier version that required every row in the whole
     query window to share one case_set_version -- after any deliberate
@@ -83,7 +86,7 @@ def _current_environment_rows(rows):
     if not rows:
         return []
     latest = rows[-1]
-    fields = ("case_set_version", "role", "discovery_mode", "tier")
+    fields = ("case_set_version", "role", "discovery_mode", "tier", "tool_schema_version")
     key = tuple(latest.get(f) for f in fields)
     return [r for r in rows if tuple(r.get(f) for f in fields) == key]
 
@@ -155,7 +158,7 @@ def classify(series, noise_band=DEFAULT_NOISE_BAND, fingerprint_changed=None):
     if len(rows) < MIN_HISTORY:
         return {
             "verdict": "insufficient-data",
-            "reason": "not enough runs at the current case-set version, role, and discovery-mode combination",
+            "reason": "not enough runs at the current case-set version, role, discovery-mode, tier and tool-schema combination",
             "confidence": "low",
             "fingerprint_changed": False,
             "fingerprint_values": {},
@@ -228,6 +231,7 @@ def series_kql(model=None, since="30d ago"):
         " role=tostring(attributes['eval.role']),"
         " discovery_mode=tostring(attributes['eval.discovery_mode']),"
         " tier=tostring(attributes['eval.tier']),"
+        " tool_schema_version=tostring(attributes['eval.tool_schema_version']),"
         " tool_accuracy=toreal(attributes['eval.tool_accuracy']),"
         " arg_accuracy=toreal(attributes['eval.arg_accuracy']),"
         " repeats=toint(attributes['eval.repeats']),"

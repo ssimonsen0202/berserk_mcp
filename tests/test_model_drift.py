@@ -170,6 +170,25 @@ class RoleAndDiscoveryModeGateClassificationTest(unittest.TestCase):
         out = model_drift.classify(mixed, noise_band=0.05)
         self.assertEqual(out["verdict"], "stable")
 
+    def test_tool_schema_change_is_not_compared_across(self):
+        """A tool description edit changes what the model is shown. Before this
+        key existed, a description change looked like model drift."""
+        old = [dict(r, tool_schema_version="aaa") for r in series(0.88, 0.88, 0.88, 0.88)]
+        new = [dict(r, tool_schema_version="bbb") for r in series(0.60, 0.60)]
+        out = model_drift.classify(old + new, noise_band=0.05)
+        self.assertEqual(out["verdict"], "insufficient-data")
+
+    def test_real_regression_under_one_schema_still_fires(self):
+        rows = [dict(r, tool_schema_version="bbb") for r in series(0.88, 0.88, 0.60, 0.59)]
+        out = model_drift.classify(rows, noise_band=0.05)
+        self.assertIn(out["verdict"], ("degrading", "step-change"))
+
+    def test_series_kql_projects_tool_schema_version(self):
+        self.assertIn(
+            "tool_schema_version=tostring(attributes['eval.tool_schema_version'])",
+            model_drift.series_kql("m"),
+        )
+
 
 class RepeatsConfidenceTest(unittest.TestCase):
     """The noise band was calibrated at repeats=3. At repeats=1, a single

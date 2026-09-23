@@ -53,6 +53,7 @@ EVAL_ATTRIBUTE_ALLOWLIST = frozenset(
         "eval.role",
         "eval.discovery_mode",
         "eval.tier",
+        "eval.tool_schema_version",
     }
 )
 
@@ -104,6 +105,7 @@ def build_eval_record(report, version, run_id, started_ns):
         "eval.role": role,
         "eval.discovery_mode": discovery_mode,
         "eval.tier": tier,
+        "eval.tool_schema_version": str(report.get("tool_schema_version") or ""),
         "eval.tool_accuracy": float(report["tool_accuracy"]),
         "eval.arg_accuracy": float(report["arg_accuracy"]),
         "eval.repeats": int(report.get("repeats", 1)),

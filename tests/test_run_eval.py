@@ -62,6 +62,31 @@ class ToOpenaiToolsTest(unittest.TestCase):
         self.assertEqual(run_eval.to_openai_tools([]), [])
 
 
+class ToolSchemaVersionTest(unittest.TestCase):
+    TOOLS = [
+        {"name": "a", "description": "x", "inputSchema": {"type": "object", "properties": {"p": {"type": "string"}}}},
+        {"name": "b", "description": "y", "inputSchema": {"type": "object"}},
+    ]
+
+    def test_stable_regardless_of_key_order(self):
+        reordered = [
+            {"inputSchema": t["inputSchema"], "description": t["description"], "name": t["name"]} for t in self.TOOLS
+        ]
+        self.assertEqual(run_eval.tool_schema_version(self.TOOLS), run_eval.tool_schema_version(reordered))
+
+    def test_changes_when_a_description_changes(self):
+        edited = [dict(self.TOOLS[0], description="x, reworded"), self.TOOLS[1]]
+        self.assertNotEqual(run_eval.tool_schema_version(self.TOOLS), run_eval.tool_schema_version(edited))
+
+    def test_ignores_saved_query_tools_and_order(self):
+        saved = {"name": "saved__nightly", "description": "operator query", "inputSchema": {"type": "object"}}
+        with_saved = [self.TOOLS[1], saved, self.TOOLS[0]]
+        self.assertEqual(run_eval.tool_schema_version(self.TOOLS), run_eval.tool_schema_version(with_saved))
+
+    def test_is_twelve_hex_chars(self):
+        self.assertRegex(run_eval.tool_schema_version(self.TOOLS), r"^[0-9a-f]{12}$")
+
+
 class ToAnthropicToolsTest(unittest.TestCase):
     def test_maps_input_schema_to_input_schema_key(self):
         tools = [{"name": "top_cpu", "description": "Top CPU containers", "inputSchema": {"type": "object"}}]

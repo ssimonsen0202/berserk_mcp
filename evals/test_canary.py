@@ -56,6 +56,11 @@ class BuildEvalRecordTest(unittest.TestCase):
         self.assertEqual(rec["eval.run_id"], "run-1")
         self.assertEqual(rec["eval.status"], "ok")
 
+    def test_records_tool_schema_version_from_report(self):
+        rec = canary.build_eval_record(dict(self.REPORT, tool_schema_version="0123abcd4567"), "v", "r", 1)
+        self.assertEqual(rec["eval.tool_schema_version"], "0123abcd4567")
+        self.assertEqual(canary.build_eval_record(self.REPORT, "v", "r", 1)["eval.tool_schema_version"], "")
+
     def test_every_produced_key_is_in_the_allowlist(self):
         """A key outside the allowlist would be silently dropped at emit time."""
         rec = canary.build_eval_record(self.REPORT, "v", "r", 1)

@@ -118,6 +118,17 @@ def to_anthropic_tools(tools):
     return [{"name": t["name"], "description": t["description"], "input_schema": t["inputSchema"]} for t in tools]
 
 
+def tool_schema_version(tools):
+    """Content hash of the server's static tool definitions. A description or
+    schema edit changes it, so drift checks can tell a schema change from a
+    model change. saved__* tools are left out: they come from each deployment's
+    saved-query store and change on every save, which would reset drift history."""
+    static = sorted(
+        (t for t in tools if not str(t.get("name", "")).startswith("saved__")), key=lambda t: t.get("name", "")
+    )
+    return hashlib.sha256(json.dumps(static, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+
+
 # ---------- backends: return (tool_name, args, latency_s, usage) ----------
 def _post(url, headers, body, timeout=120):
     t0 = time.time()
@@ -142,7 +153,7 @@ LEDGER_PATH = HERE / "run_ledger.jsonl"
 
 
 def append_to_ledger(
-    *, backend, model, cases_path, tool_count, rows, tool_accuracy, arg_accuracy, agg, lat, extra=None
+    *, backend, model, cases_path, tool_count, rows, tool_accuracy, arg_accuracy, agg, lat, extra=None, tools=None
 ):
     """Append one distilled, committed record per real-model eval run.
 
@@ -175,6 +186,7 @@ def append_to_ledger(
         "tier": os.environ.get("BERSERK_MCP_TIER", "").strip().lower(),
         "discovery": os.environ.get("BERSERK_MCP_DISCOVERY", "").strip().lower(),
         "tool_count": tool_count,
+        "tool_schema_version": tool_schema_version(tools) if tools else "",
         "tool_accuracy": round(tool_accuracy, 4),
         "arg_accuracy": round(arg_accuracy, 4),
         "misses": [{"id": r["id"], "expect": r["expect"], "got": r["got"]} for r in rows if not r.get("tool_ok")],
@@ -896,6 +908,7 @@ def main():
     safe = label.replace(":", "_").replace("/", "_")
     report = {
         "backend": args_ns.backend,
+        "tool_schema_version": tool_schema_version(tools),
         "model": args_ns.model,
         "repeats": args_ns.repeats,
         "tool_accuracy": tool_hits / total,
@@ -911,6 +924,7 @@ def main():
         model=args_ns.model,
         cases_path=args_ns.cases,
         tool_count=len(tools),
+        tools=tools,
         rows=rows,
         tool_accuracy=tool_hits / total,
         arg_accuracy=arg_hits / total,
