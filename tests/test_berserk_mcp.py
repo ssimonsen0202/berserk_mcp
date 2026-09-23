@@ -157,6 +157,7 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertFalse(err)
         self.assertEqual(self.calls[-1][3], f"{bm.TABLE} | take 1")
 
+    # Covers SECURITY.md#query-and-process-execution
     def test_execution_boundary_rejects_semicolons_in_every_validation_mode(self):
         original = bm.KQL_VALIDATION_MODE
         try:
@@ -2670,6 +2671,7 @@ class BerserkMcpTest(unittest.TestCase):
         )
         return result
 
+    # Covers SECURITY.md#untrusted-telemetry-and-redaction
     def test_default_redact_mode_is_redact_not_flag(self):
         result = self._redact_mode_of_fresh_process(env_value=None)
         self.assertEqual(result.returncode, 0, result.stderr)

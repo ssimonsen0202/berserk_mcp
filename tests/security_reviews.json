@@ -1,0 +1,50 @@
+{
+  "berserk_mcp:bzrk_search": {
+    "fingerprint": "29cee6638dc6fc7d",
+    "reviewed": "2026-09-23",
+    "by": "baseline",
+    "note": "final KQL execution boundary: semicolons and control commands rejected before bzrk runs. Fingerprint recorded 2026-09-23; no dedicated review yet."
+  },
+  "berserk_mcp:_run_argv_bounded": {
+    "fingerprint": "82c3b813982d3258",
+    "reviewed": "2026-09-23",
+    "by": "baseline",
+    "note": "argv-only subprocess with stdout/diagnostic caps; child killed and reaped on overflow. Fingerprint recorded 2026-09-23; no dedicated review yet."
+  },
+  "berserk_mcp:_resolve_bzrk_binary": {
+    "fingerprint": "dd0b7e36b9e6e73c",
+    "reviewed": "2026-09-23",
+    "by": "baseline",
+    "note": "BZRK_BIN resolved once; Windows CWD executable planting refused. Fingerprint recorded 2026-09-23; no dedicated review yet."
+  },
+  "berserk_mcp:_dispatch_tools_call": {
+    "fingerprint": "94d8322e7b3ed3e1",
+    "reviewed": "2026-09-22",
+    "by": "Codex review",
+    "note": "role-visibility gate (F-008) and modern preflight before handle_call; output filter applied. 2026-09-22: two passes over b648346..d545097 found it equivalent to the pre-refactor tools/call branch"
+  },
+  "berserk_mcp:_fence_untrusted": {
+    "fingerprint": "d4f0fa5fec8c8eca",
+    "reviewed": "2026-09-23",
+    "by": "baseline",
+    "note": "fences attacker-controlled telemetry before it reaches the model. Fingerprint recorded 2026-09-23; no dedicated review yet."
+  },
+  "secret_scan:redact": {
+    "fingerprint": "0b1872975518bb00",
+    "reviewed": "2026-09-23",
+    "by": "baseline",
+    "note": "bounded, fail-closed redaction; never returns a partial original past the limits. Fingerprint recorded 2026-09-23; no dedicated review yet."
+  },
+  "_http:validate_http_url": {
+    "fingerprint": "34b4eef308e6f474",
+    "reviewed": "2026-09-23",
+    "by": "baseline",
+    "note": "outbound URL rules: scheme, credentials, controls, ports, plaintext only on loopback. Fingerprint recorded 2026-09-23; no dedicated review yet."
+  },
+  "_store:validate_store_path": {
+    "fingerprint": "03d01833212c6c35",
+    "reviewed": "2026-09-23",
+    "by": "baseline",
+    "note": "store paths absolute, traversal-free, control-free. Fingerprint recorded 2026-09-23; no dedicated review yet."
+  }
+}

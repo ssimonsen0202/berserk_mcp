@@ -156,6 +156,12 @@ the stores on infrastructure with an external single-writer schedule.
 
 Security changes must remain standard-library-only and offline. Loopback HTTP
 servers are allowed in tests; live Berserk or real provider credentials are not.
+Each behavioural section above is cited by at least one test with a
+`# Covers SECURITY.md#<section-slug>` comment; `tests/test_security_doc_coverage.py`
+fails when a section has no citing test or a citation names a missing section.
+Security-critical functions are listed in `tests/security_reviews.json` with the
+fingerprint of their code at last review; `tests/test_security_reviews.py` fails
+when that code changes until it is re-reviewed and the entry updated.
 Run both commands because they exercise different import/global-state paths:
 
 ```bash

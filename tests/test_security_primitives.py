@@ -41,6 +41,7 @@ class SharedStoreTest(unittest.TestCase):
         self.assertIs(bm.StorePathError, _store.StorePathError)
         self.assertIs(pf.StorePathError, _store.StorePathError)
 
+    # Covers SECURITY.md#filesystem-stores-and-publication-outputs
     def test_schema_cache_rejects_relative_path(self):
         with self.assertRaises(_store.StorePathError):
             sr._write_cache("relative/schema.json", {"x": 1})
@@ -53,6 +54,7 @@ class SharedStoreTest(unittest.TestCase):
             af._atomic_write_text(bad, "x")
 
     @unittest.skipIf(os.name == "nt", "POSIX mode assertion")
+    # Covers SECURITY.md#filesystem-stores-and-publication-outputs
     def test_private_write_does_not_chmod_existing_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             shared = Path(directory) / "shared"
@@ -96,6 +98,7 @@ class SharedStoreTest(unittest.TestCase):
 
 
 class SharedHttpTest(unittest.TestCase):
+    # Covers SECURITY.md#outbound-http
     def test_header_parser_fails_on_malformed_and_controls(self):
         with self.assertRaisesRegex(ValueError, "expected name=value"):
             _http.parse_header_items("Authorization Bearer token")
@@ -108,6 +111,7 @@ class SharedHttpTest(unittest.TestCase):
         self.assertEqual(headers["Authorization"], "Bearer token")
         self.assertNotIn("text/plain", headers.values())
 
+    # Covers SECURITY.md#outbound-http
     def test_bounded_reader_rejects_one_byte_over_limit(self):
         with self.assertRaisesRegex(ValueError, "exceeds 4 bytes"):
             _http.read_bounded(io.BytesIO(b"12345"), cap=4)
@@ -156,6 +160,7 @@ class SharedHttpTest(unittest.TestCase):
             self.assertEqual(len(report["rows"]), 1)
             self.assertIn("tool-selection accuracy", stdout.getvalue())
 
+    # Covers SECURITY.md#outbound-http
     def test_eval_post_does_not_follow_redirect_with_credential(self):
         eval_module = _load_eval_module()
         received = []

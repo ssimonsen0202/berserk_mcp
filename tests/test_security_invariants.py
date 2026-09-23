@@ -67,6 +67,7 @@ class SecurityInvariantTest(unittest.TestCase):
                         violations.append((node.lineno, "subprocess argv is a string expression"))
         return violations
 
+    # Covers SECURITY.md#query-and-process-execution
     def test_repository_has_no_shell_or_dynamic_execution(self):
         violations = []
         tracked = subprocess.run(
@@ -93,6 +94,7 @@ class SecurityInvariantTest(unittest.TestCase):
         leaks.extend(match.group(0) for match in UUID_RE.finditer(text))
         return [f"{relative}: {leak}" for leak in leaks]
 
+    # Covers SECURITY.md#trust-boundaries
     def test_tracked_public_artifacts_contain_no_private_deployment_inventory(self):
         tracked = subprocess.run(
             ["git", "ls-files"],

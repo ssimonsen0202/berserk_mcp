@@ -953,6 +953,7 @@ class DashboardAndExportTest(FinopsTestCase):
         self.assertNotIn("owner@example.com", clean["note"])
         self.assertNotEqual(clean["feature_id"], payload["feature_id"])
 
+    # Covers SECURITY.md#untrusted-telemetry-and-redaction
     def test_model_envelope_cannot_be_broken_by_backtick_runs(self):
         text = af._envelope("Report", {"note": "before ```json injected ``` after"})
         self.assertEqual(text.count("```"), 2)
