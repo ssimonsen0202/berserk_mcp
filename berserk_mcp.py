@@ -4640,6 +4640,10 @@ def _list_changed_supported():
 # not request. A stdio process serves one client, so this is per-process state.
 _LISTEN_FILTER_BOOL_KEYS = frozenset({"toolsListChanged", "promptsListChanged", "resourcesListChanged"})
 _LISTEN_SUBSCRIPTIONS = {}
+# Guards _LISTEN_SUBSCRIPTIONS and delivery, so nothing is sent after a cancel
+# (task threads notify while the main loop handles listen/cancel).
+_LISTEN_LOCK = threading.Lock()
+_MAX_LISTEN_SUBSCRIPTIONS = 1024  # the SDK reference server's default
 _MODERN_STDIO_CLIENT = False
 
 
@@ -4650,7 +4654,8 @@ def _note_request_mode(mode):
 
 
 def _valid_listen_filter(requested):
-    if not isinstance(requested, dict) or set(requested) - _LISTEN_FILTER_BOOL_KEYS - {"resourceSubscriptions"}:
+    # Unknown keys are ignored, not rejected: the SDK's SubscriptionFilter schema strips them.
+    if not isinstance(requested, dict):
         return False
     if any(not isinstance(requested[k], bool) for k in _LISTEN_FILTER_BOOL_KEYS & set(requested)):
         return False
@@ -4676,19 +4681,22 @@ def _dispatch_listen(params, id_, is_notification, mode):
         or not _valid_listen_filter(requested)
     ):
         return _jsonrpc_error(-32602, "Invalid params", id_)
-    if id_ in _LISTEN_SUBSCRIPTIONS:
-        return _jsonrpc_error(-32602, "Invalid params", id_)
     agreed = (
         {"toolsListChanged": True} if requested.get("toolsListChanged") is True and _list_changed_supported() else {}
     )
-    _LISTEN_SUBSCRIPTIONS[id_] = agreed
-    send(
-        {
-            "jsonrpc": "2.0",
-            "method": "notifications/subscriptions/acknowledged",
-            "params": {"_meta": {MCP_META_SUBSCRIPTION_ID: id_}, "notifications": agreed},
-        }
-    )
+    with _LISTEN_LOCK:
+        if id_ in _LISTEN_SUBSCRIPTIONS:
+            return _jsonrpc_error(-32602, "Invalid params", id_)
+        if len(_LISTEN_SUBSCRIPTIONS) >= _MAX_LISTEN_SUBSCRIPTIONS:
+            return _jsonrpc_error(-32603, "Subscription limit reached", id_)
+        _LISTEN_SUBSCRIPTIONS[id_] = agreed
+        send(
+            {
+                "jsonrpc": "2.0",
+                "method": "notifications/subscriptions/acknowledged",
+                "params": {"_meta": {MCP_META_SUBSCRIPTION_ID: id_}, "notifications": agreed},
+            }
+        )
     return None
 
 
@@ -4700,15 +4708,16 @@ def _notify_tools_list_changed():
     if not _MODERN_STDIO_CLIENT:
         send({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
         return
-    for sub_id, agreed in list(_LISTEN_SUBSCRIPTIONS.items()):
-        if agreed.get("toolsListChanged"):
-            send(
-                {
-                    "jsonrpc": "2.0",
-                    "method": "notifications/tools/list_changed",
-                    "params": {"_meta": {MCP_META_SUBSCRIPTION_ID: sub_id}},
-                }
-            )
+    with _LISTEN_LOCK:
+        for sub_id, agreed in _LISTEN_SUBSCRIPTIONS.items():
+            if agreed.get("toolsListChanged"):
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "notifications/tools/list_changed",
+                        "params": {"_meta": {MCP_META_SUBSCRIPTION_ID: sub_id}},
+                    }
+                )
 
 
 def _discover_result():
@@ -5220,7 +5229,8 @@ def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE
     if method == "notifications/cancelled" and is_notification:
         request_id = params.get("requestId")
         if isinstance(request_id, (str, int)) and not isinstance(request_id, bool):
-            _LISTEN_SUBSCRIPTIONS.pop(request_id, None)
+            with _LISTEN_LOCK:
+                _LISTEN_SUBSCRIPTIONS.pop(request_id, None)
         return None
     if method == "tools/list":
         return _dispatch_tools_list(params, id_, is_notification, mode)
@@ -5233,9 +5243,16 @@ def _dispatch_validated(method, params, id_, is_notification, mode=PROTOCOL_MODE
     return _jsonrpc_error(-32601, "Method not found", id_)
 
 
+_SEND_LOCK = threading.Lock()
+
+
 def send(msg):
-    sys.stdout.write(json.dumps(msg) + "\n")
-    sys.stdout.flush()
+    # Task threads send notifications while the main loop sends responses; one
+    # lock keeps each JSON line whole on the shared stdout.
+    line = json.dumps(msg) + "\n"
+    with _SEND_LOCK:
+        sys.stdout.write(line)
+        sys.stdout.flush()
 
 
 # Which transport is serving this process, set by _serve_mcp()/_serve_http()

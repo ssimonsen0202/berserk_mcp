@@ -11,6 +11,9 @@ listing at least the server's static tools and no schema findings. `--strict`
 alone exits non-zero only for error-severity findings, so warnings are read
 from the JSON instead. The modern run must show outputSchema on some tool,
 which proves the 2026-07-28 era was actually negotiated.
+
+Isolation: npm install scripts are disabled, and the npm cache, Inspector
+catalog and client config all live in a temp dir removed after the run.
 """
 
 import json
@@ -80,7 +83,13 @@ def _run(era, tmp):
         "-e",
         "BERSERK_MCP_ENABLE_2026_07_28=1",
     ]
-    env = dict(os.environ, MCP_CATALOG_PATH=str(Path(tmp) / "catalog.json"), npm_config_ignore_scripts="true")
+    # Throwaway npm cache: the download stays in the temp dir, not ~/.npm. Costs a fetch per run.
+    env = dict(
+        os.environ,
+        MCP_CATALOG_PATH=str(Path(tmp) / "catalog.json"),
+        npm_config_ignore_scripts="true",
+        npm_config_cache=str(Path(tmp) / "npm-cache"),
+    )
     return subprocess.run(cmd, capture_output=True, text=True, timeout=300, cwd=tmp, env=env)
 
 

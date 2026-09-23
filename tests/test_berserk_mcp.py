@@ -7259,6 +7259,46 @@ class ModelDriftDispatcherFingerprintTest(unittest.TestCase):
             bm.bzrk_search_json = orig
 
 
+class SendIsThreadSafeTest(unittest.TestCase):
+    """Task threads and the main loop share stdout; each JSON line must stay whole."""
+
+    class _SlowSplitStdout:
+        # Splits every write in two with a pause, so unlocked writers interleave.
+        def __init__(self):
+            self.chunks = []
+
+        def write(self, s):
+            import time
+
+            half = len(s) // 2
+            self.chunks.append(s[:half])
+            time.sleep(0.002)
+            self.chunks.append(s[half:])
+
+        def flush(self):
+            pass
+
+    def test_concurrent_sends_produce_whole_json_lines(self):
+        fake = self._SlowSplitStdout()
+        orig = sys.stdout
+        sys.stdout = fake
+        try:
+            threads = [
+                threading.Thread(target=lambda i=i: [bm.send({"jsonrpc": "2.0", "id": i, "n": j}) for j in range(5)])
+                for i in range(6)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        finally:
+            sys.stdout = orig
+        lines = "".join(fake.chunks).splitlines()
+        self.assertEqual(len(lines), 30)
+        for line in lines:
+            json.loads(line)
+
+
 class SubscriptionsListenTest(unittest.TestCase):
     """2026-07-28 subscriptions/listen on stdio (MCP SDK SubscriptionsListenRequest)."""
 
@@ -7357,7 +7397,6 @@ class SubscriptionsListenTest(unittest.TestCase):
     def test_invalid_listen_params_are_rejected(self):
         bad = [
             {"toolsListChanged": "yes"},
-            {"unknownType": True},
             {"resourceSubscriptions": "x://y"},
             "not-an-object",
         ]
@@ -7366,6 +7405,22 @@ class SubscriptionsListenTest(unittest.TestCase):
                 resp = self._listen(f"bad{i}", notifications)
                 self.assertEqual(resp["error"]["code"], -32602)
         self.assertEqual(self.sent, [])
+
+    def test_unknown_filter_keys_are_ignored_like_the_sdk(self):
+        self.assertIsNone(self._listen("fwd", {"toolsListChanged": True, "futureNotificationType": True}))
+        self.assertEqual(self.sent[0]["params"]["notifications"], {"toolsListChanged": True})
+
+    def test_subscription_limit_matches_reference_server(self):
+        orig = bm._MAX_LISTEN_SUBSCRIPTIONS
+        bm._MAX_LISTEN_SUBSCRIPTIONS = 2
+        try:
+            self._listen("a", {"toolsListChanged": True})
+            self._listen("b", {"toolsListChanged": True})
+            resp = self._listen("c", {"toolsListChanged": True})
+        finally:
+            bm._MAX_LISTEN_SUBSCRIPTIONS = orig
+        self.assertEqual(resp["error"], {"code": -32603, "message": "Subscription limit reached"})
+        self.assertNotIn("c", bm._LISTEN_SUBSCRIPTIONS)
 
     def test_duplicate_listen_id_is_rejected(self):
         self._listen("dup", {"toolsListChanged": True})
