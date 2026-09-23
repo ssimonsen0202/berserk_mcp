@@ -13,7 +13,9 @@ it never imports or modifies run_eval.py.
 Threshold history: 65% set 2026-08-20 against the router_cases.jsonl
 suite as it stood then (31 cases, mock backend measured 87.1%). Ratchet
 up as evals/router_cases.jsonl grows more targeted phrasings (issue #13's
-own Phase 2, tracked as the same issue).
+own Phase 2, tracked as the same issue). Raised to 75% on 2026-09-23: the
+suite had grown to 54 cases and the mock measured 79.6% (43/54), so 65%
+allowed about eight more misses before failing; 75% allows about two.
 """
 
 import json
@@ -23,7 +25,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-MIN_TOOL_ACCURACY = 0.65
+MIN_TOOL_ACCURACY = 0.75
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CASES_PATH = REPO_ROOT / "evals" / "router_cases.jsonl"
