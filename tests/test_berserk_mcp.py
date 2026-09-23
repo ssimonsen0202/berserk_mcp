@@ -6719,7 +6719,35 @@ class ToolSchemaValidityTest(unittest.TestCase):
                 findings.append(path)
             for key, value in schema.get("properties", {}).items():
                 findings.extend(self._find_missing_items(value, f"{path}.{key}"))
+            for combinator in ("anyOf", "oneOf", "allOf"):
+                for i, branch in enumerate(schema.get(combinator, [])):
+                    findings.extend(self._find_missing_items(branch, f"{path}.{combinator}[{i}]"))
+            if isinstance(schema.get("items"), dict):
+                findings.extend(self._find_missing_items(schema["items"], f"{path}.items"))
         return findings
+
+    def _find_list_types(self, schema, path):
+        findings = []
+        if isinstance(schema, dict):
+            if isinstance(schema.get("type"), list):
+                findings.append(path)
+            for key, value in schema.get("properties", {}).items():
+                findings.extend(self._find_list_types(value, f"{path}.{key}"))
+            for combinator in ("anyOf", "oneOf", "allOf"):
+                for i, branch in enumerate(schema.get(combinator, [])):
+                    findings.extend(self._find_list_types(branch, f"{path}.{combinator}[{i}]"))
+            if isinstance(schema.get("items"), dict):
+                findings.extend(self._find_list_types(schema["items"], f"{path}.items"))
+        return findings
+
+    def test_no_tool_property_uses_a_list_valued_type(self):
+        # Several MCP clients read `type` as one string and reject or loosen the tool
+        # (MCP Inspector 2.7.0 schema-portability lint). Use anyOf branches instead.
+        offenders = []
+        for tool in bm.TOOLS + bm.MGMT_TOOLS:
+            offenders.extend(self._find_list_types(tool.get("inputSchema", {}), tool["name"]))
+            offenders.extend(self._find_list_types(tool.get("outputSchema", {}), tool["name"] + "(output)"))
+        self.assertEqual(offenders, [], f"list-valued `type` (use anyOf): {offenders}")
 
     def test_every_tool_array_property_declares_items(self):
         offenders = []
@@ -6737,9 +6765,11 @@ class ToolSchemaValidityTest(unittest.TestCase):
         # just relying on the generic sweep above.
         save_query = next(t for t in bm.TOOLS + bm.MGMT_TOOLS if t["name"] == "save_query")
         roles_schema = save_query["inputSchema"]["properties"]["roles"]
-        self.assertIn("array", roles_schema["type"])
-        self.assertIn("items", roles_schema)
-        self.assertEqual(roles_schema["items"], {"type": "string"})
+        self.assertEqual(
+            roles_schema["anyOf"],
+            [{"type": "array", "items": {"type": "string"}}, {"type": "string"}],
+        )
+        self.assertNotIn("type", roles_schema)
 
 
 class InvestigateErrorRateTest(unittest.TestCase):

@@ -3105,8 +3105,10 @@ MGMT_TOOLS = [
                     "description": {"type": "string", "description": "what the query answers"},
                     "kql": {"type": "string", "description": f"KQL starting with '{TABLE} | ...'"},
                     "roles": {
-                        "type": ["array", "string"],
-                        "items": {"type": "string"},
+                        "anyOf": [
+                            {"type": "array", "items": {"type": "string"}},
+                            {"type": "string"},
+                        ],
                         "description": "optional role(s) this query serves: sre, soc, claude, ops",
                     },
                     "overwrite": {
