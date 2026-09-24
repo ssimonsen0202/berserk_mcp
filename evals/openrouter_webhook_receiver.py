@@ -29,13 +29,13 @@ trace.output carry full real prompt/completion text from live testing.
 """
 
 import argparse
+import functools
 import json
 import os
 import sys
 import threading
 import time
 import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -46,6 +46,7 @@ from pathlib import Path
 # directory is already on sys.path by default in that case).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import _http  # noqa: E402
 import secret_scan
 
 _KNOWN_ATTR_KEYS = {
@@ -199,22 +200,26 @@ def spans_to_berserk_payload(payload, redact=default_redact):
     return {"resourceLogs": resource_logs}
 
 
-def post_to_berserk(endpoint, payload, timeout=10, opener=urllib.request.urlopen):
+def post_to_berserk(endpoint, payload, timeout=10, *, allow_plaintext_remote=False, send=None):
     """Best-effort POST to Berserk's OTLP /v1/logs ingest. Returns
     (ok, detail) -- never raises. Forwarding failure must never affect the
     webhook response to OpenRouter or the local JSONL write, both of which
-    have already completed by the time this is called."""
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        endpoint,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    have already completed by the time this is called.
+
+    Goes through the shared HTTP client (_http.post_bytes_status): URL policy,
+    no redirects, bounded response. Plaintext to a non-loopback host needs
+    allow_plaintext_remote=True (the --allow-plaintext-remote flag)."""
+    send = send or _http.post_bytes_status
     try:
-        with opener(req, timeout=timeout) as resp:
-            status = getattr(resp, "status", None) or resp.getcode()
-            return status == 200, f"http {status}"
+        status = send(
+            endpoint,
+            {"Content-Type": "application/json"},
+            json.dumps(payload).encode("utf-8"),
+            timeout=timeout,
+            label="berserk otlp endpoint",
+            allow_plaintext_remote=allow_plaintext_remote,
+        )
+        return status == 200, f"http {status}"
     except urllib.error.HTTPError as exc:
         return False, f"http {exc.code}"
     except Exception as exc:  # noqa: BLE001 -- forwarding must never raise
@@ -323,9 +328,16 @@ def _make_handler(out_path, raw_out_path, expected_secret, lock, berserk_endpoin
     return Handler
 
 
-def run_server(port, out_path, raw_out_path, expected_secret, berserk_endpoint=None):
+def run_server(port, out_path, raw_out_path, expected_secret, berserk_endpoint=None, allow_plaintext_remote=False):
     lock = threading.Lock()
-    handler = _make_handler(out_path, raw_out_path, expected_secret, lock, berserk_endpoint=berserk_endpoint)
+    handler = _make_handler(
+        out_path,
+        raw_out_path,
+        expected_secret,
+        lock,
+        berserk_endpoint=berserk_endpoint,
+        post_fn=functools.partial(post_to_berserk, allow_plaintext_remote=allow_plaintext_remote),
+    )
     server = ThreadingHTTPServer(("0.0.0.0", port), handler)
     print(
         f"listening on :{port} -> rows: {out_path}"
@@ -362,8 +374,16 @@ def main(argv=None):
         "--berserk-endpoint",
         default=None,
         help="OTLP /v1/logs URL to also forward each received span into Berserk as its own "
-        "source (issue #55), e.g. http://100.87.29.100:14318/v1/logs. Omit to disable "
+        "source (issue #55), e.g. http://100.87.29.100:14318/v1/logs (plain http to a "
+        "non-loopback address needs --allow-plaintext-remote). Omit to disable "
         "forwarding entirely (default) -- local JSONL capture always happens either way.",
+    )
+    parser.add_argument(
+        "--allow-plaintext-remote",
+        action="store_true",
+        help="allow plain http:// to a non-loopback --berserk-endpoint (e.g. a Tailscale address, "
+        "where the tunnel itself encrypts). Without it such endpoints are refused. A configured http_proxy "
+        "still applies to that plaintext; exempt the host with no_proxy.",
     )
     args = parser.parse_args(argv)
 
@@ -387,7 +407,14 @@ def main(argv=None):
         )
         sys.exit(1)
 
-    run_server(args.port, args.out, args.raw_out, secret, berserk_endpoint=args.berserk_endpoint)
+    run_server(
+        args.port,
+        args.out,
+        args.raw_out,
+        secret,
+        berserk_endpoint=args.berserk_endpoint,
+        allow_plaintext_remote=args.allow_plaintext_remote,
+    )
 
 
 if __name__ == "__main__":

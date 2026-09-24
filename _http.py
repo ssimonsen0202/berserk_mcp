@@ -31,11 +31,23 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 NO_REDIRECT_OPENER = urllib.request.build_opener(NoRedirectHandler)
+# Loopback requests never go through a proxy: plaintext is allowed to loopback on
+# the promise that the bytes stay on this host, and an ambient http_proxy would
+# carry them, and their Authorization header, off it.
+LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirectHandler)
+
+
+def _opener_for(url):
+    host = urllib.parse.urlsplit(url).hostname
+    return LOOPBACK_OPENER if is_loopback_host(host) else NO_REDIRECT_OPENER
 
 
 def is_loopback_host(host):
     if not host:
         return False
+    # One trailing dot is the fully qualified spelling of the same name
+    # ("localhost.", "127.0.0.1.").
+    host = str(host)[:-1] if str(host).endswith(".") else host
     if str(host).lower() == "localhost":
         return True
     try:
@@ -157,7 +169,7 @@ def request_json(
         method=method,
         headers=_validated_headers(headers, force_json=payload is not None),
     )
-    with NO_REDIRECT_OPENER.open(request, timeout=timeout) as response:
+    with _opener_for(url).open(request, timeout=timeout) as response:
         return read_bounded_json(response, cap)
 
 
@@ -222,7 +234,7 @@ def post_bytes_status(
         headers=_validated_headers(headers),
     )
     try:
-        with NO_REDIRECT_OPENER.open(request, timeout=timeout) as response:
+        with _opener_for(url).open(request, timeout=timeout) as response:
             read_bounded(response, cap)
             return int(response.status)
     except urllib.error.HTTPError as exc:

@@ -33,18 +33,18 @@
     "fingerprint": "7c39c9cd1a925643",
     "reviewed": "2026-09-24",
     "by": "Codex Security scan + fix review",
-    "note": "bounded, fail-closed redaction. Codex Security scoped scan 2026-09-24 of secret_scan.py/_http.py/_store.py (9 findings, coverage complete): finding 1 (quoted JSON keys, github_pat_) and finding 2 (quadratic private-key regex) fixed; finding 7 (scan_secrets counts a limit as a secret) and finding 8 (zero-width EXTRA_PII_PATTERNS match) still open."
+    "note": "bounded, fail-closed redaction. Codex Security scoped scan 2026-09-24 of secret_scan.py/_http.py/_store.py (9 findings, coverage complete): finding 1 (quoted JSON keys, github_pat_) and finding 2 (quadratic private-key regex) fixed; findings 7 (scan_secrets counted a limit as a secret) and 8 (zero-width EXTRA_PII_PATTERNS match) fixed 2026-09-24 in scan_secrets and _pii_matches."
   },
   "_http:validate_http_url": {
     "fingerprint": "34b4eef308e6f474",
     "reviewed": "2026-09-24",
     "by": "Codex Security scan",
-    "note": "outbound URL rules. Codex Security scoped scan 2026-09-24 of secret_scan.py/_http.py/_store.py (9 findings, coverage complete): finding 6 (LLM opt-in applied to OTLP/CanonLoom) fixed in the JSON wrappers and callers; finding 4 (ambient proxy can route validated loopback HTTP off host) still open."
+    "note": "outbound URL rules. Codex Security scoped scan 2026-09-24 of secret_scan.py/_http.py/_store.py (9 findings, coverage complete): finding 6 (LLM opt-in applied to OTLP/CanonLoom) fixed in the JSON wrappers and callers; finding 4 (ambient proxy could route validated loopback HTTP off host) fixed 2026-09-24: loopback requests use a proxy-free opener."
   },
   "_store:validate_store_path": {
     "fingerprint": "03d01833212c6c35",
     "reviewed": "2026-09-24",
     "by": "Codex Security scan",
-    "note": "store paths absolute, traversal-free, control-free. Codex Security scoped scan 2026-09-24 of secret_scan.py/_http.py/_store.py (9 findings, coverage complete): finding 3 (validation not bound to later operations; FileLock uses the unresolved path) and finding 5 (follows planted symlinks) still open; finding 9 (codex adapter state path) still open."
+    "note": "store paths absolute, traversal-free, control-free. Codex Security scoped scan 2026-09-24 of secret_scan.py/_http.py/_store.py (9 findings, coverage complete): finding 3 (validation not bound to later operations; FileLock uses the unresolved path) and finding 5 (follows planted symlinks) still open; finding 9 (codex adapter state path) fixed 2026-09-24."
   }
 }

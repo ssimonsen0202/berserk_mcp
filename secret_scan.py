@@ -122,6 +122,10 @@ def _pii_matches(text, pii_types):
     for pii_type, pattern in EXTRA_PII_PATTERNS:
         if pii_type in pii_types:
             for match in pattern.finditer(text):
+                if match.end() <= match.start():
+                    # A zero-width match (e.g. a lookahead) would insert a marker
+                    # and leave the value in place: fail the input closed instead.
+                    raise _RedactionLimit("invalid_extension_match")
                 yield match.start(), match.end(), pii_type
 
 
@@ -195,9 +199,15 @@ MAX_REDACT_CHARS = 1_000_000
 MAX_REDACT_CANDIDATES = 50_000
 
 
+LIMIT_MARKER = "[REDACTED:redaction_limit]"
+_LIMIT_REASONS = frozenset(
+    {"input_too_large", "too_many_matches", "too_many_private_key_markers", "invalid_extension_match"}
+)
+
+
 def _limit_result(reason):
     return (
-        "[REDACTED:redaction_limit]",
+        LIMIT_MARKER,
         [{"type": reason, "count": 1, "first_offset": 0}],
     )
 
@@ -440,15 +450,21 @@ def scan_secrets(since="1h ago", include_entropy=False, pii_types=()):
         ), True
     by_service = {}
     total = 0
+    unscanned = defaultdict(int)
     for row in audit_rows:
-        _clean, findings = redact(
+        clean, findings = redact(
             row.get("body", ""),
             include_entropy=include_entropy,
             pii_types=pii_types,
         )
+        service = row.get("service") or "(unknown)"
+        if clean == LIMIT_MARKER and any(f["type"] in _LIMIT_REASONS for f in findings):
+            # The row hit a redaction bound and was never scanned; its limit
+            # finding is not a secret count.
+            unscanned[service] += 1
+            continue
         if not findings:
             continue
-        service = row.get("service") or "(unknown)"
         report = by_service.setdefault(service, {"types": defaultdict(int), "first_seen": ""})
         for finding in findings:
             report["types"][finding["type"]] += finding["count"]
@@ -457,6 +473,13 @@ def scan_secrets(since="1h ago", include_entropy=False, pii_types=()):
         if timestamp and (not report["first_seen"] or timestamp < report["first_seen"]):
             report["first_seen"] = timestamp
 
+    if unscanned:
+        rows = sum(unscanned.values())
+        services = ", ".join(f"{name} x{count}" for name, count in sorted(unscanned.items()))
+        return (
+            f"Secret scan incomplete: {rows} row(s) exceeded the redaction limits and could not be scanned "
+            f"({services}). The result is not conclusive; {total} potential secrets were found in the other rows."
+        ), True
     if not by_service:
         return "Secret scan: no potential secrets detected in this window.", False
     lines = [f"Secret scan: {total} potential secrets detected (values withheld)."]

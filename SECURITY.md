@@ -98,16 +98,22 @@ that should never leave the cluster.
 
 ## Outbound HTTP
 
-LLM providers, Hermes model discovery, OTLP export, the Discord bridge, and the
-eval harness use one stdlib-only HTTP implementation. It:
+LLM providers, Hermes model discovery, OTLP export (including the Codex ingestion
+adapter and the OpenRouter webhook forwarder and backfill), the Discord bridge,
+and the eval harness use one stdlib-only HTTP implementation. It:
 
 - accepts only absolute `http://` or `https://` URLs;
 - rejects controls, embedded credentials, malformed ports, and fragments;
 - permits plaintext HTTP only on loopback unless the LLM/Discord operator makes
-  the documented private-network opt-in;
+  the documented private-network opt-in (the OpenRouter forwarder and backfill
+  take `--allow-plaintext-remote` instead). Opted-in remote plaintext still
+  honours `http_proxy`/`HTTPS_PROXY`: unset them or set `no_proxy` for the
+  private host, or a proxy will see the plaintext;
 - always requires HTTPS for non-loopback OTLP collectors and CanonLoom
   servers, whatever the LLM/Discord opt-in says;
 - never follows redirects, so credentials cannot be forwarded to a `Location`;
+- never sends a request that passed as loopback through a proxy, so an ambient
+  `http_proxy` cannot carry loopback plaintext or its credentials off the host;
 - validates header names and values, keeps JSON `Content-Type` authoritative,
   and fails on malformed OTLP header items; and
 - bounds every response before parsing or discarding it.

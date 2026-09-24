@@ -221,31 +221,58 @@ class SpansToBerserkPayloadTest(unittest.TestCase):
 
 
 class PostToBerserkTest(unittest.TestCase):
-    class _FakeResponse:
-        def __init__(self, status):
-            self.status = status
+    """post_to_berserk goes through the shared HTTP client (URL policy, no
+    redirects, bounded response) and never raises."""
 
-        def __enter__(self):
-            return self
+    @staticmethod
+    def _send_status(status, seen=None):
+        def send(url, headers, data, *, timeout, label, allow_plaintext_remote):
+            if seen is not None:
+                seen.append(allow_plaintext_remote)
+            return status
 
-        def __exit__(self, *a):
-            return False
+        return send
 
     def test_returns_true_on_200(self):
-        ok, detail = post_to_berserk("http://x/v1/logs", {"a": 1}, opener=lambda req, timeout: self._FakeResponse(200))
+        ok, detail = post_to_berserk("https://x/v1/logs", {"a": 1}, send=self._send_status(200))
         self.assertTrue(ok)
 
     def test_returns_false_on_non_200(self):
-        ok, detail = post_to_berserk("http://x/v1/logs", {"a": 1}, opener=lambda req, timeout: self._FakeResponse(500))
+        ok, detail = post_to_berserk("https://x/v1/logs", {"a": 1}, send=self._send_status(500))
         self.assertFalse(ok)
 
     def test_never_raises_on_connection_error(self):
-        def opener(req, timeout):
+        def send(*args, **kwargs):
             raise OSError("connection refused")
 
-        ok, detail = post_to_berserk("http://x/v1/logs", {"a": 1}, opener=opener)
+        ok, detail = post_to_berserk("https://x/v1/logs", {"a": 1}, send=send)
         self.assertFalse(ok)
         self.assertIn("connection refused", detail)
+
+    def test_plaintext_policy_defaults_to_refused_and_is_passed_through(self):
+        seen = []
+        post_to_berserk("https://x/v1/logs", {"a": 1}, send=self._send_status(200, seen))
+        post_to_berserk("https://x/v1/logs", {"a": 1}, allow_plaintext_remote=True, send=self._send_status(200, seen))
+        self.assertEqual(seen, [False, True])
+
+    def test_shared_url_policy_applies_without_network(self):
+        # Real shared client, no send override: these fail validation before any I/O.
+        for url in (
+            "http://100.87.29.100:14318/v1/logs",  # plaintext to non-loopback, no opt-in
+            "https://user:pass@x.example/v1/logs",  # embedded credentials
+            "file:///etc/passwd",  # not http(s)
+        ):
+            with self.subTest(url=url):
+                ok, detail = post_to_berserk(url, {"a": 1})
+                self.assertFalse(ok)
+                self.assertTrue(detail)
+
+    def test_plaintext_opt_in_reaches_the_network_layer(self):
+        # With the opt-in, validation passes and the failure (if any) is a
+        # connection error from an unroutable test address, not the URL policy.
+        ok, detail = post_to_berserk("http://192.0.2.1:9/v1/logs", {"a": 1}, timeout=0.2, allow_plaintext_remote=True)
+        self.assertFalse(ok)
+        self.assertNotIn("plaintext http to a non-loopback host is rejected", detail)
 
 
 class IsTestConnectionTest(unittest.TestCase):

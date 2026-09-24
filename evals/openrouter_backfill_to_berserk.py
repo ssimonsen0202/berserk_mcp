@@ -18,6 +18,7 @@ there so nothing silently goes missing).
 """
 
 import argparse
+import functools
 import json
 import os
 import sys
@@ -153,9 +154,21 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw-file", default="results/openrouter_webhook_raw.jsonl")
     parser.add_argument("--state-file", default="results/openrouter_backfill_state.json")
-    parser.add_argument("--berserk-endpoint", required=True, help="e.g. http://100.87.29.100:14318/v1/logs")
+    parser.add_argument(
+        "--berserk-endpoint",
+        required=True,
+        help="e.g. https://berserk.example/v1/logs; plain http to a non-loopback "
+        "address such as http://100.87.29.100:14318/v1/logs also needs --allow-plaintext-remote",
+    )
     parser.add_argument("--batch-size", type=int, default=25, help="raw-file lines per Berserk POST")
     parser.add_argument("--dry-run", action="store_true", help="parse and redact but don't actually POST")
+    parser.add_argument(
+        "--allow-plaintext-remote",
+        action="store_true",
+        help="allow plain http:// to a non-loopback --berserk-endpoint (e.g. a Tailscale address). "
+        "Without it such endpoints are refused. A configured http_proxy still applies to that plaintext; "
+        "exempt the host with no_proxy.",
+    )
     args = parser.parse_args(argv)
 
     if not os.path.exists(args.raw_file):
@@ -168,6 +181,7 @@ def main(argv=None):
         args.berserk_endpoint,
         batch_size=args.batch_size,
         dry_run=args.dry_run,
+        post_fn=functools.partial(post_to_berserk, allow_plaintext_remote=args.allow_plaintext_remote),
     )
     return 0 if ok else 1
 

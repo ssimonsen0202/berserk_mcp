@@ -299,6 +299,76 @@ class SecurityReview20260924RedactionTest(unittest.TestCase):
         self.assertEqual(clean, text)
 
 
+class SecurityReview20260924BatchTwoTest(unittest.TestCase):
+    """Findings 7 and 8 of the 2026-09-24 Codex Security scan."""
+
+    def setUp(self):
+        self.orig_run = bm.run_bzrk
+        self.orig_mode = bm.REDACT_MODE
+        bm.REDACT_MODE = "off"
+        self.addCleanup(setattr, bm, "run_bzrk", self.orig_run)
+        self.addCleanup(setattr, bm, "REDACT_MODE", self.orig_mode)
+
+    def _rows(self, rows):
+        bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: (jsonl(rows), False)
+
+    def test_row_over_redaction_limit_makes_the_audit_incomplete_not_a_hit(self):
+        self._rows(
+            [
+                {"service": "api", "ts": "2026-07-12T10:00:00Z", "body": f"key {AWS_KEY}"},
+                {"service": "noisy", "ts": "2026-07-12T10:01:00Z", "body": "x" * (ss.MAX_REDACT_CHARS + 1)},
+            ]
+        )
+        text, err = bm.handle_call("scan_secrets", {})
+        self.assertTrue(err)
+        self.assertIn("Secret scan incomplete", text)
+        self.assertIn("noisy x1", text)
+        self.assertIn("1 potential secrets were found in the other rows", text)
+        self.assertNotIn("input_too_large", text)
+
+    def test_log_line_that_reads_like_the_limit_marker_is_not_unscanned(self):
+        self._rows([{"service": "api", "ts": "2026-07-12T10:00:00Z", "body": ss.LIMIT_MARKER}])
+        text, err = bm.handle_call("scan_secrets", {})
+        self.assertFalse(err)
+        self.assertNotIn("incomplete", text)
+
+    def test_every_limit_reason_is_recognised_by_the_audit(self):
+        import re
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parent.parent / "secret_scan.py").read_text(encoding="utf-8")
+        reasons = set(re.findall(r'_RedactionLimit\("([a-z_]+)"\)', source))
+        reasons |= set(re.findall(r'_limit_result\("([a-z_]+)"\)', source))
+        self.assertTrue(reasons)
+        self.assertLessEqual(reasons, ss._LIMIT_REASONS)
+
+    def test_clean_audit_still_succeeds(self):
+        self._rows([{"service": "api", "ts": "2026-07-12T10:00:00Z", "body": "nothing to see"}])
+        text, err = bm.handle_call("scan_secrets", {})
+        self.assertFalse(err)
+        self.assertIn("no potential secrets detected", text)
+
+    def test_zero_width_extension_match_fails_closed(self):
+        import re
+
+        orig = list(ss.EXTRA_PII_PATTERNS)
+        ss.EXTRA_PII_PATTERNS.append(("ssn", re.compile(r"(?=(\d{3}-\d{2}-\d{4}))")))
+        self.addCleanup(lambda: ss.EXTRA_PII_PATTERNS.__setitem__(slice(None), orig))
+        clean, findings = ss.redact("ssn=123-45-6789", pii_types={"ssn"})
+        self.assertEqual(clean, ss.LIMIT_MARKER)
+        self.assertFalse("123-45-6789" in clean)
+        self.assertEqual([f["type"] for f in findings], ["invalid_extension_match"])
+
+    def test_consuming_extension_match_still_works(self):
+        import re
+
+        orig = list(ss.EXTRA_PII_PATTERNS)
+        ss.EXTRA_PII_PATTERNS.append(("ssn", re.compile(r"\d{3}-\d{2}-\d{4}")))
+        self.addCleanup(lambda: ss.EXTRA_PII_PATTERNS.__setitem__(slice(None), orig))
+        clean, _ = ss.redact("ssn=123-45-6789", pii_types={"ssn"})
+        self.assertEqual(clean, "ssn=[REDACTED:ssn]")
+
+
 class AuditRowParsingTest(unittest.TestCase):
     def test_parse_valid_bare_array(self):
         recs = [{"service": "api", "ts": "t1", "body": "x"}, {"service": "web", "ts": "t2", "body": "y"}]

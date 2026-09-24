@@ -27,12 +27,10 @@ berserk_mcp.py's _AGENT_SERVICE_NAMES).
 import argparse
 import glob
 import json
-import math
 import os
 import re
 import sys
 import time
-from collections import Counter
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -40,52 +38,19 @@ sys.path.insert(0, str(HERE.parent))
 
 import _http  # noqa: E402
 import _store  # noqa: E402
+import secret_scan  # noqa: E402
 
 SERVICE_NAME = "codex-cli"
 
 _SESSION_UUID_RE = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
 
-# A rough OpenAI-style secret-key shape (sk-..., 40+ chars) plus a generic
-# high-entropy-run detector for anything else that looks like a token/secret
-# (including Fernet-shaped payloads like gAAAAAB... seen in real spawn_agent
-# call arguments during investigation -- opaque already, but redaction must
-# not special-case skipping them just because they look pre-encrypted).
-_SECRET_PATTERNS = [
-    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
-]
-_ENTROPY_TOKEN_RE = re.compile(r"[A-Za-z0-9_\-+/=]{32,}")
 
-
-def _shannon_entropy(s):
-    if not s:
-        return 0.0
-    counts = Counter(s)
-    length = len(s)
-    return -sum((c / length) * math.log2(c / length) for c in counts.values())
-
-
-def redact_text(text, min_len=32, min_entropy=4.0):
-    """Redact known secret shapes and high-entropy runs. Returns (redacted, count)."""
-    count = 0
-
-    def _sub_pattern(m):
-        nonlocal count
-        count += 1
-        return "[REDACTED]"
-
-    for pattern in _SECRET_PATTERNS:
-        text = pattern.sub(_sub_pattern, text)
-
-    def _sub_entropy(m):
-        nonlocal count
-        token = m.group(0)
-        if len(token) >= min_len and _shannon_entropy(token) >= min_entropy:
-            count += 1
-            return "[REDACTED]"
-        return token
-
-    text = _ENTROPY_TOKEN_RE.sub(_sub_entropy, text)
-    return text, count
+def redact_text(text):
+    """Redact with the project's shared redactor (secret patterns, quoted
+    credentials, high-entropy runs, including Fernet-shaped payloads).
+    Returns (redacted, count)."""
+    clean, findings = secret_scan.redact(text, include_entropy=True, pii_types=())
+    return clean, sum(f["count"] for f in findings)
 
 
 def parse_codex_line(raw_line):
@@ -221,22 +186,17 @@ def _otlp_value(v):
 
 
 def _state_path(state_dir):
-    return Path(state_dir) / "codex_adapter_state.json"
+    """Validated before any read or write: absolute, traversal-free, control-free."""
+    return _store.validate_store_path(Path(state_dir) / "codex_adapter_state.json", purpose="codex adapter state")
 
 
 def load_state(state_dir):
-    try:
-        return json.loads(_state_path(state_dir).read_text())
-    except (OSError, ValueError):
-        return {}
+    return _store.load_json_dict(_state_path(state_dir))
 
 
 def save_state(state_dir, state):
-    Path(state_dir).mkdir(parents=True, exist_ok=True)
-    path = _state_path(state_dir)
-    tmp = _store.unique_tmp_path(path)
-    tmp.write_text(json.dumps(state))
-    _store.atomic_replace(tmp, path)
+    # Private store: directories it creates are 0700, the file 0600, replaced atomically.
+    _store.atomic_write_json(_state_path(state_dir), state, private=True, purpose="codex adapter state")
 
 
 def process_file(path, offset, session_id_cache):
@@ -351,6 +311,11 @@ def main(argv=None):
         )
         sys.exit(1)
 
+    try:
+        _state_path(args.state_dir)
+    except _store.StorePathError as exc:
+        sys.stderr.write(f"refusing to start: {exc}\n")
+        sys.exit(2)
     bearer = os.environ.get(args.otlp_bearer_env) if args.otlp_bearer_env else None
     n = run(args.codex_home, args.state_dir, args.otlp_endpoint, bearer, args.hostname, dry_run=args.dry_run)
     print(f"codex_adapter: emitted {n} record(s)")
