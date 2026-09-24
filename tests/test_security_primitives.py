@@ -97,6 +97,65 @@ class SharedStoreTest(unittest.TestCase):
             self.assertTrue(_store.windows_private_dacl(target))
 
 
+class PlaintextPolicySeparationTest(unittest.TestCase):
+    """Security review 2026-09-24 finding 6: the LLM plaintext opt-in must not
+    weaken OTLP or CanonLoom, which require HTTPS for every non-loopback host."""
+
+    REMOTE_HTTP = "http://192.0.2.10:4318/v1/logs"
+
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, {"BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _no_network(self):
+        return mock.patch.object(_http.NO_REDIRECT_OPENER, "open", side_effect=AssertionError("network used"))
+
+    def test_json_wrappers_reject_remote_plaintext_when_caller_forbids_it(self):
+        with self._no_network():
+            for call in (
+                lambda: _http.http_post_json(self.REMOTE_HTTP, {}, {}, allow_plaintext_remote=False),
+                lambda: _http.http_get_json(self.REMOTE_HTTP, {}, allow_plaintext_remote=False),
+            ):
+                data, err = call()
+                self.assertIsNone(data)
+                self.assertIn("plaintext http to a non-loopback host is rejected", err)
+
+    def test_llm_callers_keep_the_documented_opt_in(self):
+        with mock.patch.object(_http, "request_json", return_value={"ok": True}) as request:
+            data, err = _http.http_post_json(self.REMOTE_HTTP, {}, {})
+        self.assertEqual((data, err), ({"ok": True}, None))
+        self.assertIsNone(request.call_args.kwargs["allow_plaintext_remote"])
+
+    def test_codex_adapter_sends_otlp_with_plaintext_forbidden(self):
+        spec = importlib.util.spec_from_file_location(
+            "codex_adapter_under_test", ROOT / "ingestion" / "codex_adapter.py"
+        )
+        adapter = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(adapter)
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as state:
+            sessions = Path(home) / "sessions" / "2026" / "09" / "24"
+            sessions.mkdir(parents=True)
+            event = {
+                "timestamp": "2026-09-24T00:00:00Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "hi"},
+            }
+            (sessions / "rollout-2026-09-24T00-00-00-11111111-2222-3333-4444-555555555555.jsonl").write_text(
+                json.dumps(event) + "\n"
+            )
+            seen = []
+
+            def fake_post(url, headers, payload, timeout=120, *, allow_plaintext_remote=None):
+                seen.append(allow_plaintext_remote)
+                return {}, None
+
+            with mock.patch.object(adapter._http, "http_post_json", fake_post):
+                adapter.run(home, str(Path(state) / "codex_state"), self.REMOTE_HTTP, "bearer", "host")
+        self.assertTrue(seen, "adapter posted nothing; the fixture did not exercise the OTLP path")
+        self.assertEqual(set(seen), {False})
+
+
 class SharedHttpTest(unittest.TestCase):
     # Covers SECURITY.md#outbound-http
     def test_header_parser_fails_on_malformed_and_controls(self):

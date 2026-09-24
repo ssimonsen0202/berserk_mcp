@@ -161,10 +161,13 @@ def request_json(
         return read_bounded_json(response, cap)
 
 
-def http_post_json(url, headers, payload, timeout=120):
-    """Compatibility contract: return ``(json, None)`` or ``(None, error)``."""
+def http_post_json(url, headers, payload, timeout=120, *, allow_plaintext_remote=None):
+    """Compatibility contract: return ``(json, None)`` or ``(None, error)``.
+
+    ``allow_plaintext_remote=None`` applies the LLM plaintext opt-in; OTLP and
+    CanonLoom callers pass ``False`` so that opt-in cannot weaken them."""
     try:
-        return request_json(url, headers, payload, timeout=timeout), None
+        return request_json(url, headers, payload, timeout=timeout, allow_plaintext_remote=allow_plaintext_remote), None
     except UrlPolicyError as exc:
         return None, f"invalid endpoint: {exc}"
     except urllib.error.HTTPError as exc:
@@ -179,7 +182,7 @@ def http_post_json(url, headers, payload, timeout=120):
         return None, type(exc).__name__
 
 
-def http_get_json(url, headers, timeout=120):
+def http_get_json(url, headers, timeout=120, *, allow_plaintext_remote=None):
     try:
         return request_json(
             url,
@@ -187,6 +190,7 @@ def http_get_json(url, headers, timeout=120):
             None,
             method="GET",
             timeout=timeout,
+            allow_plaintext_remote=allow_plaintext_remote,
         ), None
     except UrlPolicyError as exc:
         return None, f"invalid endpoint: {exc}"

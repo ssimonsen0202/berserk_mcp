@@ -316,7 +316,7 @@ def run(codex_home, state_dir, otlp_endpoint, otlp_bearer, hostname, dry_run=Fal
             headers = {"Content-Type": "application/json"}
             if otlp_bearer:
                 headers["Authorization"] = f"Bearer {otlp_bearer}"
-            _, err = _http.http_post_json(otlp_endpoint, headers, payload, timeout=30)
+            _, err = _http.http_post_json(otlp_endpoint, headers, payload, timeout=30, allow_plaintext_remote=False)
             if err:
                 sys.stderr.write(f"codex_adapter: OTLP post failed: {err}\n")
                 file_had_failure = True

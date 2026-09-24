@@ -3829,6 +3829,7 @@ class CanonLoomTest(unittest.TestCase):
         self._http = _http
         self._orig_get = _http.http_get_json
         self._orig_post = _http.http_post_json
+        self.plaintext_policies = []
         self._orig_env = os.environ.copy()
         os.environ["CANONLOOM_SERVER_URL"] = "http://127.0.0.1:19999"
         os.environ["CANONLOOM_API_KEY"] = "test-key"
@@ -3842,24 +3843,36 @@ class CanonLoomTest(unittest.TestCase):
     def _fake_get(self, response):
         """Return a fake http_get_json that yields (response, None)."""
 
-        def fake(url, headers, timeout=120):
+        def fake(url, headers, timeout=120, allow_plaintext_remote=None):
+            self.plaintext_policies.append(allow_plaintext_remote)
             return response, None
 
         self._http.http_get_json = fake
 
     def _fake_post(self, response):
-        def fake(url, headers, payload, timeout=300):
+        def fake(url, headers, payload, timeout=300, allow_plaintext_remote=None):
+            self.plaintext_policies.append(allow_plaintext_remote)
             return response, None
 
         self._http.http_post_json = fake
 
     def _fake_get_error(self, message):
-        def fake(url, headers, timeout=120):
+        def fake(url, headers, timeout=120, allow_plaintext_remote=None):
+            self.plaintext_policies.append(allow_plaintext_remote)
             return None, message
 
         self._http.http_get_json = fake
 
     # ── _canonloom_call contract ──────────────────────────────────────────────
+
+    def test_every_canonloom_call_refuses_remote_plaintext(self):
+        # Security review 2026-09-24 finding 6: the LLM plaintext opt-in must not
+        # apply to CanonLoom's X-API-Key traffic.
+        self._fake_get({"artifacts": []})
+        self._fake_post({"status": "ok"})
+        bm._canonloom_call("/artifacts")
+        bm._canonloom_call("/pipeline/run", method="POST", body={"url": "https://example.com"})
+        self.assertEqual(self.plaintext_policies, [False, False])
 
     def test_get_returns_json_string_not_tuple(self):
         """Result must be a JSON string, not a serialised (data, None) tuple."""
@@ -3900,7 +3913,8 @@ class CanonLoomTest(unittest.TestCase):
         ]
         call_count = [0]
 
-        def fake_get(url, headers, timeout=120):
+        def fake_get(url, headers, timeout=120, allow_plaintext_remote=None):
+            self.plaintext_policies.append(allow_plaintext_remote)
             r = responses[call_count[0]]
             call_count[0] += 1
             return r, None
@@ -3919,7 +3933,8 @@ class CanonLoomTest(unittest.TestCase):
         """If the promoted call fails, the whole operation fails."""
         call_count = [0]
 
-        def fake_get(url, headers, timeout=120):
+        def fake_get(url, headers, timeout=120, allow_plaintext_remote=None):
+            self.plaintext_policies.append(allow_plaintext_remote)
             call_count[0] += 1
             if call_count[0] == 1:
                 return None, "HTTP 503"
@@ -3935,7 +3950,8 @@ class CanonLoomTest(unittest.TestCase):
     def test_run_pipeline_posts_url(self):
         posted = []
 
-        def fake_post(url, headers, payload, timeout=300):
+        def fake_post(url, headers, payload, timeout=300, allow_plaintext_remote=None):
+            self.plaintext_policies.append(allow_plaintext_remote)
             posted.append(payload)
             return {"ok": True, "run_id": "run_1", "stages": []}, None
 
@@ -3959,7 +3975,8 @@ class CanonLoomTest(unittest.TestCase):
     def test_run_pipeline_auto_promote_requires_real_boolean(self):
         posted = []
 
-        def fake_post(url, headers, payload, timeout=300):
+        def fake_post(url, headers, payload, timeout=300, allow_plaintext_remote=None):
+            self.plaintext_policies.append(allow_plaintext_remote)
             posted.append(payload)
             return {"ok": True, "run_id": "run_1", "stages": []}, None
 
@@ -3986,7 +4003,8 @@ class CanonLoomTest(unittest.TestCase):
         # finding). Only a real, literal False should disable it.
         posted = []
 
-        def fake_post(url, headers, payload, timeout=300):
+        def fake_post(url, headers, payload, timeout=300, allow_plaintext_remote=None):
+            self.plaintext_policies.append(allow_plaintext_remote)
             posted.append(payload)
             return {"ok": True, "run_id": "run_1", "stages": []}, None
 
@@ -4007,7 +4025,8 @@ class CanonLoomTest(unittest.TestCase):
     def test_run_pipeline_record_telemetry_false_disables_it(self):
         posted = []
 
-        def fake_post(url, headers, payload, timeout=300):
+        def fake_post(url, headers, payload, timeout=300, allow_plaintext_remote=None):
+            self.plaintext_policies.append(allow_plaintext_remote)
             posted.append(payload)
             return {"ok": True, "run_id": "run_1", "stages": []}, None
 
@@ -4027,7 +4046,8 @@ class CanonLoomTest(unittest.TestCase):
         # A string "false" must not merge in the (unpromoted) staging list.
         call_count = [0]
 
-        def fake_get(url, headers, timeout=120):
+        def fake_get(url, headers, timeout=120, allow_plaintext_remote=None):
+            self.plaintext_policies.append(allow_plaintext_remote)
             call_count[0] += 1
             return {"artifacts": [{"artifact_id": "art_promoted"}]}, None
 

@@ -105,7 +105,8 @@ eval harness use one stdlib-only HTTP implementation. It:
 - rejects controls, embedded credentials, malformed ports, and fragments;
 - permits plaintext HTTP only on loopback unless the LLM/Discord operator makes
   the documented private-network opt-in;
-- always requires HTTPS for non-loopback OTLP collectors;
+- always requires HTTPS for non-loopback OTLP collectors and CanonLoom
+  servers, whatever the LLM/Discord opt-in says;
 - never follows redirects, so credentials cannot be forwarded to a `Location`;
 - validates header names and values, keeps JSON `Content-Type` authoritative,
   and fails on malformed OTLP header items; and

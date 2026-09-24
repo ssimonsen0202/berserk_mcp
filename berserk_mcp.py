@@ -2179,9 +2179,9 @@ def _canonloom_call(path: str, method: str = "GET", body=None):
         import json as _json
 
         if method == "GET":
-            data, err = _http.http_get_json(url, headers, timeout=120)
+            data, err = _http.http_get_json(url, headers, timeout=120, allow_plaintext_remote=False)
         else:
-            data, err = _http.http_post_json(url, headers, body or {}, timeout=300)
+            data, err = _http.http_post_json(url, headers, body or {}, timeout=300, allow_plaintext_remote=False)
         if err:
             return f"CanonLoom API error: {err}", True
         return _json.dumps(data, indent=2), False
@@ -4981,7 +4981,9 @@ def _doctor_check_canonloom_reachability():
     if api_key:
         headers["X-API-Key"] = api_key
     outcome = _with_wall_clock_timeout(
-        lambda: _http.http_get_json(server_url + "/artifacts", headers, timeout=_DOCTOR_REACHABILITY_TIMEOUT),
+        lambda: _http.http_get_json(
+            server_url + "/artifacts", headers, timeout=_DOCTOR_REACHABILITY_TIMEOUT, allow_plaintext_remote=False
+        ),
         _DOCTOR_REACHABILITY_TIMEOUT,
     )
     if outcome is None:

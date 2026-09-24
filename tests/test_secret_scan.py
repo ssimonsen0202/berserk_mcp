@@ -177,6 +177,128 @@ class SecretRedactionTest(unittest.TestCase):
         self.assertEqual(result, "[REDACTED:redaction_limit]")
 
 
+class SecurityReview20260924RedactionTest(unittest.TestCase):
+    """Findings 1 and 2 of the 2026-09-24 Codex Security scan. Assertions check
+    types and that the value is gone, never print secret values."""
+
+    def _assert_removed(self, text, value, expected_type):
+        clean, findings = ss.redact(text)
+        self.assertFalse(value in clean, "secret value survived redaction")
+        self.assertIn(expected_type, {f["type"] for f in findings})
+
+    def test_quoted_json_credential_keys_are_redacted(self):
+        for key, kind in (("password", "password"), ("token", "token"), ("api_key", "api_key"), ("secret", "secret")):
+            variants = (
+                f'{{"{key}":"hunter2value"}}',
+                f'{{ "{key}" : "hunter2value" }}',
+                f"{{'{key}': 'hunter2value'}}",
+            )
+            for variant, text in enumerate(variants):
+                with self.subTest(key=key, variant=variant):
+                    self._assert_removed(text, "hunter2value", kind)
+
+    def test_quoted_value_is_removed_in_full(self):
+        cases = {
+            "longer_than_old_bound": ('{"password":"' + "Q" * 5000 + '"} after', "Q" * 10),
+            "escaped_quote": ('{"password":"abc\\"TAILVALUE"} after', "TAILVALUE"),
+            "escaped_backslash": ('{"password":"abc\\\\TAILVALUE"} after', "TAILVALUE"),
+            "single_quoted": ("{'token': 'TAILVALUE'} after", "TAILVALUE"),
+        }
+        for name, (text, fragment) in cases.items():
+            with self.subTest(case=name):
+                clean, _ = ss.redact(text, pii_types=())
+                self.assertFalse(fragment in clean, "secret value survived redaction")
+                self.assertTrue(clean.endswith("} after"))
+
+    def test_unterminated_quoted_value_is_redacted_to_end_of_line(self):
+        clean, _ = ss.redact('{"password":"TAILVALUE\nnext line', pii_types=())
+        self.assertFalse("TAILVALUE" in clean, "secret value survived redaction")
+        self.assertTrue(clean.endswith("\nnext line"))
+
+    def test_many_unterminated_quoted_keys_stay_linear(self):
+        import time
+
+        text = ('"password":"' * 80000)[: ss.MAX_REDACT_CHARS]
+        started = time.perf_counter()
+        ss.redact(text, pii_types=())
+        self.assertLess(time.perf_counter() - started, 5.0)
+
+    def test_quoted_key_with_bare_value_is_redacted(self):
+        self._assert_removed('{"password": hunter2value}', "hunter2value", "password")
+
+    def test_fine_grained_github_pat_is_redacted(self):
+        pat = "github_pat_" + "11AA22BB33CC44DD55EE66FF77GG88HH99"
+        self._assert_removed(f"token in log: {pat} end", pat, "github_token")
+
+    def test_similar_json_keys_are_not_redacted(self):
+        text = '{"tokens": 1234, "input_token_count": 5, "password_policy": "strong"}'
+        clean, findings = ss.redact(text, pii_types=())
+        self.assertEqual(clean, text)
+        self.assertEqual(findings, [])
+
+    def test_private_key_block_still_redacted(self):
+        body = "MIIBVgIBADANBgkqhkiG9w0BAQEFAASCAUAwggE8AgEAAkEA"
+        text = f"x -----BEGIN RSA PRIVATE KEY-----\n{body}\n-----END RSA PRIVATE KEY----- y"
+        clean, findings = ss.redact(text, pii_types=())
+        self.assertFalse(body in clean, "secret value survived redaction")
+        self.assertEqual(clean, "x [REDACTED:private_key] y")
+        self.assertEqual([f["type"] for f in findings], ["private_key"])
+
+    def test_mismatched_private_key_labels_do_not_match(self):
+        body = "MIIBVgIBADANBgkqhkiG9w0BAQEF"
+        text = f"-----BEGIN EC PRIVATE KEY-----\n{body}\n-----END RSA PRIVATE KEY-----"
+        clean, _ = ss.redact(text, pii_types=())
+        self.assertTrue("-----BEGIN EC PRIVATE KEY-----" in clean)
+
+    def test_two_private_key_blocks_both_redacted(self):
+        block = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----"
+        clean, findings = ss.redact(f"{block} and {block}", pii_types=())
+        self.assertEqual(clean, "[REDACTED:private_key] and [REDACTED:private_key]")
+        self.assertEqual(findings[0]["count"], 2)
+
+    def test_many_unterminated_markers_stay_linear(self):
+        import time
+
+        text = "-----BEGIN PRIVATE KEY-----" * 30000 + "x"
+        self.assertLess(len(text), ss.MAX_REDACT_CHARS)
+        started = time.perf_counter()
+        clean, findings = ss.redact(text, pii_types=())
+        self.assertLess(time.perf_counter() - started, 5.0)
+        # No END marker anywhere, so no key can be complete: the scan stops at the
+        # first BEGIN and the text is returned as is.
+        self.assertEqual((clean, findings), (text, []))
+
+    def test_marker_cap_fails_closed_when_an_end_marker_exists(self):
+        text = "-----BEGIN PRIVATE KEY-----" * (ss.MAX_PRIVATE_KEY_MARKERS + 1) + "-----END OTHER PRIVATE KEY-----"
+        clean, findings = ss.redact(text, pii_types=())
+        self.assertEqual(clean, "[REDACTED:redaction_limit]")
+        self.assertEqual([f["type"] for f in findings], ["too_many_private_key_markers"])
+
+    def test_unterminated_markers_below_cap_with_no_end_are_fast_and_kept(self):
+        import time
+
+        text = "-----BEGIN PRIVATE KEY-----" * ss.MAX_PRIVATE_KEY_MARKERS
+        started = time.perf_counter()
+        clean, _ = ss.redact(text, pii_types=())
+        self.assertLess(time.perf_counter() - started, 5.0)
+        self.assertEqual(clean, text)
+
+    def test_distinct_labels_with_an_end_marker_present_are_bounded(self):
+        import time
+
+        def label(i):
+            return "L" + chr(65 + i // 26) + chr(65 + i % 26)
+
+        markers = [f"-----BEGIN {label(i)} PRIVATE KEY-----" for i in range(ss.MAX_PRIVATE_KEY_MARKERS)]
+        self.assertEqual(len({ss._PEM_BEGIN.match(m).group(1) for m in markers}), ss.MAX_PRIVATE_KEY_MARKERS)
+        text = "".join(markers) + "z" * 900000 + "-----END OTHER PRIVATE KEY-----"
+        self.assertLess(len(text), ss.MAX_REDACT_CHARS)
+        started = time.perf_counter()
+        clean, _ = ss.redact(text, pii_types=())
+        self.assertLess(time.perf_counter() - started, 5.0)
+        self.assertEqual(clean, text)
+
+
 class AuditRowParsingTest(unittest.TestCase):
     def test_parse_valid_bare_array(self):
         recs = [{"service": "api", "ts": "t1", "body": "x"}, {"service": "web", "ts": "t2", "body": "y"}]

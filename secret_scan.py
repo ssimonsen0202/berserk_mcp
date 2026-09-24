@@ -18,23 +18,32 @@ class AuditParseError(ValueError):
 
 
 # Ordered most-specific-first. Later matches never replace an earlier overlap.
+# Private keys are matched by _private_key_matches (a linear scan), not a regex:
+# a BEGIN...END regex backtracks quadratically over many unterminated markers.
 _SECRET_PATTERNS = (
-    (
-        "private_key",
-        re.compile(
-            r"-----BEGIN ((?:[A-Z]+ )?PRIVATE KEY)-----.*?-----END \1-----",
-            re.DOTALL,
-        ),
-    ),
     ("aws_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
     ("aws_secret", re.compile(r"(?i)\baws[_ -]?secret(?:[_ -]?(?:access)?[_ -]?key)?\s*[=:]\s*[A-Za-z0-9+/]{40}\b")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")),
     ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
+    ("github_token", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,255}\b")),
     ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
     ("api_key", re.compile(r"\bsk-[A-Za-z0-9-]{20,}\b")),
     ("bearer", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._-]{20,}\b")),
 )
-_GENERIC_CREDENTIAL = re.compile(r"(?i)\b(password|passwd|pwd|secret|api[_-]?key|token)\s*[=:]\s*[^\s,;]+")
+_GENERIC_CREDENTIAL = re.compile(r"(?i)\b(?P<key>password|passwd|pwd|secret|api[_-]?key|token)\s*[=:]\s*[^\s,;]+")
+# JSON/YAML with a quoted key: "password": "hunter2". The key is found by regex;
+# the value is parsed by _quoted_credential_matches so long or escaped values are
+# removed in full.
+_QUOTED_KEY = re.compile(r"""(?i)(?P<q>["'])(?P<key>password|passwd|pwd|secret|api[_-]?key|token)(?P=q)\s*[=:]\s*""")
+# One alternative per character (plain or backslash-escaped): no backtracking.
+_QUOTED_BODY = {
+    '"': re.compile(r'(?:[^"\\\n]|\\.)*'),
+    "'": re.compile(r"(?:[^'\\\n]|\\.)*"),
+}
+_BARE_VALUE = re.compile(r"[^\s,;}\]]+")
+_PEM_BEGIN = re.compile(r"-----BEGIN ((?:[A-Z]+ )?PRIVATE KEY)-----")
+_PEM_END_PREFIX = "-----END "
+MAX_PRIVATE_KEY_MARKERS = 100
 _ENTROPY_TOKEN = re.compile(r"\b[A-Za-z0-9_+/=-]{20,}\b")
 _EMAIL = re.compile(r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
@@ -77,7 +86,7 @@ def _luhn(value):
 
 
 def _credential_type(match):
-    key = match.group(1).lower().replace("-", "_")
+    key = match.group("key").lower().replace("-", "_")
     if key in {"password", "passwd", "pwd"}:
         return "password"
     if key == "api_key":
@@ -116,12 +125,64 @@ def _pii_matches(text, pii_types):
                 yield match.start(), match.end(), pii_type
 
 
+class _RedactionLimit(Exception):
+    """Raised inside candidate generation to fail the whole input closed."""
+
+
+def _private_key_matches(text):
+    """Linear replacement for the old BEGIN...END regex.
+
+    After one failed search for any END marker, nothing later can match, so the
+    scan stops. Past MAX_PRIVATE_KEY_MARKERS markers the input fails closed, so
+    many distinct unterminated labels cannot force repeated full scans."""
+    pos = 0
+    for count, begin in enumerate(_PEM_BEGIN.finditer(text), 1):
+        if count > MAX_PRIVATE_KEY_MARKERS:
+            raise _RedactionLimit("too_many_private_key_markers")
+        if begin.start() < pos:
+            continue
+        if text.find(_PEM_END_PREFIX, begin.end()) == -1:
+            return
+        end_marker = f"-----END {begin.group(1)}-----"
+        end = text.find(end_marker, begin.end())
+        if end == -1:
+            continue
+        pos = end + len(end_marker)
+        yield begin.start(), pos, "private_key"
+
+
+def _quoted_credential_matches(text):
+    """Quoted-key credentials, with the whole value removed.
+
+    A quoted value runs to its closing quote, honouring backslash escapes. An
+    unterminated one runs to the end of the line: redacting too much beats leaking
+    a tail. Keys inside an already matched value are skipped, so the scan is linear."""
+    pos = 0
+    for key in _QUOTED_KEY.finditer(text):
+        if key.start() < pos:
+            continue
+        start = key.end()
+        quote = text[start : start + 1]
+        if quote in _QUOTED_BODY:
+            body_end = _QUOTED_BODY[quote].match(text, start + 1).end()
+            end = body_end + 1 if text[body_end : body_end + 1] == quote else body_end
+        else:
+            bare = _BARE_VALUE.match(text, start)
+            if bare is None:
+                continue
+            end = bare.end()
+        pos = end
+        yield key.start(), end, _credential_type(key)
+
+
 def _candidate_matches(text, include_entropy, pii_types):
+    yield from _private_key_matches(text)
     for secret_type, pattern in _SECRET_PATTERNS:
         for match in pattern.finditer(text):
             yield match.start(), match.end(), secret_type
     for match in _GENERIC_CREDENTIAL.finditer(text):
         yield match.start(), match.end(), _credential_type(match)
+    yield from _quoted_credential_matches(text)
     if include_entropy:
         for match in _ENTROPY_TOKEN.finditer(text):
             value = match.group(0)
@@ -155,10 +216,13 @@ def redact(text, include_entropy=False, pii_types=ALL_PII_TYPES):
 
     enabled_pii = frozenset(pii_types or ())
     candidates = []
-    for order, (start, end, finding_type) in enumerate(_candidate_matches(original, include_entropy, enabled_pii)):
-        if order >= MAX_REDACT_CANDIDATES:
-            return _limit_result("too_many_matches")
-        candidates.append((start, end, finding_type, order))
+    try:
+        for order, (start, end, finding_type) in enumerate(_candidate_matches(original, include_entropy, enabled_pii)):
+            if order >= MAX_REDACT_CANDIDATES:
+                return _limit_result("too_many_matches")
+            candidates.append((start, end, finding_type, order))
+    except _RedactionLimit as limit:
+        return _limit_result(str(limit))
 
     candidates.sort(key=lambda c: (c[0], c[1]))
 
