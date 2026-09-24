@@ -71,6 +71,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import _http
+import _kql_boundary
 import _store
 import agent_analytics
 import tool_catalog
@@ -1471,14 +1472,6 @@ def _normalize_since_arg(args):
         args["since"] = _normalize_since(args["since"])
 
 
-# Free-text KQL is passed as a positional argv element to the bzrk CLI. If it
-# began with '-', some CLI parsers would interpret it as an option rather than
-# the query (e.g. a stray "--profile x"), silently changing what runs. Require
-# every query to actually start with the configured table.
-_KQL_PREFIX_RE = re.compile(r"^\s*" + re.escape(TABLE) + r"\b")
-_KQL_CONTROL_RE = re.compile(r"^\s*\.")
-
-
 _BZRK_TIMEOUT_TEXT_RE = re.compile(r"^bzrk timed out after ", re.IGNORECASE)
 
 
@@ -1486,12 +1479,9 @@ def bzrk_search(kql, since, extra=None):
     """Run a KQL search on the configured profile and time window. `extra` adds
     trailing CLI flags (e.g. ['--json']) without duplicating the guards."""
     query = str(kql)
-    if ";" in query:
-        return "invalid KQL: semicolons are not allowed in user queries", True
-    if _KQL_CONTROL_RE.match(query):
-        return "invalid KQL: control commands are not allowed in user queries", True
-    if not _KQL_PREFIX_RE.match(query):
-        return (f"invalid KQL: query must start with '{TABLE} | ...' (got: {query[:40]!r})"), True
+    boundary_error = _kql_boundary.check(query, TABLE)
+    if boundary_error:
+        return boundary_error, True
     since = _normalize_since(since)
     if not valid_since(since):
         return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True

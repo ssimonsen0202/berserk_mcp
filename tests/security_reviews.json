@@ -1,9 +1,9 @@
 {
   "berserk_mcp:bzrk_search": {
-    "fingerprint": "29cee6638dc6fc7d",
-    "reviewed": "2026-09-23",
+    "fingerprint": "905ee183aa2cc774",
+    "reviewed": "2026-09-24",
     "by": "baseline",
-    "note": "final KQL execution boundary: semicolons and control commands rejected before bzrk runs. Fingerprint recorded 2026-09-23; no dedicated review yet."
+    "note": "runs a user query through the boundary, since-window check and query semaphore, then bzrk. The boundary checks moved unchanged to _kql_boundary.check on 2026-09-24 (differential test over ~120k queries and 6 table names: identical results). No dedicated review yet."
   },
   "berserk_mcp:_run_argv_bounded": {
     "fingerprint": "82c3b813982d3258",
@@ -46,5 +46,11 @@
     "reviewed": "2026-09-24",
     "by": "Codex Security scan",
     "note": "store paths absolute, traversal-free, control-free. Codex Security scoped scan 2026-09-24 of secret_scan.py/_http.py/_store.py (9 findings, coverage complete): finding 3 (validation not bound to later operations; FileLock uses the unresolved path) and finding 5 (follows planted symlinks) still open; finding 9 (codex adapter state path) fixed 2026-09-24."
+  },
+  "_kql_boundary:check": {
+    "fingerprint": "9b6205b07b21637b",
+    "reviewed": "2026-09-24",
+    "by": "baseline",
+    "note": "final KQL execution boundary: semicolons (even in string literals) and control commands rejected, configured-table prefix required, before bzrk runs; active whatever BERSERK_MCP_KQL_VALIDATION says. Moved from bzrk_search 2026-09-24. No dedicated review yet."
   }
 }

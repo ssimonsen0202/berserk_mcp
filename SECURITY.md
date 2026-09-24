@@ -40,7 +40,7 @@ prevent executable planting. Operators should set an absolute trusted path on
 Windows.
 
 Arbitrary KQL must start with the configured table. The final execution boundary
-rejects any semicolon, including one inside a string literal, and rejects control
+(`_kql_boundary.check`, called by `bzrk_search`) rejects any semicolon, including one inside a string literal, and rejects control
 commands before spawning `bzrk`. Static validation also blocks source-introducing
 operators such as `union`, `externaldata`, `evaluate`, `find`, and operator-form
 `search`. These checks remain active when

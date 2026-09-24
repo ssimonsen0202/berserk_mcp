@@ -182,6 +182,12 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertIn("control command", text)
         self.assertEqual(self.calls, [])
 
+    def test_execution_boundary_runs_before_since_validation(self):
+        text, err = bm.bzrk_search(f"{bm.TABLE} | take 1; .show tables", "not a time")
+        self.assertTrue(err)
+        self.assertIn("semicolon", text)
+        self.assertEqual(self.calls, [])
+
     def test_since_various_valid(self):
         for s in ("now", "15m ago", "2 hours ago", "1d", "30 minutes ago", "3w ago"):
             self.calls.clear()
