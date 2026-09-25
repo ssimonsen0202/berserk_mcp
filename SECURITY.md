@@ -39,24 +39,45 @@ that resolves inside the MCP client's current working directory is rejected to
 prevent executable planting. Operators should set an absolute trusted path on
 Windows.
 
-Arbitrary KQL must start with the configured table. The final execution boundary
-(`_kql_boundary.check`, called by `bzrk_search`) rejects any semicolon, including one inside a string literal, and rejects control
-commands before spawning `bzrk`. Static validation also blocks source-introducing
-operators such as `union`, `externaldata`, `evaluate`, `find`, and operator-form
-`search`. These checks remain active when
+Arbitrary KQL must start with the configured table and must not read any other
+source. The final execution boundary (`_kql_boundary.check`, called by
+`bzrk_search` and by `validate_kql` in live mode) rejects any semicolon, including one inside a string literal, and rejects control
+commands before spawning `bzrk`. It also rejects source-introducing operators and
+functions (`union`, `join`, `lookup`, `evaluate`, `find`, `search`, `invoke`,
+`externaldata`, `toscalar(`, `table(`, and similar) anywhere outside string
+literals, and any non-literal right operand of `in`, `has`, `has_any` and the
+other operators that accept a tabular expression (so a column-to-column
+comparison with these operators is refused too). String literals are delimited the
+way the Kusto lexer reads them, including verbatim, obfuscated and multi-line
+forms; an unterminated literal is refused. These checks remain active when
 `BERSERK_MCP_KQL_VALIDATION=off`; that setting disables advisory/static policy,
 not the execution boundary or query concurrency guard.
+
+Residual risk: a stored function called in scalar context (`extend v = Fn()`)
+can read any table the `bzrk` identity can read, and a pattern-based check cannot
+tell a stored function from a built-in one. Restrict the `bzrk` profile's
+database permissions to the configured table where that matters.
 
 Successful `bzrk` stdout is captured incrementally and capped by
 `BERSERK_MCP_MAX_RESULT_BYTES` (10 MiB by default). On overflow the child is
 killed and reaped, and the caller receives an actionable error. Diagnostics are
 separately bounded and authentication failures always return a constant message.
+The authentication check reads all of stderr while it streams, including bytes
+past the retained diagnostic cap, so a late marker cannot turn an exit-0 failure
+into an empty success. If a stream could not be read to the end, the call fails.
 
 ## Untrusted telemetry and redaction
 
 Query results can contain attacker-controlled log text. Treat all returned data
 as data, not instructions. Redact secrets before ingest whenever possible and
 rotate any credential that reached telemetry.
+
+Telemetry is wrapped in `<untrusted_log_data>`, model-authored saved-query
+descriptions in `<generated-description>`, and parser-factory samples in
+`<sample-data>`. Before wrapping, `_tag_guard` decodes HTML entities, JSON-style
+(`\u003c`, `\x3c`, `\/`) and URL escapes (up to 8 nested levels) and NFKC forms, and neutralises any
+opening or closing tag of the fence that the decoded text contains. Text that
+is still encoded after 8 levels has its escape characters broken instead.
 
 `BERSERK_MCP_REDACT=redact` is the default MCP output policy. `flag` and `off`
 are explicit weaker modes and emit a startup warning. Entropy and selected PII

@@ -72,6 +72,7 @@ from pathlib import Path
 
 import _http
 import _kql_boundary
+import _tag_guard
 import _store
 import agent_analytics
 import tool_catalog
@@ -488,20 +489,11 @@ _OVERFLOW_SENTINEL_RE = re.compile(
     r"project fewer columns, or add a smaller take/top/tail bound\."
 )
 
-_ANGLE_OPEN_RE = r"(?:<|&lt;?|&#0*60;?|&#x0*3c;?|&amp;lt;?|&amp;#0*60;?|&amp;#x0*3c;?)"
-_ANGLE_CLOSE_RE = r"(?:>|&gt;?|&#0*62;?|&#x0*3e;?|&amp;gt;?|&amp;#0*62;?|&amp;#x0*3e;?)"
-# Also match &#47; (decimal) and &#x2f; (hex) entity encodings of "/" so that
-# an attacker-controlled value cannot break out of the fence by encoding the
-# slash in the closing tag differently. Includes semicolonless variants and
-# double-encoded variants (&amp;#47; etc).
-# &sol; is the HTML5 named character reference for "/" -- also covered in
-# both plain and double-encoded (&amp;sol;) form, same as the numeric/hex
-# variants (Codex re-review finding: the named form was missing).
-_SLASH_RE = r"(?:/|&#0*47;?|&#x0*2f;?|&amp;#0*47;?|&amp;#x0*2f;?|&sol;?|&amp;sol;?)"
-_UNTRUSTED_DATA_CLOSE_RE = re.compile(
-    rf"{_ANGLE_OPEN_RE}\s*{_SLASH_RE}\s*untrusted_log_data\s*{_ANGLE_CLOSE_RE}",
-    re.IGNORECASE,
-)
+# Forged fence tags in untrusted text are neutralised by _tag_guard, which
+# decodes entity/JSON/URL escapes and NFKC forms before matching, so an
+# encoded tag name (&#95; for "_") cannot slip past (Codex Security scan
+# 77004e6e finding 2). Opening tags are neutralised as well as closing ones.
+_UNTRUSTED_DATA_TAG_RE = _tag_guard.tag_pattern("untrusted_log_data")
 
 # Same treatment for the saved-query fence tag. A literal-only replacement
 # (text.replace("<", "(")) leaves every HTML-entity form intact, so
@@ -512,10 +504,7 @@ _UNTRUSTED_DATA_CLOSE_RE = re.compile(
 # Matches the OPEN form too, not just the close: a forged opening tag in a
 # user-origin description can make everything after it appear fenced --
 # i.e. make trusted server text look like untrusted model-authored content.
-_GENERATED_DESC_TAG_RE = re.compile(
-    rf"{_ANGLE_OPEN_RE}\s*(?:{_SLASH_RE})?\s*generated-description\s*{_ANGLE_CLOSE_RE}",
-    re.IGNORECASE,
-)
+_GENERATED_DESC_TAG_RE = _tag_guard.tag_pattern("generated-description")
 
 
 def _fence_untrusted(text, inline=False):
@@ -535,8 +524,7 @@ def _fence_untrusted(text, inline=False):
     stripped = str(text).strip()
     if stripped == "(no rows)" or stripped == AUTH_FAILURE_MESSAGE or bool(_OVERFLOW_SENTINEL_RE.fullmatch(stripped)):
         return text
-    normalized = unicodedata.normalize("NFKC", str(text))
-    body = _UNTRUSTED_DATA_CLOSE_RE.sub("(/untrusted_log_data)", normalized)
+    body = _tag_guard.neutralize(text, _UNTRUSTED_DATA_TAG_RE, "untrusted_log_data")
     sep = "" if inline else "\n"
     return f"{_UNTRUSTED_DATA_OPEN}{sep}{body}{sep}{_UNTRUSTED_DATA_CLOSE}"
 
@@ -1235,10 +1223,17 @@ def _forecast_fit_rows(text):
 # (confirmed by the 2026-07-18 security review, SEC-003). Match bzrk-q's
 # pattern exactly for consistency between the two wrappers.
 _AUTH_FAILURE_RE = re.compile(
-    r"refresh token rejected|run .*bzrk login|unauthorized|unauthenticated|"
+    r"refresh token rejected|run .{0,200}bzrk login|unauthorized|unauthenticated|"
     r"login required",
     re.IGNORECASE,
 )
+# The same pattern over raw stderr bytes, applied to the whole stream while it
+# is read, not only to the retained diagnostic prefix: a marker after
+# MAX_BZRK_DIAGNOSTIC_CHARS must still be classified (Codex Security scan
+# 77004e6e finding 3). Every alternative is bounded (at most ~220 bytes), so a
+# rolling overlap of _AUTH_SCAN_OVERLAP bytes finds a match split across reads.
+_AUTH_FAILURE_BYTES_RE = re.compile(_AUTH_FAILURE_RE.pattern.encode("ascii"), re.IGNORECASE)
+_AUTH_SCAN_OVERLAP = 512
 
 AUTH_FAILURE_MESSAGE = "bzrk authentication failed; run `bzrk login` and retry"
 
@@ -1249,12 +1244,21 @@ MAX_BZRK_DIAGNOSTIC_CHARS = 100_000
 _PROCESS_READ_CHUNK = 64 * 1024
 
 
-def _run_argv_bounded(argv, timeout, stdout_cap=MAX_BZRK_RESULT_BYTES, stderr_cap=MAX_BZRK_DIAGNOSTIC_CHARS):
+def _run_argv_bounded(
+    argv,
+    timeout,
+    stdout_cap=MAX_BZRK_RESULT_BYTES,
+    stderr_cap=MAX_BZRK_DIAGNOSTIC_CHARS,
+    stderr_watch=_AUTH_FAILURE_BYTES_RE,
+):
     """Run argv without a shell, bounding captured bytes before decoding.
 
     Two readers drain stdout and stderr concurrently to avoid pipe deadlocks.
     stdout overflow terminates and reaps the child; stderr is retained only up
     to its diagnostic cap while the remainder is discarded until completion.
+    Every stderr byte, retained or not, is searched for `stderr_watch`
+    ("stderr_watch_matched"). "streams_complete" is False when a reader was
+    still running after the child exited, so its stream may be incomplete.
     """
     process = subprocess.Popen(
         list(argv),
@@ -1266,15 +1270,22 @@ def _run_argv_bounded(argv, timeout, stdout_cap=MAX_BZRK_RESULT_BYTES, stderr_ca
     caps = {"stdout": max(1, int(stdout_cap)), "stderr": max(1, int(stderr_cap))}
     stdout_overflow = threading.Event()
     stderr_overflow = threading.Event()
+    stderr_watch_matched = threading.Event()
     reader_errors = []
 
     def drain(name, stream):
+        tail = b""
         try:
             with stream:
                 while True:
                     chunk = stream.read(_PROCESS_READ_CHUNK)
                     if not chunk:
                         break
+                    if name == "stderr" and stderr_watch is not None and not stderr_watch_matched.is_set():
+                        window = tail + chunk
+                        if stderr_watch.search(window):
+                            stderr_watch_matched.set()
+                        tail = window[-_AUTH_SCAN_OVERLAP:]
                     remaining = caps[name] - len(buffers[name])
                     if remaining > 0:
                         buffers[name].extend(chunk[:remaining])
@@ -1324,6 +1335,8 @@ def _run_argv_bounded(argv, timeout, stdout_cap=MAX_BZRK_RESULT_BYTES, stderr_ca
         "stderr": bytes(buffers["stderr"]),
         "stdout_overflow": stdout_overflow.is_set(),
         "stderr_overflow": stderr_overflow.is_set(),
+        "stderr_watch_matched": stderr_watch_matched.is_set(),
+        "streams_complete": not any(thread.is_alive() for thread in threads),
     }
 
 
@@ -1352,8 +1365,12 @@ def run_bzrk(args, timeout=DEFAULT_TIMEOUT):
         result = _run_argv_bounded([_RESOLVED_BZRK_BIN] + args, timeout)
         out = result["stdout"].decode("utf-8", errors="replace").strip()
         err = result["stderr"].decode("utf-8", errors="replace").strip()
-        if err and _AUTH_FAILURE_RE.search(err):
+        if result.get("stderr_watch_matched") or (err and _AUTH_FAILURE_RE.search(err)):
             return AUTH_FAILURE_MESSAGE, True
+        if not result.get("streams_complete", True):
+            # A reader outlived the child (e.g. a grandchild kept the pipe
+            # open), so stderr was not fully scanned: fail closed.
+            return "bzrk output could not be read completely; retry the query.", True
         if result["stdout_overflow"]:
             return (
                 f"bzrk result exceeded BERSERK_MCP_MAX_RESULT_BYTES="
@@ -1851,7 +1868,7 @@ def _saved_query_description(item):
     # delimiter variants retain security significance at the tool-description
     # LLM trust boundary". They do: 5 of 6 encoded variants survived the
     # literal-only replacement.
-    text = _GENERATED_DESC_TAG_RE.sub("(generated-description)", text)
+    text = _tag_guard.neutralize(text, _GENERATED_DESC_TAG_RE, "generated-description")
     text = text.replace("<", "(").replace(">", ")")
     if item.get("origin") == "generated":
         text = "<generated-description>" + text + "</generated-description>"
@@ -2727,6 +2744,11 @@ def _handle_validate_kql(arguments):
             )
         if any(f.get("severity") == "error" for f in report.get("findings", [])):
             return json.dumps(report, indent=2), True
+        # The report above is advisory; this is the same mandatory check
+        # bzrk_search applies, since this path calls run_bzrk directly.
+        boundary_error = _kql_boundary.check(str(kql), TABLE)
+        if boundary_error:
+            return boundary_error, True
         budget = _window_budget(TOOL_BUDGET_SECONDS if TOOL_BUDGET_SECONDS > 0 else DEFAULT_TIMEOUT, since)
         argv = ["-P", PROFILE, "search", str(kql), "--since", since]
         if KQL_STATS_MODE != "off":

@@ -6,10 +6,10 @@
     "note": "runs a user query through the boundary, since-window check and query semaphore, then bzrk. The boundary checks moved unchanged to _kql_boundary.check on 2026-09-24 (differential test over ~120k queries and 6 table names: identical results). No dedicated review yet."
   },
   "berserk_mcp:_run_argv_bounded": {
-    "fingerprint": "82c3b813982d3258",
-    "reviewed": "2026-09-23",
-    "by": "baseline",
-    "note": "argv-only subprocess with stdout/diagnostic caps; child killed and reaped on overflow. Fingerprint recorded 2026-09-23; no dedicated review yet."
+    "fingerprint": "72c9348849e8029a",
+    "reviewed": "2026-09-25",
+    "by": "claude + codex review (2 passes)",
+    "note": "scans all of stderr for the auth marker while streaming (512-byte overlap, bounded patterns), reports streams_complete (finding 3: a marker past the retained cap was discarded). Fix for Codex Security scan 77004e6e (2026-09-25); fixes reviewed by Codex in two passes, second pass clean."
   },
   "berserk_mcp:_resolve_bzrk_binary": {
     "fingerprint": "dd0b7e36b9e6e73c",
@@ -24,10 +24,10 @@
     "note": "role-visibility gate (F-008) and modern preflight before handle_call; output filter applied. 2026-09-22: two passes over b648346..d545097 found it equivalent to the pre-refactor tools/call branch"
   },
   "berserk_mcp:_fence_untrusted": {
-    "fingerprint": "d4f0fa5fec8c8eca",
-    "reviewed": "2026-09-23",
-    "by": "baseline",
-    "note": "fences attacker-controlled telemetry before it reaches the model. Fingerprint recorded 2026-09-23; no dedicated review yet."
+    "fingerprint": "5ea84c0a0dc8187e",
+    "reviewed": "2026-09-25",
+    "by": "claude + codex review (2 passes)",
+    "note": "delegates tag neutralisation to _tag_guard (open and close tags). Fix for Codex Security scan 77004e6e (2026-09-25); fixes reviewed by Codex in two passes, second pass clean."
   },
   "secret_scan:redact": {
     "fingerprint": "7c39c9cd1a925643",
@@ -48,9 +48,57 @@
     "note": "store paths absolute, traversal-free, control-free. Codex Security scoped scan 2026-09-24 of secret_scan.py/_http.py/_store.py (9 findings, coverage complete): finding 3 (validation not bound to later operations; FileLock uses the unresolved path) and finding 5 (follows planted symlinks) still open; finding 9 (codex adapter state path) fixed 2026-09-24."
   },
   "_kql_boundary:check": {
-    "fingerprint": "9b6205b07b21637b",
-    "reviewed": "2026-09-24",
-    "by": "baseline",
-    "note": "final KQL execution boundary: semicolons (even in string literals) and control commands rejected, configured-table prefix required, before bzrk runs; active whatever BERSERK_MCP_KQL_VALIDATION says. Moved from bzrk_search 2026-09-24. No dedicated review yet."
+    "fingerprint": "9b95981058d61b54",
+    "reviewed": "2026-09-25",
+    "by": "claude + codex review (2 passes)",
+    "note": "final KQL execution boundary: semicolons, control commands, table prefix, and now mandatory source confinement via source_violation in every validation mode (finding 1: union/in (Table) read other tables). Fix for Codex Security scan 77004e6e (2026-09-25); fixes reviewed by Codex in two passes, second pass clean."
+  },
+  "_kql_boundary:strip_literals": {
+    "fingerprint": "b4191f3763d56aaf",
+    "reviewed": "2026-09-25",
+    "by": "claude + codex review (2 passes)",
+    "note": "blanks string literals the way the Kusto lexer reads them ('..'/\"..\" with backslash escapes, verbatim @'..' with doubled quotes, h/H prefixes, ``` multi-line); unterminated literals return None and are refused. Fix for Codex Security scan 77004e6e (2026-09-25); fixes reviewed by Codex in two passes, second pass clean."
+  },
+  "_kql_boundary:source_violation": {
+    "fingerprint": "548d05e789fd7d32",
+    "reviewed": "2026-09-25",
+    "by": "claude + codex review (2 passes)",
+    "note": "source operators/functions anywhere outside literals, plus literal-only right operands of in/has-family operators. Residual: stored function in scalar context (documented in SECURITY.md). Fix for Codex Security scan 77004e6e (2026-09-25); fixes reviewed by Codex in two passes, second pass clean."
+  },
+  "_kql_boundary:_literal_group_error": {
+    "fingerprint": "a7ff8bf8c7ac45f1",
+    "reviewed": "2026-09-25",
+    "by": "claude + codex review (2 passes)",
+    "note": "linear scan of a parenthesised operand: literals only; brackets only inside dynamic(); ':' only inside dynamic/datetime/time/timespan. Fix for Codex Security scan 77004e6e (2026-09-25); fixes reviewed by Codex in two passes, second pass clean."
+  },
+  "_kql_boundary:_literal_operand_error": {
+    "fingerprint": "75465af909bb4149",
+    "reviewed": "2026-09-25",
+    "by": "claude + codex review (2 passes)",
+    "note": "unparenthesised operand: string, number, true/false/null or a literal function whose contents pass _literal_group_error. Fix for Codex Security scan 77004e6e (2026-09-25); fixes reviewed by Codex in two passes, second pass clean."
+  },
+  "_tag_guard:neutralize": {
+    "fingerprint": "23d22c5ebcde4c0f",
+    "reviewed": "2026-09-25",
+    "by": "claude + codex review (2 passes)",
+    "note": "neutralises forged open/close fence tags after canonical decoding; used by _fence_untrusted, _saved_query_description and parser_factory._fence_sample_data (finding 2: entity-encoded tag names escaped the fence). Fix for Codex Security scan 77004e6e (2026-09-25); fixes reviewed by Codex in two passes, second pass clean."
+  },
+  "_tag_guard:_canonical": {
+    "fingerprint": "f7ab9d255d5606c9",
+    "reviewed": "2026-09-25",
+    "by": "claude + codex review (2 passes)",
+    "note": "NFKC + HTML entity + \\uXXXX/\\xXX/\\/ + URL decoding, up to 8 rounds; unstable text has its escape characters broken. Linear on 10 MiB adversarial input. Fix for Codex Security scan 77004e6e (2026-09-25); fixes reviewed by Codex in two passes, second pass clean."
+  },
+  "_tag_guard:tag_pattern": {
+    "fingerprint": "a3bcec3d58f61c32",
+    "reviewed": "2026-09-25",
+    "by": "claude + codex review (2 passes)",
+    "note": "tag regex over canonical text; one gap run per position to avoid quadratic backtracking (24 s -> 0.18 s on 10 MiB of invisible characters). Fix for Codex Security scan 77004e6e (2026-09-25); fixes reviewed by Codex in two passes, second pass clean."
+  },
+  "berserk_mcp:run_bzrk": {
+    "fingerprint": "7b507f779e715131",
+    "reviewed": "2026-09-25",
+    "by": "claude + codex review (2 passes)",
+    "note": "constant auth message when the marker is anywhere in stderr; fails closed when a stream was not fully read. Fix for Codex Security scan 77004e6e (2026-09-25); fixes reviewed by Codex in two passes, second pass clean."
   }
 }

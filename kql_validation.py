@@ -9,6 +9,8 @@ misses before a user-originated query reaches ``bzrk``.
 import json
 import re
 
+import _kql_boundary
+
 
 VALIDATION_VERSION = 1
 
@@ -74,64 +76,9 @@ _EXPENSIVE_PATTERNS = [
 ]
 _UNSAFE_RE = re.compile(r"\b(set|drop|alter|delete|update|ingest|create)\b", re.IGNORECASE)
 _CONTROL_RE = re.compile(r"^\s*\.")
-# `join` reads a second table within the pipeline; `cluster()`/`database()`/
-# `table()` reference an arbitrary cluster/database/table by name. All are
-# source-introducing in the same sense as union/evaluate/find/search -- each
-# lets a query escape the single configured table. The regex is a plain
-# substring search over the whole stripped query, so it catches
-# cluster()/database()/table() wherever they appear (any nesting depth), not
-# just at the top pipeline level.
-#
-# `toscalar(...)` is blocked outright rather than inspected: its argument is
-# itself a tabular expression, and a bare table-name reference inside it
-# (`toscalar(Secret | count)`) has no cluster()/database()/table() call to
-# match against -- regex substring matching cannot tell "another table's
-# name" apart from any other identifier without a real KQL parser. No
-# shipped query in this codebase uses toscalar; blocking it entirely closes
-# that gap instead of trying to special-case its contents.
-#
-# `lookup` reads a second (right-hand) table by name, the same shape as
-# `join`.
-_SOURCE_INTRODUCING_RE = re.compile(
-    r"(?:^|\|)\s*(union|evaluate|find|search|join|lookup)\b|"
-    r"\b(externaldata|cluster|database|table|toscalar)\s*\(",
-    re.IGNORECASE,
-)
-
-# `in (TableName | ...)` / `!in (TableName | ...)`: real Kusto's `in`
-# operator accepts a tabular subquery directly, with no join/toscalar/
-# cluster keyword at all -- `col in (Secret | project col)` runs Secret as
-# a source. This construct has several independent disguises for "the
-# thing before the pipe": a bare identifier, a bracket-quoted table name
-# (`["Secret"]`), a function-backed tabular source (`SecretFn()`), or
-# `union` as the first token instead of a table name -- and there is no
-# reason to expect that list is exhaustive. Rather than pattern-match each
-# disguise (a Codex re-review found three of these in successive rounds),
-# this checks the one structural fact every one of them shares and an
-# ordinary scalar literal list (`in ('a', 'b')`, `in (dynamic([...]))`)
-# never has: a `|` character somewhere inside the in(...) group, at any
-# paren-nesting depth. `_strip_strings` has already blanked string-literal
-# contents by the time this runs, so a `|` inside a quoted value can't
-# produce a false positive.
-_IN_OPEN_RE = re.compile(r"\b!?in~?\s*\(", re.IGNORECASE)
-
-
-def _in_clause_hides_tabular_subquery(stripped, max_matches=64):
-    for count, m in enumerate(_IN_OPEN_RE.finditer(stripped)):
-        if count >= max_matches:
-            return True
-        depth = 1
-        i = m.end()
-        while i < len(stripped) and depth > 0:
-            ch = stripped[i]
-            if ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth -= 1
-            elif ch == "|":
-                return True
-            i += 1
-    return False
+# Source confinement (union/join/in (Table)/...) is one shared rule in
+# _kql_boundary.source_violation; the execution boundary enforces it in every
+# validation mode, and this report shows it as SOURCE_INTRODUCING_OPERATOR.
 
 
 _RAW_SCAN_RE = re.compile(
@@ -340,24 +287,13 @@ def _check_structure(query, table, since, max_chars, parts, stripped):
     stripped.append(computed_stripped)
     if _UNSAFE_RE.search(computed_stripped):
         findings.append(_finding("UNSAFE_OPERATOR", "error", "Mutation-like or unsafe syntax is present."))
-    source_operator = _SOURCE_INTRODUCING_RE.search(computed_stripped)
-    if source_operator:
-        operator = next((part for part in source_operator.groups() if part), "externaldata")
+    source_violation = _kql_boundary.source_violation(query)
+    if source_violation:
         findings.append(
             _finding(
                 "SOURCE_INTRODUCING_OPERATOR",
                 "error",
-                f"Source-introducing operator {operator!r} is not allowed in user KQL.",
-                "pipeline",
-                "Query only the configured Berserk table through its existing pipeline.",
-            )
-        )
-    elif _in_clause_hides_tabular_subquery(computed_stripped):
-        findings.append(
-            _finding(
-                "SOURCE_INTRODUCING_OPERATOR",
-                "error",
-                "Source-introducing operator 'in' is not allowed in user KQL.",
+                f"Reading another source is not allowed in user KQL: {source_violation}.",
                 "pipeline",
                 "Query only the configured Berserk table through its existing pipeline.",
             )

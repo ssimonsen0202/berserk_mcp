@@ -20,9 +20,9 @@ import json
 import os
 import re
 import time
-import unicodedata
 import _http
 import _store
+import _tag_guard
 
 LLM_TIMEOUT = int(os.environ.get("BERSERK_LLM_TIMEOUT", "120"))
 
@@ -116,27 +116,16 @@ def _safe_excerpt(raw, cap):
 # as untrusted). A literal closing tag inside the sample body -- attacker-
 # controlled, since it's raw network data -- could otherwise forge an early
 # close and place injected text outside that boundary. Same regex shape as
-# berserk_mcp._UNTRUSTED_DATA_CLOSE_RE (angle-bracket and slash HTML-entity
-# variants, case-insensitive), retargeted at "sample-data" instead of
-# "untrusted_log_data".
-_ANGLE_OPEN_RE = r"(?:<|&lt;?|&#0*60;?|&#x0*3c;?|&amp;lt;?|&amp;#0*60;?|&amp;#x0*3c;?)"
-_ANGLE_CLOSE_RE = r"(?:>|&gt;?|&#0*62;?|&#x0*3e;?|&amp;gt;?|&amp;#0*62;?|&amp;#x0*3e;?)"
-# &sol; is the HTML5 named character reference for "/" -- also covered in
-# both plain and double-encoded (&amp;sol;) form, same as the numeric/hex
-# variants (Codex re-review finding: the named form was missing; mirrors
-# the identical fix in berserk_mcp.py's _UNTRUSTED_DATA_CLOSE_RE).
-_SLASH_RE = r"(?:/|&#0*47;?|&#x0*2f;?|&amp;#0*47;?|&amp;#x0*2f;?|&sol;?|&amp;sol;?)"
-_SAMPLE_DATA_CLOSE_RE = re.compile(
-    rf"{_ANGLE_OPEN_RE}\s*{_SLASH_RE}\s*sample-data\s*{_ANGLE_CLOSE_RE}",
-    re.IGNORECASE,
-)
+# the same tag guard as berserk_mcp's fences (_tag_guard): every literal,
+# entity/JSON/URL-encoded or NFKC-equivalent spelling of the tag, open or
+# close, is neutralised.
+_SAMPLE_DATA_TAG_RE = _tag_guard.tag_pattern("sample-data")
 
 
 def _fence_sample_data(text):
     """Wrap sample content in <sample-data> tags, neutralizing any forged
     closing tag already present in the (untrusted) content first."""
-    normalized = unicodedata.normalize("NFKC", str(text or ""))
-    body = _SAMPLE_DATA_CLOSE_RE.sub("(/sample-data)", normalized)
+    body = _tag_guard.neutralize(str(text or ""), _SAMPLE_DATA_TAG_RE, "sample-data")
     return f"<sample-data>\n{body}\n</sample-data>"
 
 

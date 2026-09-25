@@ -182,6 +182,46 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertIn("control command", text)
         self.assertEqual(self.calls, [])
 
+    # Covers SECURITY.md#query-and-process-execution
+    def test_other_sources_never_reach_bzrk_in_any_validation_mode(self):
+        # Codex Security scan 77004e6e finding 1.
+        queries = (
+            f"{bm.TABLE} | where false | union SecretTable | take 100",
+            f"{bm.TABLE} | take 1 | extend probe='candidate' | where probe in (SecretTable) | take 1",
+        )
+        original = (bm.KQL_VALIDATION_MODE, bm.KQL_LIVE_VALIDATION)
+        try:
+            bm.KQL_LIVE_VALIDATION = True
+            for mode in ("off", "warn", "strict"):
+                bm.KQL_VALIDATION_MODE = mode
+                for query in queries:
+                    for tool, args in (
+                        ("search", {"kql": query}),
+                        ("validate_kql", {"kql": query, "mode": "live", "use_schema": False}),
+                    ):
+                        with self.subTest(mode=mode, tool=tool, query=query):
+                            self.calls.clear()
+                            _, err = bm.handle_call(tool, args)
+                            self.assertTrue(err)
+                            self.assertEqual(self.calls, [])
+        finally:
+            bm.KQL_VALIDATION_MODE, bm.KQL_LIVE_VALIDATION = original
+
+    def test_live_validate_kql_applies_the_boundary_itself(self):
+        # The static report is advisory; the live path must not depend on it.
+        original = (bm.KQL_LIVE_VALIDATION, bm._validate_user_kql)
+        try:
+            bm.KQL_LIVE_VALIDATION = True
+            bm._validate_user_kql = lambda *a, **k: {"findings": []}
+            text, err = bm.handle_call(
+                "validate_kql", {"kql": f"{bm.TABLE} | where x in (Secret) | take 1", "mode": "live"}
+            )
+            self.assertTrue(err)
+            self.assertIn("only the configured table", text)
+            self.assertEqual(self.calls, [])
+        finally:
+            bm.KQL_LIVE_VALIDATION, bm._validate_user_kql = original
+
     def test_execution_boundary_runs_before_since_validation(self):
         text, err = bm.bzrk_search(f"{bm.TABLE} | take 1; .show tables", "not a time")
         self.assertTrue(err)
@@ -3112,6 +3152,61 @@ class BoundedProcessTest(unittest.TestCase):
         self.assertLessEqual(len(result["stdout"]), 128)
         self.assertIsInstance(result["returncode"], int)
 
+    # Covers SECURITY.md#query-and-process-execution
+    def test_auth_marker_is_found_anywhere_in_stderr(self):
+        # Codex Security scan 77004e6e finding 3: a marker past the retained
+        # diagnostic prefix was discarded before classification.
+        cap = bm.MAX_BZRK_DIAGNOSTIC_CHARS
+        split = (
+            "import sys, time; sys.stderr.write('x' * 70000 + 'unauth'); sys.stderr.flush(); "
+            "time.sleep(0.3); sys.stderr.write('orized')"
+        )
+        codes = {
+            "before cap": "import sys; sys.stderr.write('401 unauthorized')",
+            "across cap": f"import sys; sys.stderr.write('x' * {cap - 5} + 'unauthorized')",
+            "after cap": f"import sys; sys.stderr.write('x' * {cap * 2} + ' unauthorized')",
+            "split across reads": split,
+        }
+        for name, code in codes.items():
+            with self.subTest(name=name):
+                result = bm._run_argv_bounded([sys.executable, "-c", code], timeout=20)
+                self.assertTrue(result["stderr_watch_matched"])
+                self.assertTrue(result["streams_complete"])
+        clean = bm._run_argv_bounded(
+            [sys.executable, "-c", f"import sys; sys.stderr.write('x' * {cap * 2})"], timeout=20
+        )
+        self.assertFalse(clean["stderr_watch_matched"])
+
+    def test_run_bzrk_classifies_a_late_auth_marker_on_exit_zero(self):
+        cap = bm.MAX_BZRK_DIAGNOSTIC_CHARS
+        code = f"import sys; sys.stderr.write('x' * {cap * 2} + ' unauthorized')"
+        real, resolved = bm._run_argv_bounded, bm._RESOLVED_BZRK_BIN
+        try:
+            bm._RESOLVED_BZRK_BIN = "bzrk"
+            bm._run_argv_bounded = lambda argv, timeout, **kw: real([sys.executable, "-c", code], timeout, **kw)
+            self.assertEqual(bm.run_bzrk(["search", "default | take 1"], timeout=20), (bm.AUTH_FAILURE_MESSAGE, True))
+        finally:
+            bm._run_argv_bounded, bm._RESOLVED_BZRK_BIN = real, resolved
+
+    def test_run_bzrk_fails_closed_when_a_stream_was_not_fully_read(self):
+        real, resolved = bm._run_argv_bounded, bm._RESOLVED_BZRK_BIN
+        try:
+            bm._RESOLVED_BZRK_BIN = "bzrk"
+            bm._run_argv_bounded = lambda argv, timeout, **kw: {
+                "returncode": 0,
+                "stdout": b"row",
+                "stderr": b"",
+                "stdout_overflow": False,
+                "stderr_overflow": False,
+                "stderr_watch_matched": False,
+                "streams_complete": False,
+            }
+            text, err = bm.run_bzrk(["search", "default | take 1"])
+            self.assertTrue(err)
+            self.assertIn("could not be read completely", text)
+        finally:
+            bm._run_argv_bounded, bm._RESOLVED_BZRK_BIN = real, resolved
+
     def test_bounded_runner_times_out_and_reaps(self):
         with self.assertRaises(subprocess.TimeoutExpired):
             bm._run_argv_bounded(
@@ -3690,7 +3785,11 @@ class FleetControlsTest(unittest.TestCase):
         self.assertEqual(self.calls[0][1], 10)
 
     def test_static_query_risk_drives_effective_tool_budget(self):
-        high_query = "default | join kind=inner (default) on trace_id | where body contains 'x' | project resource"
+        # Expensive but single-source: join/union are refused by the boundary.
+        high_query = (
+            "default | where body contains 'x' | where body matches regex 'a' | parse body with * 'a' v "
+            "| mv-expand attributes | summarize dcount(body) by tostring(attributes), body | sort by body"
+        )
         low_query = "default | where metric_name == 'x' | take 1"
         synthetic = {
             "synthetic_high": (high_query, "1h ago"),
