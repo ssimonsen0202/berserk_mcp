@@ -48,6 +48,28 @@ jobs:
           python -m pip install --force-reinstall .
           python evals/mcp_protocol_smoke.py --server-command berserk-mcp --include-http
 
+  lint:
+    # Static, source-only checks -- run once, not per OS/Python-version matrix
+    # cell. Tool versions are pinned so a new ruff or mypy release cannot turn
+    # CI red on unchanged code; bump them deliberately.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff and mypy (pinned)
+        run: python -m pip install "ruff==0.16.8" "mypy==2.3.1"
+      - name: ruff check (includes the C901 complexity cap)
+        run: make lint-ci
+      - name: ruff format check
+        run: make format-check
+      - name: mypy (every shipped module)
+        run: make typecheck
+
   semgrep:
     # Static, source-only check -- runs once, not per OS/Python-version
     # matrix cell. Custom rules in .semgrep/ codify repo-specific

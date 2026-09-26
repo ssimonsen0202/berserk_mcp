@@ -1571,8 +1571,9 @@ python3 -m unittest discover -s ingestion -p "test_*.py"
 CI runs all four on Ubuntu and Windows with Python 3.9, 3.11 and 3.12 (about
 1,440 tests), plus the protocol smoke test, the router-eval gate, and the
 three scanners under [Security tooling](#security-tooling-what-runs-and-what-deliberately-does-not).
-ruff (with a complexity cap) and mypy are configured in `pyproject.toml` and
-run locally (`ruff check .`, `make typecheck`); they are not CI steps.
+A `lint` job runs ruff (lint rules including a complexity cap, and the format
+check) and mypy over every shipped module, with both tool versions pinned.
+Locally: `make lint`, `make format-check`, `make typecheck`.
 
 The tests stub the `bzrk` CLI. They verify: KQL content and lock strings,
 default time windows, role isolation (which tools appear in which lane),

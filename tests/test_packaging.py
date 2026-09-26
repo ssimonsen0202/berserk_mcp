@@ -84,6 +84,15 @@ class PackagingTest(unittest.TestCase):
             with self.subTest(module=mod):
                 self.assertTrue((ROOT / f"{mod}.py").is_file(), f"py-modules lists missing file {mod}.py")
 
+    def test_typechecked_modules_match_shipped_modules(self):
+        # `make typecheck` (a CI step) must cover exactly what ships, so a new
+        # module cannot be packaged without being type-checked.
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        match = re.search(r"^TYPED_MODULES\s*=\s*(.+)$", makefile, re.MULTILINE)
+        self.assertIsNotNone(match, "TYPED_MODULES not found in Makefile")
+        typed = {name[: -len(".py")] for name in match.group(1).split() if name.endswith(".py")}
+        self.assertEqual(typed, listed_py_modules())
+
     def test_fallback_parsers_match_tomllib_and_handle_multiline(self):
         if tomllib is None:
             self.skipTest("needs tomllib to compare against")
