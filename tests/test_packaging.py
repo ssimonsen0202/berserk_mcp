@@ -7,16 +7,11 @@ after `pip install`, often only when one tool runs (a function-level import).
 
 import ast
 import re
-import sys
+import tomllib
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover - CI's 3.9 job
-    tomllib = None
 
 
 def reachable_local_modules(entries):
@@ -47,26 +42,13 @@ def _pyproject():
 
 
 def listed_py_modules():
-    text = _pyproject()
-    if tomllib is not None:
-        return set(tomllib.loads(text)["tool"]["setuptools"]["py-modules"])
-    # Python 3.9 has no tomllib: read the (possibly multi-line) string array.
-    match = re.search(r"^\s*py-modules\s*=\s*\[(.*?)\]", text, re.MULTILINE | re.DOTALL)
-    if match is None:
-        raise AssertionError("py-modules not found in pyproject.toml")
-    return set(re.findall(r'"([^"]+)"', match.group(1)))
+    return set(tomllib.loads(_pyproject())["tool"]["setuptools"]["py-modules"])
 
 
 def script_entry_modules():
     """Modules named by [project.scripts] entries such as `x = "module:func"`."""
-    text = _pyproject()
-    if tomllib is not None:
-        scripts = tomllib.loads(text)["project"].get("scripts", {})
-        return {target.split(":")[0] for target in scripts.values()}
-    section = re.search(r"^\[project\.scripts\]\s*$(.*?)(?=^\[)", text, re.MULTILINE | re.DOTALL)
-    if section is None:
-        raise AssertionError("[project.scripts] not found in pyproject.toml")
-    return set(re.findall(r'=\s*"([A-Za-z0-9_]+):', section.group(1)))
+    scripts = tomllib.loads(_pyproject())["project"].get("scripts", {})
+    return {target.split(":")[0] for target in scripts.values()}
 
 
 class PackagingTest(unittest.TestCase):
@@ -92,23 +74,6 @@ class PackagingTest(unittest.TestCase):
         self.assertIsNotNone(match, "TYPED_MODULES not found in Makefile")
         typed = {name[: -len(".py")] for name in match.group(1).split() if name.endswith(".py")}
         self.assertEqual(typed, listed_py_modules())
-
-    def test_fallback_parsers_match_tomllib_and_handle_multiline(self):
-        if tomllib is None:
-            self.skipTest("needs tomllib to compare against")
-        saved_tomllib, saved_reader = globals()["tomllib"], globals()["_pyproject"]
-        real = (listed_py_modules(), script_entry_modules())
-        globals()["tomllib"] = None
-        try:
-            self.assertEqual((listed_py_modules(), script_entry_modules()), real)
-            multiline = (
-                '[project.scripts]\nsvc = "svc_main:main"\n\n[tool.setuptools]\n  py-modules = [\n  "a",\n  "b_c",\n]\n'
-            )
-            globals()["_pyproject"] = lambda: multiline
-            self.assertEqual(listed_py_modules(), {"a", "b_c"})
-            self.assertEqual(script_entry_modules(), {"svc_main"})
-        finally:
-            globals()["tomllib"], globals()["_pyproject"] = saved_tomllib, saved_reader
 
 
 if __name__ == "__main__":

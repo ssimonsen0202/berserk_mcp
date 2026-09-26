@@ -42,10 +42,17 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.30.0**. This is a bullet-point overview, most recent
+Current version: **1.31.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.31.0** (2026-09-26) — Python 3.11 is now the minimum; 3.9 (end of
+  life) and 3.10 (end of life October 2026) are dropped. CI tests 3.11, 3.12,
+  3.13 and 3.14 on Ubuntu and Windows, and mypy now checks as 3.11, the real
+  floor. No behaviour changes: the code already ran on 3.11+, and the only
+  edits are lint fixes the new target enabled. **A host on Python 3.9 or 3.10
+  must upgrade Python before installing this version.** See
+  [details](docs/releases/v1.31.0.md).
 - **v1.30.0** (2026-09-26) — Security hardening and small-tier consistency.
   User KQL cannot read other tables in any validation mode; the untrusted-data
   fence decodes encoded tags; unknown tool arguments are rejected; generated
@@ -1084,7 +1091,7 @@ Write a 10-line digest, flag anything anomalous, and stop.
 
 ## Requirements
 
-- Python 3.9+. (Python 3.8 reached upstream end-of-life on 2024-10-07 and is no longer a supported floor.)
+- Python 3.11+. (Python 3.9 reached upstream end-of-life in October 2025 and 3.10 does in October 2026; both were dropped in v1.31.0.)
 - The [`bzrk`](https://docs.bzrk.dev) CLI, installed and authenticated (`bzrk -P <profile> search "..."` must work). The bearer token lives in `bzrk`'s own config. berserk-mcp never reads or stores it.
 - *(Optional)* A running `canonloom-server` instance, only if you use the `canonloom_*` tools — a separate project with its own, stricter requirements; berserk-mcp only calls its HTTP API and adds nothing to berserk-mcp's own dependency footprint. Setup: [canonloom's README](https://github.com/ssimonsen0202/canonloom#running-canonloom-server).
 
@@ -1568,7 +1575,7 @@ python3 -m unittest discover -s evals -p "test_*.py"
 python3 -m unittest discover -s ingestion -p "test_*.py"
 ```
 
-CI runs all four on Ubuntu and Windows with Python 3.9, 3.11, 3.12, 3.13 and 3.14 (about
+CI runs all four on Ubuntu and Windows with Python 3.11, 3.12, 3.13 and 3.14 (about
 1,440 tests), plus the protocol smoke test, the router-eval gate, and the
 three scanners under [Security tooling](#security-tooling-what-runs-and-what-deliberately-does-not).
 A `lint` job runs ruff (lint rules including a complexity cap, and the format

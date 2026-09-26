@@ -36,7 +36,7 @@ import sys
 import threading
 import time
 import urllib.error
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -275,7 +275,7 @@ def _make_handler(out_path, raw_out_path, expected_secret, lock, berserk_endpoin
                 self._respond(401, {"ok": False, "error": "signature mismatch"})
                 return
 
-            received_at = datetime.now(timezone.utc).isoformat()
+            received_at = datetime.now(UTC).isoformat()
 
             with lock:
                 if raw_out_path:

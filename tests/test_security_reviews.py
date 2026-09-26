@@ -33,7 +33,7 @@ def fingerprint_source(source, name):
     """Fingerprint top-level function `name` in `source`.
 
     Text-based, not ast.dump-based: ast.dump output differs across the Python
-    versions CI runs (3.9-3.12, and 3.13+ omits None fields), which would make
+    versions CI runs (3.11-3.12, and 3.13+ omits None fields), which would make
     the fingerprint version-dependent.
     """
     node = _function_node(ast.parse(source), name)

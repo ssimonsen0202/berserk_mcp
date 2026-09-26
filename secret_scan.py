@@ -359,7 +359,7 @@ def _json_records(parsed):
                 raise AuditParseError("tables_row_not_list")
             if len(row) != len(columns):
                 raise AuditParseError("tables_row_length_mismatch")
-            result.append(_normalize_audit_record(dict(zip(columns, row))))
+            result.append(_normalize_audit_record(dict(zip(columns, row, strict=False))))
         return result
 
     for key in ("rows", "data", "results", "records"):

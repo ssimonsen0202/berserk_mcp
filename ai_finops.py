@@ -6,7 +6,7 @@ functions remain independently testable without a live cluster.
 """
 
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 import argparse
 import csv
 import hashlib
@@ -91,7 +91,7 @@ def configure(
 
 
 def _now_iso():
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _deployment_pseudonym_key():
@@ -187,7 +187,7 @@ def _timestamp_text(value):
                 numeric /= 1_000_000.0
             elif magnitude >= 1e11:  # milliseconds
                 numeric /= 1_000.0
-            return datetime.fromtimestamp(numeric, timezone.utc).isoformat().replace("+00:00", "Z")
+            return datetime.fromtimestamp(numeric, UTC).isoformat().replace("+00:00", "Z")
         except (OverflowError, OSError, TypeError, ValueError):
             pass
     return str(value or "")
@@ -215,7 +215,7 @@ def _json_records(value):
         ]
         rows = table.get("rows")
         if columns and isinstance(rows, list):
-            return [dict(zip(columns, row)) for row in rows if isinstance(row, list)]
+            return [dict(zip(columns, row, strict=False)) for row in rows if isinstance(row, list)]
     for key in ("rows", "data", "results", "records"):
         if isinstance(value.get(key), list):
             return [row for row in value[key] if isinstance(row, dict)]
@@ -1126,10 +1126,10 @@ def _business_data_stale(store, max_age_days=7):
     if not updated_at:
         return True
     try:
-        updated = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+        updated = datetime.fromisoformat(updated_at)
     except (TypeError, ValueError):
         return True
-    return (datetime.now(timezone.utc) - updated).total_seconds() > max_age_days * 86400
+    return (datetime.now(UTC) - updated).total_seconds() > max_age_days * 86400
 
 
 def _load_import_file(path, fmt=None):
@@ -1204,12 +1204,12 @@ def _validated_number(value, field, maximum=None):
 def _source_timestamp(value):
     text = str(value or _now_iso()).strip()
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         raise ValueError("source_updated_at must be an ISO 8601 timestamp") from None
     if parsed.tzinfo is None:
         raise ValueError("source_updated_at must include a timezone")
-    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return parsed.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _identifier_list(value, field):
@@ -1361,10 +1361,7 @@ def emit_otlp_records(
     except _http.UrlPolicyError as exc:
         raise ValueError(str(exc)) from None
     logs = []
-    if timestamp_ns is None:
-        stamp = str(int(datetime.now(timezone.utc).timestamp() * 1_000_000_000))
-    else:
-        stamp = str(int(timestamp_ns))
+    stamp = str(int(datetime.now(UTC).timestamp() * 1_000_000_000)) if timestamp_ns is None else str(int(timestamp_ns))
     for record in records:
         logs.append(
             {
@@ -2584,7 +2581,7 @@ def export_bi(since, output_dir, fmt="csv"):
                 json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n" for row in values
             )
     generated_at = _now_iso()
-    generation_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + f"-{os.getpid()}-{threading.get_ident()}"
+    generation_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ") + f"-{os.getpid()}-{threading.get_ident()}"
     snapshot_dir = target_dir / ".snapshots" / generation_id
     quality = (datasets.get("attribution_quality") or [{}])[0]
     warnings = []

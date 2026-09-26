@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "berserk-mcp"
 description = "An MCP server that answers Berserk observability questions through verified, deterministic KQL tools."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "Simon Simonsen" }]
 keywords = ["mcp", "model-context-protocol", "berserk", "observability", "kql", "telemetry", "otlp"]
@@ -43,7 +43,7 @@ version = { attr = "berserk_mcp.__version__" }
 
 # ── ruff ──────────────────────────────────────────────────────────────
 [tool.ruff]
-target-version = "py39"
+target-version = "py311"
 line-length = 120
 
 [tool.ruff.lint]
@@ -69,7 +69,6 @@ ignore = [
     "S603",    # subprocess without shell=True — we use it intentionally
     "S606",    # start-process-with-no-shell — intentional
     "S607",    # partial path to executable — acceptable for CLI tools
-    "UP035",   # deprecated typing imports — still need py3.9 compat
     "PERF401", # manual list comprehension — often less readable in this codebase
     "PERF203", # try-except in loop — deliberate per-item error handling
     "PERF402", # manual list copy — clarity over micro-optimization
@@ -112,7 +111,7 @@ exclude_lines = [
 
 # ── mypy ─────────────────────────────────────────────────────────────
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 warn_return_any = false
 warn_unused_configs = true
 ignore_missing_imports = true

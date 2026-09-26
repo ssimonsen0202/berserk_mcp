@@ -68,7 +68,7 @@ import hmac
 import ipaddress
 import unicodedata
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 
 import _http
@@ -87,7 +87,7 @@ import schema_registry
 import secret_scan
 import tool_discovery
 
-__version__ = "1.30.0"
+__version__ = "1.31.0"
 
 
 def log(msg):
@@ -781,7 +781,7 @@ def normalize_roles(value):
 
 
 def now_iso():
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 _LOCK_STALE_SECONDS = _store.LOCK_STALE_SECONDS

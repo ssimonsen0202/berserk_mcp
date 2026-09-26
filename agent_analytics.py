@@ -117,7 +117,7 @@ def _json_records(parsed):
             columns = [c.get("name") for c in (table.get("schema") or {}).get("columns", []) if isinstance(c, dict)]
             rows = table.get("rows")
             if columns and isinstance(rows, list):
-                return [dict(zip(columns, row)) for row in rows if isinstance(row, list)]
+                return [dict(zip(columns, row, strict=False)) for row in rows if isinstance(row, list)]
         for key in ("rows", "data", "results", "records"):
             if isinstance(parsed.get(key), list):
                 return parsed[key]
@@ -280,7 +280,7 @@ def _parse_ts(value):
     if not raw:
         return None
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return datetime.fromisoformat(raw)
     except ValueError:
         return None
 
@@ -315,7 +315,7 @@ def analyze_loop_events(events):
         distinct = len({c["key"] for c in calls})
         repetition_ratio = 1.0 - (float(distinct) / float(total)) if total else 0.0
         error_retries = 0
-        for prev, nxt in zip(calls, calls[1:]):
+        for prev, nxt in zip(calls, calls[1:], strict=False):
             if prev["err"] and prev["tool"] == nxt["tool"]:
                 error_retries += 1
         osc = _oscillation_count([c["key"] for c in calls])
@@ -936,7 +936,9 @@ def analyze_workflow_events(events):
         stamps = [str(ev.get("ts", "")) for ev in sess_events]
         # Equal timestamps have no meaningful ordering; preserve the source
         # order for ties (some forwarders batch several events at one stamp).
-        if len(set(stamps)) == len(stamps) and any(left > right for left, right in zip(stamps, stamps[1:])):
+        if len(set(stamps)) == len(stamps) and any(
+            left > right for left, right in zip(stamps, stamps[1:], strict=False)
+        ):
             sess_events = sorted(sess_events, key=lambda ev: str(ev.get("ts", "")))
         tools = []
         for ev in sess_events:

@@ -582,7 +582,7 @@ def split_applicable(cases, tools):
     tool the lane cannot see as a routing miss."""
     served = {t["name"] for t in tools}
     resolved = [resolve_case(c, served) for c in cases]
-    return [r for r in resolved if r is not None], [c["id"] for c, r in zip(cases, resolved) if r is None]
+    return [r for r in resolved if r is not None], [c["id"] for c, r in zip(cases, resolved, strict=True) if r is None]
 
 
 def _print_not_applicable(cases, not_applicable):

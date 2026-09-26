@@ -65,7 +65,7 @@ the [`bzrk`](https://docs.bzrk.dev) CLI and log in to a profile — see the
 
 ## Tests
 
-Every PR runs the full suite on Linux + Windows × Python 3.9 / 3.11 / 3.12. Any
+Every PR runs the full suite on Linux + Windows × Python 3.11 / 3.12 / 3.13 / 3.14. Any
 non-draft PR targeting `main` also gets a CodeRabbit review (config:
 `.coderabbit.yaml`), and security-sensitive changes get a manual Codex review
 pass.

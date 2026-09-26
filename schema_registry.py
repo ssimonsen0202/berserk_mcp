@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 
 import _store
@@ -27,7 +27,7 @@ _LOCK = threading.RLock()
 
 
 def _now_iso():
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _safe_example(value):
@@ -244,8 +244,8 @@ def _write_cache(path, snapshot):
 
 def _fresh(snapshot, ttl_seconds):
     try:
-        fetched = datetime.fromisoformat(str(snapshot.get("fetched_at", "")).replace("Z", "+00:00"))
-        return (datetime.now(timezone.utc) - fetched).total_seconds() <= ttl_seconds
+        fetched = datetime.fromisoformat(str(snapshot.get("fetched_at", "")))
+        return (datetime.now(UTC) - fetched).total_seconds() <= ttl_seconds
     except (TypeError, ValueError):
         return False
 
