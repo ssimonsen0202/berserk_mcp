@@ -2268,7 +2268,82 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertFalse(config["remote"])
         self.assertEqual(config["host"], "127.0.0.1")
         self.assertEqual(config["port"], 8765)
-        self.assertEqual(config["allowed_hosts"], set())
+        # Issue #84: a loopback bind with no explicit list accepts only loopback names.
+        self.assertEqual(config["allowed_hosts"], {"localhost", "127.0.0.1", "::1"})
+
+    # Covers SECURITY.md#trust-boundaries
+    def test_issue_84_default_loopback_config_rejects_a_rebinding_host(self):
+        # The conformance-suite repro: default config, spoofed Host -> was 200.
+        base = self._serve_http_for_test(self._http_config())
+        ping = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+        for headers, expected in (
+            ({"Host": "evil.example.com"}, 403),
+            ({"Host": "localhost:8765"}, 200),
+            ({"Host": "127.0.0.1"}, 200),
+            ({"Host": "127.0.0.1", "Origin": "http://evil.example.com"}, 403),
+            ({"Host": "127.0.0.1", "Origin": "null"}, 403),
+            ({"Host": "127.0.0.1", "Origin": "http://localhost:3000"}, 200),
+        ):
+            with self.subTest(headers=headers):
+                request = urllib.request.Request(
+                    base + "/mcp",
+                    data=json.dumps(ping).encode("utf-8"),
+                    headers=dict({"Content-Type": "application/json"}, **headers),
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(request, timeout=5) as resp:
+                        status = resp.status
+                except urllib.error.HTTPError as exc:
+                    status = exc.code
+                    exc.close()
+                self.assertEqual(status, expected)
+
+    def test_issue_84_host_header_parsing_is_strict(self):
+        for value, expected in (
+            ("127.0.0.1:8765", "127.0.0.1"),
+            ("LOCALHOST", "localhost"),
+            ("localhost.:8765", "localhost"),
+            ("[::1]:8765", "::1"),
+            ("127.0.0.1:8765@evil", ""),
+            ("[::1]:8765@evil", ""),
+            ("evil.com/127.0.0.1", ""),
+            ("127.0.0.1 evil", ""),
+            ("", ""),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(bm._normalize_host_header(value), expected)
+
+    def test_issue_84_duplicate_host_or_origin_headers_are_refused(self):
+        import http.client
+        import io
+
+        class Handler:
+            client_address = ("127.0.0.1", 1)
+
+            def __init__(self, raw):
+                # The real parser the HTTP server uses: names match case-insensitively.
+                self.headers = http.client.parse_headers(io.BytesIO(raw.encode("latin-1") + b"\r\n"))
+
+        config = self._http_config()
+        cases = (
+            ("Host: 127.0.0.1\r\nHost: evil.example.com\r\n", 400),
+            ("Host: 127.0.0.1\r\nhost: evil.example.com\r\n", 400),
+            ("Host: 127.0.0.1\r\nOrigin: http://localhost\r\norigin: http://evil.example.com\r\n", 403),
+            ("Host: 127.0.0.1\r\n", 200),
+        )
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(bm._http_request_allowed(Handler(raw), config)[1], expected)
+
+    def test_issue_84_bound_host_joins_the_default_list(self):
+        for bind, host in (("[::1]:8765", "::1"), ("localhost:8765", "localhost")):
+            with self.subTest(bind=bind):
+                self.assertIn(host, self._http_config(bind=bind, allow_cidrs="127.0.0.1/32,::1/128")["allowed_hosts"])
+
+    def test_issue_84_explicit_host_list_is_used_as_given(self):
+        config = self._http_config(allowed_hosts="mcp.internal.example.com")
+        self.assertEqual(config["allowed_hosts"], {"mcp.internal.example.com"})
 
     def test_phase8_remote_bind_fails_closed_without_explicit_controls(self):
         with self.assertRaisesRegex(bm.HttpConfigError, "ALLOW_REMOTE"):

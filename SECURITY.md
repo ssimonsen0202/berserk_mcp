@@ -11,6 +11,10 @@ impact, reproduction steps, and any relevant configuration.
 berserk-mcp treats MCP clients, telemetry values, provider responses, configured
 HTTP endpoints, and operator-supplied filesystem paths as separate boundaries.
 The operator controls environment variables, credentials, and deployment ACLs.
+The optional HTTP transport binds to loopback by default and then accepts only
+loopback `Host` names; a request whose `Origin` names any other host is
+refused, so a web page cannot reach it through DNS rebinding. A non-loopback
+bind requires an auth token, a host allowlist and a client CIDR allowlist.
 `tools/call` rejects any argument name the tool's input schema does not declare,
 and lists the valid names, so a misspelled filter cannot silently widen a query.
 The only exceptions are the protocol-level `as_task` and `allow_expensive`.

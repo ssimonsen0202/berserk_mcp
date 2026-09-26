@@ -73,11 +73,12 @@ verified the existing mitigation works when configured:
 correctly return 403, confirmed by re-running the same conformance
 scenario afterward (2/2 passed).
 
-**Not fixed here** -- this doc is the measurement, per issue #76's own
-scope. Filed as [#84](https://github.com/ssimonsen0202/berserk_mcp/issues/84):
-whether to default the host allowlist on for a loopback bind, or make the
-current opt-in an explicit, warned choice like `BERSERK_MCP_REDACT`'s
-weaker modes already are.
+**Fixed in v1.32.0** ([#84](https://github.com/ssimonsen0202/berserk_mcp/issues/84)):
+a loopback bind with no explicit `BERSERK_MCP_HTTP_ALLOWED_HOSTS` now accepts
+only `localhost`, `127.0.0.1`, `::1` and the bound host, and a request whose
+`Origin` header names any other host is refused. A test reproduces this
+scenario (`test_issue_84_default_loopback_config_rejects_a_rebinding_host`):
+the spoofed `Host` now gets 403.
 
 ## Required baseline: passed
 
@@ -93,13 +94,12 @@ accepted).
 
 ```bash
 BERSERK_MCP_HTTP_ENABLE=1 BERSERK_MCP_HTTP_BIND=127.0.0.1:<port> \
-  BERSERK_MCP_HTTP_ALLOWED_HOSTS=127.0.0.1 BZRK_BIN=/bin/true \
+  BZRK_BIN=/bin/true \
   python3 berserk_mcp.py --http &
 npx @modelcontextprotocol/conformance server --url http://127.0.0.1:<port>/mcp
 ```
 
-Passing `BERSERK_MCP_HTTP_ALLOWED_HOSTS` closes the one real gap found
-here; the 23 optional-capability "failures" will still show up on every
+Since v1.32.0 the default config passes `dns-rebinding-protection`; the 23 optional-capability "failures" will still show up on every
 future run until berserk-mcp adds one of those capabilities (unlikely,
 given the project's deliberately narrow, tools-only design) -- that's
 expected, not a regression to chase.

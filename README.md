@@ -42,10 +42,17 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.31.0**. This is a bullet-point overview, most recent
+Current version: **1.32.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.32.0** (2026-09-26) — DNS-rebinding protection for the HTTP
+  transport is on by default (issue #84, the one open finding from the MCP
+  conformance run). A loopback bind now accepts only loopback `Host` names,
+  and a browser `Origin` must name an allowed host, so a web page can no
+  longer reach a local server through DNS rebinding. **If you reach a
+  loopback server under another hostname,** list it in
+  `BERSERK_MCP_HTTP_ALLOWED_HOSTS`. See [details](docs/releases/v1.32.0.md).
 - **v1.31.0** (2026-09-26) — Python 3.11 is now the minimum; 3.9 (end of
   life) and 3.10 (end of life October 2026) are dropped. CI tests 3.11, 3.12,
   3.13 and 3.14 on Ubuntu and Windows, and mypy now checks as 3.11, the real
@@ -1357,10 +1364,10 @@ outbound-HTTP hardening. Each control has a name and an adversarial
 regression test. See [Security controls](docs/security-controls.md) for
 the full list of about 30 controls, plus the audit history: a hand audit, a
 differential re-review, and an external scanner pass across three tools.
-One open finding as of 2026-08-29: the HTTP transport's DNS-rebinding
-protection (`BERSERK_MCP_HTTP_ALLOWED_HOSTS`) is opt-in rather than
-defaulted on for a loopback bind — see
-[docs/mcp-conformance.md](docs/mcp-conformance.md) and
+The HTTP transport's DNS-rebinding protection, the one finding from the
+2026-08-29 conformance run, is on by default since v1.32.0: a loopback bind
+accepts only loopback `Host` names, and a browser `Origin` must match an
+allowed host — see [docs/mcp-conformance.md](docs/mcp-conformance.md) and
 [issue #84](https://github.com/ssimonsen0202/berserk_mcp/issues/84).
 
 The server has also been run against the official

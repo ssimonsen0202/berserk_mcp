@@ -67,6 +67,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hmac
 import ipaddress
 import unicodedata
+from urllib.parse import urlsplit
 from contextlib import contextmanager
 from datetime import datetime, UTC
 from pathlib import Path
@@ -87,7 +88,7 @@ import schema_registry
 import secret_scan
 import tool_discovery
 
-__version__ = "1.31.0"
+__version__ = "1.32.0"
 
 
 def log(msg):
@@ -4630,6 +4631,10 @@ def _parse_http_bind(bind):
     return host, port
 
 
+# Host header values a loopback-bound server accepts by default (issue #84).
+_LOOPBACK_HOST_NAMES = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
 def _host_is_loopback(host):
     lowered = str(host or "").strip().lower()
     if lowered == "localhost":
@@ -4682,12 +4687,19 @@ def _parse_host_list(raw, *, allow_empty=False):
     return hosts
 
 
+# A Host header is "host[:port]": a DNS name or IPv4 address, or a bracketed
+# IPv6 address. Anything else (userinfo, paths, spaces) is malformed.
+_HOST_HEADER_RE = re.compile(r"^(?:\[([0-9a-f:.]+)\]|([a-z0-9.-]+))(?::\d{1,5})?$")
+
+
 def _normalize_host_header(value):
-    host = str(value or "").strip().lower()
-    if host.startswith("["):
-        inner, _, _ = host[1:].partition("]")
-        return inner
-    return host.rsplit(":", 1)[0] if ":" in host else host
+    """The host part of a Host header, lower-cased and without one trailing
+    dot; "" for a malformed value, which no allowlist contains."""
+    match = _HOST_HEADER_RE.match(str(value or "").strip().lower())
+    if not match:
+        return ""
+    host = match.group(1) or match.group(2)
+    return host[:-1] if host.endswith(".") and not host.endswith("..") else host
 
 
 def _http_peer_ip(handler):
@@ -4742,6 +4754,12 @@ def _build_http_config(
         allow_empty=not use_forwarded_for,
     )
     hosts = _parse_host_list(allowed_hosts, allow_empty=True)
+    if loopback and not hosts:
+        # Issue #84: an empty allowlist used to accept any Host header, so a
+        # web page could reach a loopback server through DNS rebinding (its
+        # own domain resolving to 127.0.0.1). A loopback bind now accepts only
+        # the loopback names unless the operator lists hosts explicitly.
+        hosts = set(_LOOPBACK_HOST_NAMES) | {host.lower()}
     if remote:
         if not allow_remote:
             raise HttpConfigError("non-loopback HTTP bind requires BERSERK_MCP_HTTP_ALLOW_REMOTE=1")
@@ -4780,10 +4798,31 @@ def _http_error(handler, status, message):
     handler.wfile.write(body)
 
 
+def _origin_host(value):
+    """Host of an Origin header ("scheme://host[:port]"), or None when absent.
+    "null" and anything unparseable yield "" so they are refused."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return (urlsplit(text).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
 def _http_request_allowed(handler, config):
+    if len(handler.headers.get_all("Host") or []) > 1:
+        return False, 400, "multiple host headers"
+    if len(handler.headers.get_all("Origin") or []) > 1:
+        return False, 403, "multiple origin headers"
     host = _normalize_host_header(handler.headers.get("Host", ""))
     if config["allowed_hosts"] and host not in config["allowed_hosts"]:
         return False, 403, "host not allowed"
+    # MCP Streamable HTTP: validate Origin. Browsers send it on cross-origin
+    # requests; non-browser clients usually omit it and are unaffected.
+    origin = _origin_host(handler.headers.get("Origin"))
+    if origin is not None and config["allowed_hosts"] and origin not in config["allowed_hosts"]:
+        return False, 403, "origin not allowed"
     client_ip = _http_effective_client_ip(handler, config)
     if not _ip_allowed(client_ip, config["allow_cidrs"]):
         return False, 403, "client ip not allowed"

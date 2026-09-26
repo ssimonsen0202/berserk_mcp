@@ -42,7 +42,7 @@ All configuration is via environment variables. All are optional:
 | `BERSERK_MCP_HTTP_BIND` | `127.0.0.1:8765` | HTTP bind address when HTTP is enabled. Keep loopback when using a local reverse proxy. |
 | `BERSERK_MCP_HTTP_ALLOW_REMOTE` | unset | Required to bind HTTP to a non-loopback address. Remote bind also requires auth, Host allowlist, and CIDR allowlist. |
 | `BERSERK_MCP_HTTP_AUTH_TOKEN` | unset | Bearer token for HTTP requests. Required for non-loopback bind and recommended behind a reverse proxy. |
-| `BERSERK_MCP_HTTP_ALLOWED_HOSTS` | unset | Exact Host header allowlist. Required for non-loopback bind; wildcards are intentionally unsupported. |
+| `BERSERK_MCP_HTTP_ALLOWED_HOSTS` | loopback names for a loopback bind | Exact Host header allowlist; a request's `Origin`, when present, must also match it. Unset on a loopback bind means `localhost`, `127.0.0.1`, `::1` and the bound host. Required for a non-loopback bind; wildcards are intentionally unsupported. |
 | `BERSERK_MCP_HTTP_ALLOW_CIDRS` | `127.0.0.1/32,::1/128` | Source IP/CIDR allowlist. Global allow-all CIDRs such as `0.0.0.0/0` and `::/0` are rejected. |
 | `BERSERK_MCP_HTTP_MAX_REQUEST_BYTES` | `1048576` | Maximum HTTP JSON request body size. Oversized requests return HTTP 413. |
 | `BERSERK_MCP_HTTP_MAX_CONCURRENT_REQUESTS` | `8` | Maximum concurrent HTTP requests admitted to MCP dispatch. Excess requests return HTTP 429. |
