@@ -148,5 +148,23 @@
     "reviewed": "2026-09-26",
     "by": "codex",
     "note": "drains a refused, not-yet-authorised request body (Content-Length <= max_request_bytes) so Windows clients get the status, not a TCP reset. Absolute wall-clock deadline (_REFUSED_BODY_DRAIN_TIMEOUT), not an idle timeout, so a trickling client cannot hold the handler thread; previous socket timeout restored. v1.34.1, two Codex review passes."
+  },
+  "secret_scan:_credential_matches": {
+    "fingerprint": "01f98367adfe4e7a",
+    "reviewed": "2026-09-26",
+    "by": "codex",
+    "note": "2d: key-anchored credential redaction for any text format (quoted incl. typographic, YAML block, bare to line end / logfmt stop, structured bare after quoted key); prefixed keys; booleans exempt. Keys on later lines of a multi-line quote are rescanned (quote may open another value). v1.35.0, two Codex security passes (first found cache-boundary leak, partial redaction past caps, 2 FPs; second clean)."
+  },
+  "secret_scan:_quoted_value_end": {
+    "fingerprint": "da16a2cd8848ea3a",
+    "reviewed": "2026-09-26",
+    "by": "codex",
+    "note": "one-line quote: to the close, no limit. Multi-line or unterminated: to the close or end of text within MAX_MULTILINE_VALUE_CHARS, else _RedactionLimit (whole input fails closed, never a partial redaction). v1.35.0."
+  },
+  "secret_scan:_block_end": {
+    "fingerprint": "68a578a581c10199",
+    "reviewed": "2026-09-26",
+    "by": "codex",
+    "note": "YAML block scalar / indented continuation: lines blank or deeper than the key line; past MAX_MULTILINE_VALUE_CHARS fails closed. v1.35.0."
   }
 }

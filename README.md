@@ -42,10 +42,16 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.34.1**. This is a bullet-point overview, most recent
+Current version: **1.35.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.35.0** (2026-09-26) — Output redaction closes the non-JSON gaps.
+  After a credential key, the whole value is now removed: YAML block
+  scalars, quoted values with a line break, bare values with spaces, and
+  typographic quotes. Prefixed keys (`db_password`, `client_secret`,
+  `X-Api-Key`) and `Authorization: Basic/Digest/NTLM/Negotiate` headers are
+  now caught. See [details](docs/releases/v1.35.0.md).
 - **v1.34.1** (2026-09-26) — The HTTP transport now reads the body of a
   refused request before it replies. Windows resets a connection closed with
   unread data, so clients saw "connection aborted" instead of the 403, 404,
@@ -730,7 +736,13 @@ An unrecognized `BERSERK_MCP_REDACT` value fails **closed** to `redact`, the
 strictest mode, never to a weaker one.
 
 The scanner recognizes common cloud/provider credentials, private keys,
-JWTs, bearer tokens, and generic password/token assignments. High-entropy
+JWTs, bearer tokens, `Authorization` headers, and generic password, secret,
+token and key assignments. Since v1.35.0 a matched key removes the whole value,
+not only its first word, in JSON, YAML, logfmt and prose alike: values with
+spaces, quoted values that span lines, YAML block scalars (`key: |`), and
+typographic or backtick quotes. Prefixed keys such as `db_password`,
+`client_secret`, `X-Api-Key` and `spring.datasource.password` also match. The
+rule is to redact too much rather than leak a tail. High-entropy
 matching is opt-in, because it is false-positive-prone. Email, IP, and
 Luhn-validated credit-card checks are each individually selectable.
 `scan_secrets` audits recent log bodies but returns only aggregate counts and

@@ -29,18 +29,53 @@ _SECRET_PATTERNS = (
     ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
     ("api_key", re.compile(r"\bsk-[A-Za-z0-9-]{20,}\b")),
     ("bearer", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._-]{20,}\b")),
+    (
+        "authorization",
+        re.compile(
+            r"(?i)\b(?:proxy-)?authorization[ \t]*[=:][ \t]*[\"']?(?:basic|digest|ntlm|negotiate)[ \t]+[^\r\n]+"
+        ),
+    ),
 )
-_GENERIC_CREDENTIAL = re.compile(r"(?i)\b(?P<key>password|passwd|pwd|secret|api[_-]?key|token)\s*[=:]\s*[^\s,;]+")
-# JSON/YAML with a quoted key: "password": "hunter2". The key is found by regex;
-# the value is parsed by _quoted_credential_matches so long or escaped values are
-# removed in full.
-_QUOTED_KEY = re.compile(r"""(?i)(?P<q>["'])(?P<key>password|passwd|pwd|secret|api[_-]?key|token)(?P=q)\s*[=:]\s*""")
-# One alternative per character (plain or backslash-escaped): no backtracking.
+# A credential key, bare or quoted, with an optional dotted/underscored/dashed
+# prefix: password, "db_password", client_secret, X-Api-Key,
+# spring.datasource.password. The key must end the name, so "tokens",
+# "max_tokens" and "password_policy" do not match. The value is found by
+# _credential_matches, not by this pattern.
+_CREDENTIAL_KEYS = (
+    r"password|passwd|pwd|passphrase|secret|token|credentials?"
+    r"|(?:api|access|secret|private|signing|encryption|client)[_-]?key"
+)
+_CREDENTIAL_KEY = re.compile(
+    r"(?i)(?<![\w./-])(?P<q>[\"']?)(?:[A-Za-z0-9]+[_.-])*(?P<key>" + _CREDENTIAL_KEYS + r")(?P=q)[ \t]*[=:][ \t]*"
+)
+# Opening quote -> pattern for the body up to (not including) the closing
+# quote. ASCII quotes honour backslash escapes; typographic quotes have none.
+# One alternative per character: no backtracking.
 _QUOTED_BODY = {
-    '"': re.compile(r'(?:[^"\\\n]|\\.)*'),
-    "'": re.compile(r"(?:[^'\\\n]|\\.)*"),
+    '"': re.compile(r'(?:[^"\\]|\\.)*', re.DOTALL),
+    "'": re.compile(r"(?:[^'\\]|\\.)*", re.DOTALL),
+    "`": re.compile(r"[^`]*"),
+    "“": re.compile(r"[^”“]*"),
+    "„": re.compile(r"[^”“]*"),
+    "‘": re.compile(r"[^’]*"),
+    "«": re.compile(r"[^»]*"),
 }
-_BARE_VALUE = re.compile(r"[^\s,;}\]]+")
+# A value that spans lines (a quoted value with line breaks, an unterminated
+# quote, a YAML block scalar) is redacted in full up to this size. Past it, the
+# whole input fails closed: a partial redaction would leak the tail.
+MAX_MULTILINE_VALUE_CHARS = 65536
+# After a quoted key (JSON/YAML), a bare scalar ends at , } ] or the line end.
+_STRUCTURED_BARE_VALUE = re.compile(r"[^,}\]\r\n]*")
+# After a bare key, the value runs to the end of the line, but stops before a
+# following logfmt field (" user=bob"), so one key does not swallow a record.
+_LINE_BARE_VALUE = re.compile(r"(?:(?![ \t]+[A-Za-z_][\w.-]*=)[^\r\n])*")
+# A bare value that is one of these is a setting, not a secret
+# ("persist-credentials: false", "password": null).
+_NON_SECRET_SCALARS = frozenset({"true", "false", "null", "none", "nil", "~", "yes", "no"})
+# A trailing YAML comment is ignored when checking for such a value.
+_TRAILING_COMMENT = re.compile(r"[ \t]+#.*\Z", re.DOTALL)
+# Nothing but a YAML block indicator (| > |- >+ |2) or a comment after the key.
+_BLOCK_INDICATOR = re.compile(r"[ \t]*(?:[|>][0-9+-]{0,2})?[ \t]*(?:#[^\r\n]*)?(?=\r?\n|\Z)")
 _PEM_BEGIN = re.compile(r"-----BEGIN ((?:[A-Z]+ )?PRIVATE KEY)-----")
 _PEM_END_PREFIX = "-----END "
 MAX_PRIVATE_KEY_MARKERS = 100
@@ -87,10 +122,12 @@ def _luhn(value):
 
 def _credential_type(match):
     key = match.group("key").lower().replace("-", "_")
-    if key in {"password", "passwd", "pwd"}:
+    if key in {"password", "passwd", "pwd", "passphrase"}:
         return "password"
-    if key == "api_key":
-        return "api_key"
+    if key.endswith("key") and not key.endswith("_key"):
+        key = key[:-3] + "_key"  # signingKey -> signing_key, apikey -> api_key
+    if key == "credentials":
+        return "credential"
     return key
 
 
@@ -155,27 +192,89 @@ def _private_key_matches(text):
         yield begin.start(), pos, "private_key"
 
 
-def _quoted_credential_matches(text):
-    """Quoted-key credentials, with the whole value removed.
+def _line_end(text, pos):
+    end = text.find("\n", pos)
+    return len(text) if end == -1 else end
 
-    A quoted value runs to its closing quote, honouring backslash escapes. An
-    unterminated one runs to the end of the line: redacting too much beats leaking
-    a tail. Keys inside an already matched value are skipped, so the scan is linear."""
+
+def _block_end(text, pos, key_indent):
+    """End of the lines after `pos` that are blank or indented deeper than the
+    key: a YAML block scalar or an indented continuation. A block larger than
+    MAX_MULTILINE_VALUE_CHARS fails the whole input closed."""
+    end = pos
+    while end < len(text):
+        start = end + 1
+        stop = _line_end(text, start)
+        line = text[start:stop]
+        body = line.lstrip(" \t")
+        if body.strip() and len(line) - len(body) <= key_indent:
+            break
+        end = stop
+        if end - pos > MAX_MULTILINE_VALUE_CHARS:
+            raise _RedactionLimit("multiline_value_too_large")
+    return end
+
+
+def _quoted_value_end(text, start, close):
+    """End of a quoted value that opens at `start` and whose body scan
+    stopped at `close`. On one line the value runs to its closing quote. Across
+    lines it runs to the closing quote, or, with none, to the end of the text,
+    if that is within MAX_MULTILINE_VALUE_CHARS; past that the whole input
+    fails closed."""
+    if close < len(text) and text.find("\n", start, close) == -1:
+        return close + 1
+    end = close + 1 if close < len(text) else len(text)
+    if end - start > MAX_MULTILINE_VALUE_CHARS:
+        raise _RedactionLimit("multiline_value_too_large")
+    return end
+
+
+def _credential_matches(text):
+    """Credential keys with their whole value removed.
+
+    - Quoted value: to the closing quote, across lines if need be; an
+      unterminated quote runs to the end of the text (redacting too much beats
+      leaking a tail). See _quoted_value_end for the size limit.
+    - Nothing after the key but a YAML block indicator or a comment: the
+      following lines indented deeper than the key.
+    - Bare value after a quoted key: to , } ] or the line end.
+    - Bare value after a bare key: to the line end, or to the next logfmt field.
+    - A bare true/false/null-style value (optionally with a trailing YAML
+      comment) is a setting and is left alone.
+
+    Keys inside an already matched value are skipped, except that keys on the
+    later lines of a multi-line quoted value are still scanned. Such a key's
+    body scan stops at the next key's opening quote, or at the end of the text
+    within MAX_MULTILINE_VALUE_CHARS, so the pass stays near-linear."""
     pos = 0
-    for key in _QUOTED_KEY.finditer(text):
+    for key in _CREDENTIAL_KEY.finditer(text):
         if key.start() < pos:
             continue
         start = key.end()
         quote = text[start : start + 1]
-        if quote in _QUOTED_BODY:
-            body_end = _QUOTED_BODY[quote].match(text, start + 1).end()
-            end = body_end + 1 if text[body_end : body_end + 1] == quote else body_end
-        else:
-            bare = _BARE_VALUE.match(text, start)
-            if bare is None:
+        body = _QUOTED_BODY.get(quote)
+        if body is not None:
+            end = _quoted_value_end(text, start, body.match(text, start + 1).end())
+            # A quote on a later line may open another key's value rather than
+            # close this one, so keys on later lines are still scanned; the
+            # overlapping spans are merged by redact().
+            resume = min(end, _line_end(text, start))
+        elif _BLOCK_INDICATOR.match(text, start):
+            line_start = text.rfind("\n", 0, key.start()) + 1
+            prefix = text[line_start : key.start()]
+            key_indent = len(prefix) - len(prefix.lstrip(" \t"))
+            end = _block_end(text, _line_end(text, start), key_indent)
+            if not text[_line_end(text, start) : end].strip():
                 continue
-            end = bare.end()
-        pos = end
+            resume = end
+        else:
+            pattern = _STRUCTURED_BARE_VALUE if key.group("q") else _LINE_BARE_VALUE
+            value = pattern.match(text, start).group(0).rstrip()
+            if not value or _TRAILING_COMMENT.sub("", value).lower() in _NON_SECRET_SCALARS:
+                continue
+            end = start + len(value)
+            resume = end
+        pos = resume
         yield key.start(), end, _credential_type(key)
 
 
@@ -184,9 +283,7 @@ def _candidate_matches(text, include_entropy, pii_types):
     for secret_type, pattern in _SECRET_PATTERNS:
         for match in pattern.finditer(text):
             yield match.start(), match.end(), secret_type
-    for match in _GENERIC_CREDENTIAL.finditer(text):
-        yield match.start(), match.end(), _credential_type(match)
-    yield from _quoted_credential_matches(text)
+    yield from _credential_matches(text)
     if include_entropy:
         for match in _ENTROPY_TOKEN.finditer(text):
             value = match.group(0)
@@ -201,7 +298,13 @@ MAX_REDACT_CANDIDATES = 50_000
 
 LIMIT_MARKER = "[REDACTED:redaction_limit]"
 _LIMIT_REASONS = frozenset(
-    {"input_too_large", "too_many_matches", "too_many_private_key_markers", "invalid_extension_match"}
+    {
+        "input_too_large",
+        "too_many_matches",
+        "too_many_private_key_markers",
+        "invalid_extension_match",
+        "multiline_value_too_large",
+    }
 )
 
 

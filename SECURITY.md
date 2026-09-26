@@ -92,6 +92,17 @@ is still encoded after 8 levels has its escape characters broken instead.
 are explicit weaker modes and emit a startup warning. Entropy and selected PII
 checks can be enabled separately.
 
+Redaction is anchored on credential keys and removes the whole value that
+follows, whatever the text format: to the closing quote (across lines if
+need be; an unterminated quote runs to the end of the text), through a YAML
+block scalar or indented continuation, or to the end of the line for a bare
+value (stopping before a following `key=` logfmt field). A value that spans
+lines is removed in full up to 64 KB; past that the whole result fails closed
+to `[REDACTED:redaction_limit]` rather than return the tail. Where the extent
+of a value is ambiguous, the redactor removes more text rather than less. A value it cannot see as a value
+(a secret in free prose with no key, split across log records, or encoded)
+is not caught: scrub at ingest.
+
 Parser generation sends bounded, redacted samples and allowlisted structural
 keys to providers. Generated KQL is validated, bounded, execution-verified, and
 cannot silently replace a human query. A generated query is stored as pending

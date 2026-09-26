@@ -22,7 +22,7 @@ def jsonl(rows):
 
 class SecretRedactionTest(unittest.TestCase):
     def test_required_secret_types_are_redacted_without_values_in_findings(self):
-        text = f"aws {AWS_KEY} jwt {JWT} password=hunter2 {BEARER} {SK_KEY}"
+        text = f"aws {AWS_KEY} jwt {JWT} {BEARER} {SK_KEY}\npassword=hunter2"
         clean, findings = ss.redact(text, pii_types=())
         types = {item["type"] for item in findings}
         self.assertTrue({"aws_key", "jwt", "password", "bearer", "api_key"} <= types)
@@ -210,10 +210,11 @@ class SecurityReview20260924RedactionTest(unittest.TestCase):
                 self.assertFalse(fragment in clean, "secret value survived redaction")
                 self.assertTrue(clean.endswith("} after"))
 
-    def test_unterminated_quoted_value_is_redacted_to_end_of_line(self):
-        clean, _ = ss.redact('{"password":"TAILVALUE\nnext line', pii_types=())
-        self.assertFalse("TAILVALUE" in clean, "secret value survived redaction")
-        self.assertTrue(clean.endswith("\nnext line"))
+    def test_unterminated_quoted_value_is_redacted_to_end_of_text(self):
+        # v1.35.0 (2d): was "to end of line", which leaked any later lines of a
+        # value with a line break. Redacting too much beats leaking a tail.
+        clean, _ = ss.redact('{"password":"TAILVALUE\nSECONDLINE', pii_types=())
+        self.assertEqual(clean, "{[REDACTED:password]")
 
     def test_many_unterminated_quoted_keys_stay_linear(self):
         import time
@@ -367,6 +368,175 @@ class SecurityReview20260924BatchTwoTest(unittest.TestCase):
         self.addCleanup(lambda: ss.EXTRA_PII_PATTERNS.__setitem__(slice(None), orig))
         clean, _ = ss.redact("ssn=123-45-6789", pii_types={"ssn"})
         self.assertEqual(clean, "ssn=[REDACTED:ssn]")
+
+
+class NonJsonRedactionGapsTest(unittest.TestCase):
+    """Security item 2d: values in YAML, prose and header forms that the
+    key-anchored matcher used to cut short. Assertions never print values."""
+
+    def _assert_removed(self, text, fragments, expected_type, kept=()):
+        clean, findings = ss.redact(text, pii_types=())
+        for fragment in fragments:
+            self.assertFalse(fragment in clean, "secret value survived redaction")
+        self.assertIn(expected_type, {f["type"] for f in findings})
+        for part in kept:
+            self.assertIn(part, clean)
+
+    def test_yaml_block_scalars_are_removed_in_full(self):
+        cases = {
+            "literal": ("password: |\n  SECRETONE\n  SECRETTWO\nnext: 1", "password"),
+            "folded_strip": ("  token: >-\n    SECRETONE\n\n    SECRETTWO\n  next: 1", "token"),
+            "keep_indicator": ("secret: |+2\n    SECRETONE\n    SECRETTWO\nnext: 1", "secret"),
+            "comment_after_key": ("password: # from vault\n  SECRETONE SECRETTWO\nnext: 1", "password"),
+            "plain_on_next_line": ("password:\n  SECRETONE SECRETTWO\nnext: 1", "password"),
+            "list_item": ("- password: |\n    SECRETONE\n    SECRETTWO\n- next: 1", "password"),
+            "crlf": ("password: |\r\n  SECRETONE\r\n  SECRETTWO\r\nnext: 1", "password"),
+            "tab_indent": ("password: |\n\tSECRETONE\n\tSECRETTWO\nnext: 1", "password"),
+        }
+        for name, (text, kind) in cases.items():
+            with self.subTest(case=name):
+                self._assert_removed(text, ("SECRETONE", "SECRETTWO"), kind, kept=("next: 1",))
+
+    def test_block_scalar_over_the_limit_fails_closed(self):
+        body = "".join("  " + "S" * 99 + "\n" for _ in range(700))
+        clean, findings = ss.redact("password: |\n" + body + "TAILSECRET", pii_types=())
+        self.assertEqual(clean, ss.LIMIT_MARKER)
+        self.assertEqual(findings[0]["type"], "multiline_value_too_large")
+
+    def test_empty_value_without_continuation_is_not_a_finding(self):
+        text = "password:\nnext: 1"
+        self.assertEqual(ss.redact(text, pii_types=()), (text, []))
+
+    def test_quoted_value_with_a_literal_newline_is_removed(self):
+        for quote in ('"', "'"):
+            with self.subTest(quote=quote):
+                text = f"password={quote}SECRETONE\nSECRETTWO{quote} after"
+                self._assert_removed(text, ("SECRETONE", "SECRETTWO"), "password", kept=(" after",))
+
+    def test_multiline_quote_past_the_limit_fails_closed(self):
+        filler = "x" * ss.MAX_MULTILINE_VALUE_CHARS
+        for name, text in (
+            ("closes_too_late", f'password="SECRETONE\n{filler}" after'),
+            ("never_closes", f'password="SECRETONE\n{filler} after'),
+        ):
+            with self.subTest(case=name):
+                clean, findings = ss.redact(text, pii_types=())
+                self.assertEqual(clean, ss.LIMIT_MARKER)
+                self.assertEqual(findings[0]["type"], "multiline_value_too_large")
+
+    def test_long_single_line_quote_has_no_limit(self):
+        filler = "x" * (ss.MAX_MULTILINE_VALUE_CHARS + 10)
+        clean, _ = ss.redact(f'password="{filler}" after', pii_types=())
+        self.assertEqual(clean, "[REDACTED:password] after")
+
+    def test_value_opening_at_a_previous_close_is_scanned_afresh(self):
+        # Codex review: a cached close was reused when the next key's opening
+        # quote was that close, leaving the next value in clear.
+        text = 'password="' + "x" * 5000 + '\n token="INNER" tail\nOUTER"'
+        clean, _ = ss.redact(text, pii_types=())
+        self.assertFalse("INNER" in clean, "secret value survived redaction")
+
+    def test_unterminated_value_takes_the_rest_of_a_short_text(self):
+        for text in ('password="SECRET1\nSECRET2', "password: \u2018SECRET1\nSECRET2"):
+            with self.subTest(text=text[:11]):
+                clean, _ = ss.redact(text, pii_types=())
+                self.assertEqual(clean, "[REDACTED:password]")
+
+    def test_bare_value_with_spaces_is_removed_to_the_line_end(self):
+        self._assert_removed(
+            "password = correct horse battery staple\nnext line",
+            ("correct", "horse", "battery", "staple"),
+            "password",
+            kept=("\nnext line",),
+        )
+
+    def test_bare_value_stops_before_the_next_logfmt_field(self):
+        self._assert_removed(
+            "level=info password=SECRET ONE user=bob msg=x",
+            ("SECRET", "ONE"),
+            "password",
+            kept=("level=info ", " user=bob msg=x"),
+        )
+
+    def test_quoted_key_bare_value_stops_at_json_structure(self):
+        self._assert_removed(
+            '{"password": SECRET VALUE, "user": "bob"}', ("SECRET", "VALUE"), "password", kept=(', "user": "bob"}',)
+        )
+        self._assert_removed("'password': SECRET VALUE", ("SECRET", "VALUE"), "password")
+
+    def test_typographic_and_backtick_quotes_are_removed_in_full(self):
+        for open_q, close_q in (("“", "”"), ("‘", "’"), ("«", "»"), ("`", "`")):
+            with self.subTest(quote=open_q):
+                text = f"password: {open_q}SECRET WITH SPACE{close_q} after"
+                self._assert_removed(text, ("SECRET", "WITH", "SPACE"), "password", kept=(" after",))
+
+    def test_prefixed_and_dotted_keys_are_redacted(self):
+        cases = {
+            "db_password: SECRETVALUE": "password",
+            "client_secret=SECRETVALUE": "secret",
+            "X-Api-Key: SECRETVALUE": "api_key",
+            "spring.datasource.password=SECRETVALUE": "password",
+            "refresh_token: SECRETVALUE": "token",
+            '{"db_password": "SECRETVALUE"}': "password",
+            "export AWS_SECRET_ACCESS_KEY=SECRETVALUE": "access_key",
+            "private_key: SECRETVALUE": "private_key",
+            "passphrase=SECRETVALUE": "password",
+            "credentials: SECRETVALUE": "credential",
+            "signingKey: SECRETVALUE": "signing_key",
+            "apikey=SECRETVALUE": "api_key",
+        }
+        for text, kind in cases.items():
+            with self.subTest(text=text.split("SECRET")[0]):
+                self._assert_removed(text, ("SECRETVALUE",), kind)
+
+    def test_authorization_header_schemes_are_redacted(self):
+        for scheme in ("Basic", "Digest", "NTLM", "Negotiate"):
+            with self.subTest(scheme=scheme):
+                self._assert_removed(
+                    f"Authorization: {scheme} SECRETVALUE, x=1\nnext",
+                    ("SECRETVALUE",),
+                    "authorization",
+                    kept=("\nnext",),
+                )
+        self._assert_removed("Proxy-Authorization: Basic SECRETVALUE", ("SECRETVALUE",), "authorization")
+
+    def test_lookalike_fields_are_not_redacted(self):
+        for text in (
+            "max_tokens=500 tokens: 10 password_policy=strong",
+            '{"input_tokens": 5, "token_count": 3, "secretary": "x"}',
+            "authorization: denied for user bob",
+            "oauth=enabled mypassword_hint shown",
+            "Basic setup complete",
+            "persist-credentials: false",
+            "password: false # keep this setting",
+            "GET /password=public HTTP/1.1",
+            '{"password": null, "token": true}',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(ss.redact(text, pii_types=()), (text, []))
+
+    def test_new_value_forms_stay_linear(self):
+        import time
+
+        n = ss.MAX_REDACT_CHARS
+        m = ss.MAX_MULTILINE_VALUE_CHARS
+        inputs = {
+            "unterminated_quote_per_line": ('password="x\n' * (n // 12))[:n],
+            "unterminated_curly_per_line": ("password: “x\n" * (n // 14))[:n],
+            # Unterminated quotes in the last MAX_MULTILINE_VALUE_CHARS: each key on
+            # a later line is scanned again, to the end of the text.
+            "tail_single_curly": "a" * (n - m) + "password: \u2018x\n" * (m // 14),
+            "tail_double_quote": "a" * (n - m) + 'password="x\n' * (m // 12),
+            "far_close_per_line": (('password="x\n' * (n // 24)) + '"')[:n],
+            "long_prefix_word": ("a_" * (n // 2))[:n],
+            "block_keys": ("password: |\n" * (n // 12))[:n],
+            "logfmt_run": ("password=" + "a " * (n // 2))[:n],
+        }
+        for name, text in inputs.items():
+            with self.subTest(case=name):
+                started = time.perf_counter()
+                ss.redact(text, pii_types=())
+                self.assertLess(time.perf_counter() - started, 5.0)
 
 
 class AuditRowParsingTest(unittest.TestCase):
@@ -586,7 +756,7 @@ class OutputFilterTest(unittest.TestCase):
         self.orig_entropy = bm.REDACT_ENTROPY
         self.orig_pii = bm.REDACT_PII_TYPES
         bm.run_bzrk = lambda args, timeout=bm.DEFAULT_TIMEOUT: (
-            f"service body password=hunter2 {AWS_KEY}",
+            f"service body password=hunter2\n{AWS_KEY}",
             False,
         )
         bm.REDACT_ENTROPY = False
@@ -626,7 +796,7 @@ class OutputFilterTest(unittest.TestCase):
     def test_off_mode_returns_output_unchanged(self):
         bm.REDACT_MODE = "off"
         text = self._call()
-        self.assertIn(f"service body password=hunter2 {AWS_KEY}", text)  # raw content preserved; envelope wraps it
+        self.assertIn(f"service body password=hunter2\n{AWS_KEY}", text)  # raw content preserved; envelope wraps it
 
 
 class SecretAuditMcpTest(unittest.TestCase):
