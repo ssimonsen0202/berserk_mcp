@@ -190,6 +190,12 @@ fails when a section has no citing test or a citation names a missing section.
 Security-critical functions are listed in `tests/security_reviews.json` with the
 fingerprint of their code at last review; `tests/test_security_reviews.py` fails
 when that code changes until it is re-reviewed and the entry updated.
+CI also runs Trail of Bits' generic semgrep rules, pinned to one commit, over
+every tracked file, including README, docs and configs
+(`scripts/tob_semgrep_gate.py`). It fails on insecure transport in example
+commands (disabled TLS verification, plaintext non-loopback URLs, SSH without
+host-key checks), and it fails closed if the rules do not fire on a planted
+canary.
 Run both commands because they exercise different import/global-state paths:
 
 ```bash

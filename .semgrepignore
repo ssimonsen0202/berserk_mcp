@@ -1,0 +1,4 @@
+# Intentionally ignores nothing. Without this file semgrep applies its default
+# ignore list, which skips tests/ -- and scripts/tob_semgrep_gate.py is meant
+# to cover every tracked file (see SECURITY.md, "Test expectations").
+# Files matched by .gitignore are still not scanned.

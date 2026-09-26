@@ -67,6 +67,12 @@ jobs:
         run: python -m pip install semgrep
       - name: Run custom fencing rules
         run: semgrep --config .semgrep/ --error berserk_mcp.py
+      # Trail of Bits generic rules (curl/wget/ssh/TLS/plaintext transport in
+      # docs, configs and code) plus their stdlib tarfile rule, fetched at a
+      # pinned commit (AGPL-3.0, so not vendored). Fails closed and checks a
+      # planted canary first; see scripts/tob_semgrep_gate.py.
+      - name: Run Trail of Bits rules (pinned)
+        run: python scripts/tob_semgrep_gate.py --rules-dir "$RUNNER_TEMP/tob-semgrep-rules"
 
   mcp-scan:
     # Cisco's MCP scanner against this server's live tools/list. Catches
