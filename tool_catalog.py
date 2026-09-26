@@ -805,6 +805,10 @@ def build_mgmt_tools(*, TABLE, MAX_INTERPOLATED_NAME_CHARS, MAX_SEARCH_TERM_CHAR
                             "type": "boolean",
                             "description": "must be true to replace an existing saved query of the same name",
                         },
+                        "mgmt_token": {
+                            "type": "string",
+                            "description": "required only when the operator sets BERSERK_MCP_MGMT_TOKEN",
+                        },
                     },
                     **_since(),
                 ),

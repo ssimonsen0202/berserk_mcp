@@ -42,10 +42,21 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.33.0**. This is a bullet-point overview, most recent
+Current version: **1.34.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.34.0** (2026-09-26) — Optional egress policy for sovereign or
+  air-gapped deployments, ported and reworked from the unmerged
+  `feat/local-only-egress-hardening` branch. `BERSERK_LOCAL_ONLY=1` refuses the
+  cloud LLM providers even with keys set; `BERSERK_EGRESS_ALLOWED_HOSTS` and
+  `_CIDRS` restrict every outbound integration to loopback and approved
+  destinations. Every connection now resolves its host once and connects only
+  to checked addresses (a loopback name must resolve to loopback; under the
+  policy, a hostname must resolve inside the approved networks). Also: an
+  optional `BERSERK_MCP_MGMT_TOKEN` gate on `save_query`, a limit on stuck
+  doctor probes, and `--doctor` reports the policy. Off by default; no change
+  unless you set these. See [details](docs/releases/v1.34.0.md).
 - **v1.33.0** (2026-09-26) — Store files are no longer read or written
   through symlinks. On POSIX every store read, atomic write and lock-file
   operation works relative to a parent directory opened without following
@@ -1415,6 +1426,11 @@ led to these controls:
 - **A late authentication error is still an error.** `bzrk` stderr is scanned
   in full while it streams, not only the retained diagnostic prefix, and a
   stream that was not read to the end fails the call.
+- **Optional egress policy (v1.34.0).** `BERSERK_LOCAL_ONLY=1` refuses the
+  OpenAI and Anthropic providers even when their keys are set, and with
+  `BERSERK_EGRESS_ALLOWED_HOSTS` / `_CIDRS` limits every outbound integration
+  to loopback and approved destinations, checked against the resolved
+  addresses at connect time. `--doctor` shows the effective policy.
 - **Plaintext needs an explicit opt-in per service.** Loopback requests never
   use a proxy. The OpenRouter webhook receiver and backfill need
   `--allow-plaintext-remote` for a plaintext non-loopback endpoint; OTLP and

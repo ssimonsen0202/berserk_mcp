@@ -150,8 +150,28 @@ and the eval harness use one stdlib-only HTTP implementation. It:
 - never sends a request that passed as loopback through a proxy, so an ambient
   `http_proxy` cannot carry loopback plaintext or its credentials off the host;
 - validates header names and values, keeps JSON `Content-Type` authoritative,
-  and fails on malformed OTLP header items; and
+  and fails on malformed OTLP header items;
+- resolves each host once, at connect time, and connects only to addresses it
+  has checked: a host treated as loopback must resolve to loopback, so a
+  tampered `localhost` cannot carry loopback plaintext elsewhere; and
 - bounds every response before parsing or discarding it.
+
+An optional egress policy restricts where outbound calls may go.
+`BERSERK_LOCAL_ONLY=1`, `BERSERK_EGRESS_ALLOWED_HOSTS` or
+`BERSERK_EGRESS_ALLOWED_CIDRS` activates it for every integration, including
+the quota endpoint: only loopback, hosts listed by name, and addresses inside
+the listed networks are reachable. A hostname not listed by name is connected
+only to those of its resolved addresses inside the listed networks, and
+refused if none are, so a DNS change cannot move it. Under
+`BERSERK_LOCAL_ONLY` the best-known cloud LLM hosts (OpenAI, Anthropic, OpenRouter) are
+refused even if allowlisted. That list guards against a contradictory
+configuration; it cannot name every cloud endpoint, so the guarantee of
+local-only is the allowlist itself: do not list a cloud endpoint (for example an
+Azure OpenAI host) you do not want reached. Ambient proxies are ignored
+while the policy is active. `BERSERK_LOCAL_ONLY` also refuses the OpenAI and
+Anthropic providers even when their API keys are set. `--doctor` reports the
+effective policy. An operator-set `BERSERK_MCP_MGMT_TOKEN` gates `save_query`
+(constant-time comparison).
 
 API keys are read from the environment only. The optional Hermes endpoint is
 stored in the private local configuration; keys are never written there.

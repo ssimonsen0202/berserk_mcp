@@ -445,8 +445,14 @@ def _hermes_model():
         return None, "hermes: unexpected /api/models response shape"
 
 
+_CLOUD_PROVIDERS = frozenset({"openai", "anthropic"})
+
+
 def llm_complete(provider, system_prompt, user_prompt):
     """One chat completion. Returns (text, None) or (None, error)."""
+    if provider in _CLOUD_PROVIDERS and _http.local_only_enabled():
+        # An inherited API key must not silently re-enable cloud generation.
+        return None, f"{provider}: refused by BERSERK_LOCAL_ONLY"
     if provider == "anthropic":
         key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not key:

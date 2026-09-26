@@ -88,7 +88,7 @@ import schema_registry
 import secret_scan
 import tool_discovery
 
-__version__ = "1.33.0"
+__version__ = "1.34.0"
 
 
 def log(msg):
@@ -2708,6 +2708,12 @@ def _handle_learning_loop(name, arguments):
             return "No saved query named '" + qn + "'. Available: " + avail, True
         return _run_saved_entry(match, arguments.get("since"))
     if name == "save_query":
+        # Operator gate on writing saved queries (they become saved__ tools in
+        # every lane). Read per call, compared in constant time; unset = open.
+        mgmt_token = os.environ.get("BERSERK_MCP_MGMT_TOKEN", "")
+        supplied = str(arguments.get("mgmt_token") or "")
+        if mgmt_token and not hmac.compare_digest(supplied.encode("utf-8"), mgmt_token.encode("utf-8")):
+            return "save_query requires the management token (mgmt_token); ask the operator", True
         nm = sanitize_name(arguments.get("name", ""))
         desc = str(arguments.get("description", "")).strip()
         kql = str(arguments.get("kql", "")).strip()
@@ -4935,6 +4941,9 @@ def _serve_http():
 _DOCTOR_REACHABILITY_TIMEOUT = 5
 
 
+_DOCTOR_PROBE_SEMAPHORE = threading.BoundedSemaphore(2)
+
+
 def _with_wall_clock_timeout(fn, timeout):
     """Run fn() with a genuine wall-clock deadline. urllib's own timeout=
     only bounds individual socket connect/read operations, not total time
@@ -4949,13 +4958,26 @@ def _with_wall_clock_timeout(fn, timeout):
     cannot forcibly kill a thread, so a truly stuck call keeps running in
     the background after this returns -- harmless for a one-shot preflight
     check, since the daemon thread cannot block process exit either."""
+    # A stuck probe keeps its thread (and socket) after this returns, so bound
+    # how many can exist: repeated self_check calls against a hung endpoint
+    # would otherwise pile up threads. A slot is released only when the probe
+    # itself finishes; with none free within `timeout`, report a timeout.
+    if not _DOCTOR_PROBE_SEMAPHORE.acquire(timeout=timeout):
+        return None
     box = {}
 
     def runner():
-        box["result"] = fn()
+        try:
+            box["result"] = fn()
+        finally:
+            _DOCTOR_PROBE_SEMAPHORE.release()
 
     t = threading.Thread(target=runner, daemon=True)
-    t.start()
+    try:
+        t.start()
+    except BaseException:
+        _DOCTOR_PROBE_SEMAPHORE.release()
+        raise
     t.join(timeout)
     if t.is_alive():
         return None
@@ -5296,6 +5318,37 @@ def _doctor_check_canonloom_reachability():
     return _doctor_result("canonloom_reachability", "pass", f"reachable at {server_url}", required=False)
 
 
+def _doctor_check_egress_policy():
+    """Report the effective outbound destination policy (_http egress policy)."""
+    try:
+        active = _http.egress_policy_active()
+        hosts = sorted(_http.egress_allowed_hosts())
+        networks = [str(n) for n in _http.egress_allowed_networks()]
+    except _http.UrlPolicyError as exc:
+        return _doctor_result(
+            "egress_policy",
+            "fail",
+            str(exc),
+            remediation="fix BERSERK_EGRESS_ALLOWED_CIDRS; outbound calls are refused until it parses",
+            required=False,
+        )
+    if not active:
+        return _doctor_result(
+            "egress_policy",
+            "pass",
+            "inactive: integrations may reach any host (HTTPS, redirect and plaintext rules still apply)",
+            required=False,
+        )
+    parts = ["active"]
+    if _http.local_only_enabled():
+        cloud = [p for p in parser_factory.ladder() if p in parser_factory._CLOUD_PROVIDERS]
+        parts.append("BERSERK_LOCAL_ONLY" + (f" (refusing {', '.join(cloud)} in the ladder)" if cloud else ""))
+    parts.append("loopback")
+    parts.append("hosts: " + (", ".join(hosts) or "none"))
+    parts.append("networks: " + (", ".join(networks) or "none"))
+    return _doctor_result("egress_policy", "pass", "; ".join(parts), required=False)
+
+
 _DOCTOR_CHECK_FUNCS = (
     ("bzrk_resolvable", _doctor_check_bzrk_resolvable),
     ("bzrk_version", _doctor_check_bzrk_version),
@@ -5306,6 +5359,7 @@ _DOCTOR_CHECK_FUNCS = (
     ("tool_tier", _doctor_check_tool_tier),
     ("learned_store_writable", _doctor_check_learned_store_writable),
     ("http_config", _doctor_check_http_config),
+    ("egress_policy", _doctor_check_egress_policy),
     ("llm_hermes_reachability", _doctor_check_llm_reachability),
     ("canonloom_reachability", _doctor_check_canonloom_reachability),
 )

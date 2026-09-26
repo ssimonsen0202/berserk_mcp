@@ -78,7 +78,7 @@ def _read_oauth_token(run=subprocess.run, platform_name=None):
     return token if isinstance(token, str) and token else None
 
 
-def _fetch_live_usage(token, opener=_http.NO_REDIRECT_OPENER.open):
+def _fetch_live_usage(token, opener=None):
     """Calls the (undocumented, unstable) usage endpoint. Returns the
     parsed JSON dict, or None on ANY failure -- network error, non-200,
     unexpected body shape, or a blocked redirect. Never raises.
@@ -87,7 +87,18 @@ def _fetch_live_usage(token, opener=_http.NO_REDIRECT_OPENER.open):
     plain urlopen follows redirects and re-sends this request's
     Authorization: Bearer <oauth token> header to whatever host the
     redirect names. A redirect is treated the same as any other failure --
-    degrade to the log-derived fallback, never forward the token onward."""
+    degrade to the log-derived fallback, never forward the token onward.
+
+    The endpoint also goes through the shared URL and egress policy: under
+    BERSERK_LOCAL_ONLY or an egress allowlist that does not list it, no
+    request is made and the log-derived fallback is used."""
+    try:
+        _http.validate_http_url(USAGE_ENDPOINT, label="quota endpoint", allow_plaintext_remote=False)
+        _http.validate_egress_destination(USAGE_ENDPOINT, label="quota endpoint")
+    except _http.UrlPolicyError:
+        return None
+    if opener is None:
+        opener = _http._opener_for(USAGE_ENDPOINT).open
     req = urllib.request.Request(
         USAGE_ENDPOINT,
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
@@ -131,7 +142,7 @@ def _extract_live_fields(data):
 def get_quota_status(
     since="5h ago",
     run=subprocess.run,
-    opener=_http.NO_REDIRECT_OPENER.open,
+    opener=None,
     platform_name=None,
     _total_tokens_estimate=agent_analytics.total_tokens_estimate,
 ):

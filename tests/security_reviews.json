@@ -130,5 +130,17 @@
     "reviewed": "2026-09-26",
     "by": "claude + codex review",
     "note": "private store read: O_NOFOLLOW relative to the no-follow parent fd on POSIX; None when missing; StoreRedirectError on a symlink. Used by _load_json and ai_finops' pseudonym key, business and decision stores."
+  },
+  "_http:validate_egress_destination": {
+    "fingerprint": "9295adfa9eea2c23",
+    "reviewed": "2026-09-26",
+    "by": "claude + codex review",
+    "note": "opt-in destination policy (local-only / allowed hosts / CIDRs): loopback always allowed; by-name and IP-literal decisions here, other hostnames deferred to the connect-time CIDR check; bad CIDRs and /0 fail closed. Ported from feat/local-only-egress-hardening, v1.34.0. Under BERSERK_LOCAL_ONLY the cloud LLM hosts are refused even if allowlisted (Codex review)."
+  },
+  "_http:_checked_candidates": {
+    "fingerprint": "218a0eb34d0fec62",
+    "reviewed": "2026-09-26",
+    "by": "claude + codex review",
+    "note": "resolve once per connection; loopback names must resolve to loopback; under the policy, hostnames not approved by name keep only addresses inside the allowed CIDRs, else EgressRefused. v1.34.0."
   }
 }

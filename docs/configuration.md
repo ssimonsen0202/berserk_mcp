@@ -38,6 +38,10 @@ All configuration is via environment variables. All are optional:
 | `BERSERK_MCP_PRICING_CATALOG_PATH` | packaged catalog | Absolute path to an alternate effective-dated pricing catalog. Unknown models remain unpriced. |
 | `BERSERK_MCP_OTLP_LOGS_ENDPOINT` | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` or unset | Optional OTLP/HTTP logs endpoint for `engineering-work` and recommendation-audit records. Non-loopback endpoints must use HTTPS. |
 | `BERSERK_MCP_OTLP_HEADERS` | `OTEL_EXPORTER_OTLP_HEADERS` or unset | Comma-separated `name=value` OTLP HTTP headers. Malformed items fail loudly and cannot override JSON `Content-Type`. |
+| `BERSERK_LOCAL_ONLY` | unset | Local-only deployment: refuse OpenAI and Anthropic even with keys set, and activate the egress policy. |
+| `BERSERK_EGRESS_ALLOWED_HOSTS` | unset | Approved non-loopback hostnames for outbound calls (exact match). Setting it activates the egress policy. |
+| `BERSERK_EGRESS_ALLOWED_CIDRS` | unset | Approved non-loopback networks. A hostname not listed by name is connected only to its addresses inside them (checked at connect time). Setting it activates the egress policy. |
+| `BERSERK_MCP_MGMT_TOKEN` | unset | When set, `save_query` requires a matching `mgmt_token` argument. |
 | `BERSERK_MCP_HTTP_ENABLE` | `0` | Optional HTTP transport. Disabled by default; stdio remains the normal Claude Desktop/Claude Code path. |
 | `BERSERK_MCP_HTTP_BIND` | `127.0.0.1:8765` | HTTP bind address when HTTP is enabled. Keep loopback when using a local reverse proxy. |
 | `BERSERK_MCP_HTTP_ALLOW_REMOTE` | unset | Required to bind HTTP to a non-loopback address. Remote bind also requires auth, Host allowlist, and CIDR allowlist. |
