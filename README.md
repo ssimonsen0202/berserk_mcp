@@ -194,7 +194,7 @@ filed](https://github.com/berserkdb/helm-charts/issues/2).
 | **Two-lane cost model** (cheap default · on-demand `@deep`) | — | ✅ tool descriptions + annotations make this safe |
 | **KQL-injection guards** on free-text inputs | n/a (humans) | ✅ service-name allowlist · `claude_search` reject-list |
 | **Trace/span analysis** — find slow/failed traces, reconstruct a span tree with correlated logs | — | ✅ `trace_find_slow` · `trace_find_errors` · `trace_analyze` (v1.14.0; see [Trace tools](#trace-tools-all-lanes)) |
-| **Model-behavior monitoring** — detect provider changes and routing-quality regressions via scored canary and fingerprints | — | ✅ `model_drift_check` · `model_drift_history` (v1.28.0; see [Model-behavior monitoring tools](#model-behavior-monitoring-tools)) |
+| **Model-behavior monitoring** — detect provider changes and routing-quality regressions via scored canary and fingerprints | — | ✅ `model_drift_check` · `model_drift_history` (v1.28.0; see [Model-behavior monitoring tools](#model-behavior-monitoring-tools-all-lanes)) |
 | **Knowledge-artifact lifecycle pipeline** (source URL → validated skill artifact) | — | ✅ `canonloom_run_pipeline` · `canonloom_list_artifacts` · `canonloom_get_artifact` · `canonloom_freshness_report` · `canonloom_run_history`, bridged to a separate `canonloom-server` (see [CanonLoom bridge](#canonloom-knowledge-artifact-lifecycle-bridge)) |
 
 ### Why this complements Berserk's native MCP (not competes with it)
@@ -487,8 +487,48 @@ cannot be called by accident and cannot be injected into context.
 | SRE | `sre` | Core tools + SRE tools (error rate, host headroom, ingest health, service health, top errors) | On-call Slack bot, editor assistant |
 | SOC | `soc` | Core tools + SOC tools (high-severity logs, log spike, new services, repeated errors, incident timeline) | Security monitoring agent |
 | Claude Code | `claude` | Core tools + Claude telemetry, AI spend, feature economics, data quality, and governed harness recommendations | Developer workflow and AI FinOps assistant |
-| Ops | `ops` | All tools (full visibility) | Operator shell, admin scripts |
+| Ops | `ops` | Core tools only (no lane-specific tools) | Operator shell, admin scripts |
+| Windows forensics | `windows-forensics` | Core tools; a stub lane for Windows event telemetry, whose own tools are not built yet | Endpoint investigation (planned) |
 | Default | `all` (or unset) | All tools | Development, evaluation |
+
+### Tool tiers
+
+Tiers are independent of lanes. A lane answers "which job function?"; a tier
+answers "may this caller author KQL or drive a pipeline?". The **small** tier
+hides the 13 tools that do: `search`, `validate_kql`, `save_query`,
+`generate_parser`, `review_generated`, `run_discovery_worker`,
+`suggest_ingestion`, `self_check`, and the five `canonloom_*` tools. The
+**deep** tier shows them. Saved queries (`list_saved`, `run_saved`,
+`saved__*`) and schema tools stay in the small tier: running a verified query
+is exactly what it is for.
+
+| Lane | Default tier | Tools | `tools/list` bytes |
+|---|---|---:|---:|
+| `all` | deep | 74 | 58,511 |
+| `claude` | small | 46 | 35,317 |
+| `sre` | small | 32 | 23,144 |
+| `soc` | small | 31 | 22,182 |
+| `ops` | small | 23 | 15,670 |
+| `windows-forensics` | small | 23 | 15,670 |
+
+Measured for v1.30.0 with an empty saved-query store. Every lane except `all`
+defaults to the small tier; set `BERSERK_MCP_TIER=small` or `deep` to
+override. At startup the server logs how many tools the tier hides and how to
+restore them, and `self_check` reports the resolved tier.
+
+Two rules keep the tiers honest:
+
+- **A hidden tool looks like a tool that does not exist.** `tools/call` on it
+  returns `unknown tool: <name>`, so neither its existence nor its schema
+  leaks. For the same reason, the text a small-tier model reads (instructions,
+  primers, tool descriptions, empty-result next steps) never names a hidden
+  tool: a model sent to one would have no way to recover.
+  `tests/test_tier_text.py` checks every lane and tier in a fresh process.
+- **Arguments must be declared.** `tools/call` rejects an argument name the
+  tool's schema does not declare and lists the valid ones, e.g.
+  `unknown argument 'svc' for detect_anomalies; valid: service, since`.
+  Before v1.30.0 a misspelled filter was ignored, so the call ran unfiltered
+  and the answer looked filtered.
 
 ### Role primers
 
@@ -550,7 +590,7 @@ Every query tool takes an optional `since` argument (`"15m ago"`, `"1h ago"`,
 | Tool | What it answers |
 |---|---|
 | `sre_error_rate` | Error log events by service grouped per minute — "is the error rate climbing?" |
-| `investigate_error_rate` | Fixed decision-tree root-cause walk for an elevated error rate — errors_by_service → correlated log-spike → failing traces, one hop per call. |
+| `investigate_error_rate` | Fixed decision-tree root-cause walk for an elevated error rate — errors_by_service → correlated log-spike → failing traces, one hop per call. Before it reports "no errors", it checks that logs are arriving, so a silent source reads as silence, not health. It also reports the previous window's error rate as context; branching still uses the fixed >10/min threshold. |
 | `sre_host_headroom` | CPU load and memory by host — "which VM is saturated?" |
 | `sre_ingest_health` | Berserk ingest lag and dropped data — "is observability lagging?" |
 | `sre_service_health` | Full health summary for one named service: event volume, error count, log/metric split, last seen. |
@@ -1323,15 +1363,62 @@ results, including that one finding, in
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
+### Query confinement, fencing, and approval (v1.30.0)
+
+A Codex Security scan of the query and process boundary, and the review in
+[docs/mcp-guidance-review-2026-09-26.md](docs/mcp-guidance-review-2026-09-26.md),
+led to these controls:
+
+- **User KQL reads only the configured table, in every validation mode.** The
+  execution boundary (`_kql_boundary.check`, applied to `search` and to
+  `validate_kql mode=live`) refuses source operators and functions (`union`,
+  `join`, `lookup`, `evaluate`, `invoke`, `toscalar(`, `table(`, and similar)
+  anywhere outside string literals. The right operand of `in`, `has`,
+  `has_any` and related operators must be a literal, because a bare or
+  bracket-quoted name there can be a table. String literals are delimited the
+  way the Kusto lexer reads them, including verbatim, obfuscated and
+  multi-line forms. `BERSERK_MCP_KQL_VALIDATION=off` no longer disables any of
+  this. Residual risk: a stored function called as a plain value can read any
+  table the `bzrk` identity can, so restrict that identity's permissions.
+- **The untrusted-data fence cannot be closed by an encoded tag.** Before
+  wrapping, `_tag_guard` decodes HTML entities, JSON escapes (`\u003c`,
+  `\/`), URL escapes and full-width forms, up to 8 nested levels, then
+  neutralises any opening or closing fence tag. It covers all three fences:
+  telemetry, saved-query descriptions, and parser-factory samples.
+- **Generated queries need an operator's approval.** A query the parser
+  factory writes is stored as pending; the small tier cannot see or run it
+  until an operator runs `berserk-mcp --approve-generated <name>`. See
+  [Parser factory](#parser-factory-llm-generated-query-packs).
+- **Unknown tool arguments are rejected.** See [Tool tiers](#tool-tiers).
+- **A late authentication error is still an error.** `bzrk` stderr is scanned
+  in full while it streams, not only the retained diagnostic prefix, and a
+  stream that was not read to the end fails the call.
+- **Plaintext needs an explicit opt-in per service.** Loopback requests never
+  use a proxy. The OpenRouter webhook receiver and backfill need
+  `--allow-plaintext-remote` for a plaintext non-loopback endpoint; OTLP and
+  CanonLoom always need HTTPS off loopback.
+
 ### Security tooling: what runs, and what deliberately does not
 
-Two scanners run against this repo. Both are local. Neither sends code,
-tool definitions, or configuration to a third party.
+Three scanners run against this repo on every push. All are local. None
+sends code, tool definitions, or configuration to a third party.
 
 **Semgrep, on every push.** Custom rules in `.semgrep/` encode
 repo-specific invariants that generic linters do not know about — chiefly
 the untrusted-data fencing rule, backtested against real historical bugs
 in this codebase. See `.semgrep/fence-untrusted-data.yml`.
+
+**Trail of Bits semgrep rules, on every push.** The `generic/` rules from
+[`trailofbits/semgrep-rules`](https://github.com/trailofbits/semgrep-rules)
+(insecure `curl`/`wget` flags, plaintext non-loopback URLs, SSH without
+host-key checks, openssl/gpg/tar flags, plaintext database transports) plus
+their standard-library `tarfile` rule scan every tracked file, including
+README, docs and configs. The other 22 Python rules target libraries this
+project never imports. The rules are AGPL-3.0, so CI clones them at a pinned
+commit instead of vendoring them. `scripts/tob_semgrep_gate.py` fails closed:
+on a clone or checkout failure, a modified rule file, a semgrep error, any
+tracked file missing from the scan, or a planted canary the rules do not
+catch.
 
 **Cisco MCP Scanner ([`cisco-ai-defense/mcp-scanner`](https://github.com/cisco-ai-defense/mcp-scanner)),
 on every push.** It connects to the running server over stdio, pulls the
@@ -1420,6 +1507,13 @@ Accepted findings therefore live in `scripts/mcp_scan_baseline.json`, each
 with a written reason, and the gate fails only on findings that are
 **new**.
 
+**Test-enforced review gates.** `tests/security_reviews.json` records the
+code fingerprint of each security-critical function at its last review;
+`tests/test_security_reviews.py` fails when that code changes until it is
+re-reviewed. `tests/test_security_doc_coverage.py` fails when a section of
+SECURITY.md has no test citing it. Codex Security scans (`codex-security
+scan`) run on demand rather than in CI; the v1.30.0 fixes came from one.
+
 #### Not used: Snyk Agent Scan
 
 [`snyk/agent-scan`](https://github.com/snyk/agent-scan) covers more ground
@@ -1451,12 +1545,16 @@ timeouts, and read-only execution. These protect backend stability. Few
 address this query-result failure mode — the one that actually pages
 someone at 4am.
 
-Six controls make this up, each with a locking test: field-access guidance
+Nine controls make this up, each with a locking test: field-access guidance
 for nested OTLP attributes, full-text search term-boundary guidance, KQL
 validation that rejects blockers before execution, schema-drift warnings on
 saved queries, a result envelope that tells apart the bare `(no rows)`
-sentinel, and untrusted-data fencing against a smuggled instruction in a
-log line. See [docs/wrong-answer-containment.md](docs/wrong-answer-containment.md)
+sentinel and carries evidence fields, untrusted-data fencing against a
+smuggled instruction in a log line, and three added in v1.30.0: rejecting
+undeclared tool arguments (a misspelled filter used to widen the answer
+silently), a log-freshness check before the error-rate tree reports "no
+errors", and small-tier text that never points a model at a tool it cannot
+call. See [docs/wrong-answer-containment.md](docs/wrong-answer-containment.md)
 for full detail, known limits, and the regression test for each.
 
 ## Testing
@@ -1465,7 +1563,16 @@ for full detail, known limits, and the regression test for each.
 python -m pytest tests/ -q
 # stdlib unittest is also supported:
 python3 -m unittest discover -s tests
+python3 tests/test_berserk_mcp.py
+python3 -m unittest discover -s evals -p "test_*.py"
+python3 -m unittest discover -s ingestion -p "test_*.py"
 ```
+
+CI runs all four on Ubuntu and Windows with Python 3.9, 3.11 and 3.12 (about
+1,440 tests), plus the protocol smoke test, the router-eval gate, and the
+three scanners under [Security tooling](#security-tooling-what-runs-and-what-deliberately-does-not).
+ruff (with a complexity cap) and mypy are configured in `pyproject.toml` and
+run locally (`ruff check .`, `make typecheck`); they are not CI steps.
 
 The tests stub the `bzrk` CLI. They verify: KQL content and lock strings,
 default time windows, role isolation (which tools appear in which lane),
@@ -1476,6 +1583,13 @@ verify the escalation ladder, source profiling, new-source/drift detection,
 generation, validation, refinement, and headless worker mode. The
 agent-analytics suite verifies loop detection, model-fit classification, MCP
 dispatch, and the headless `--agent-report` path.
+
+Several tests check a whole surface rather than one function. The tier-text
+test starts a fresh server for every lane and tier and checks every piece of
+text the model reads. The KQL-boundary tests include bypass forms found in
+review (verbatim strings, bracket-quoted names, `in` operands). The fence
+tests cover every encoding the guard decodes, and they time 4 MiB of hostile
+input. New tests are checked by disabling the fix and confirming they fail.
 
 ### Live-verified, not just unit-tested
 

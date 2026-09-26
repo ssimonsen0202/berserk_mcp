@@ -45,9 +45,11 @@ can be reviewed, tested, and cited as one thing.
   returning an empty or unrelated result that looks like a real answer. See
   the main README's "Security" section, "Schema-grounded KQL validation";
   `WrongAnswerContainmentTest.test_validate_kql_rejects_wrong_table_prefix`
-  is the containment-framed regression test. This validation can be disabled
-  via `BERSERK_MCP_KQL_VALIDATION=off` (not recommended — an escape hatch for
-  debugging only).
+  is the containment-framed regression test. Static validation can be
+  disabled via `BERSERK_MCP_KQL_VALIDATION=off` (not recommended — an escape
+  hatch for debugging only), but since v1.30.0 the execution boundary still
+  refuses the wrong table and every construct that reads another table in
+  that mode (`tests/test_kql_boundary.py`).
 - **Schema-drift warning on saved queries.** A saved query is revalidated
   against the *current* schema every time it runs (unless `BERSERK_MCP_KQL_VALIDATION=off`,
   the same escape hatch as above, which skips this check and the hash
@@ -76,8 +78,28 @@ can be reviewed, tested, and cited as one thing.
   their resolved window and, on empty results, a concrete per-tool next step
   naming a real tool or argument. Tools outside this path (e.g., `logs_for_service`,
   `search`) and environments with `BERSERK_MCP_ENVELOPE=0` return results
-  unenveloped. See `docs/result-envelope-implementation-spec.md` and
+  unenveloped. Since v1.30.0 the header also carries `source=`,
+  `redaction=`, `at=` (when the rows were queried; a cached result keeps its
+  time) and a stable `ref=`, so a model can state where an answer came from
+  and how fresh it is. See `docs/result-envelope-implementation-spec.md` and
   `ResultEnvelopeTest` for full coverage.
+- **Undeclared tool arguments are rejected (v1.30.0).** A misspelled optional
+  filter (`svc` for `service`) used to be ignored, so the call ran unfiltered
+  and returned a normal-looking answer for the wrong scope. `tools/call` now
+  returns an error naming the argument and listing the valid ones. Locking
+  tests: `tests/test_unknown_arguments.py`.
+- **"No errors" requires evidence that logs arrived (v1.30.0).** An empty
+  `errors_by_service` result is also what a silent source or stalled ingest
+  produces. Before `investigate_error_rate` reports "no errors", it checks
+  that log events arrived in the window; with none it reports "silence, not
+  health". Locking tests: `FreshnessAndBaselineTest` in
+  `tests/test_investigation.py`.
+- **Small-tier text never names a hidden tool (v1.30.0).** A model told to
+  use a tool its tier hides gets `unknown tool` and no way to recover, so it
+  may guess instead. Instructions, primers, tool descriptions and
+  empty-result next steps drop anything naming a tool hidden in the lane and
+  tier. Locking test: `tests/test_tier_text.py`, which checks every lane and
+  tier in a fresh process.
 - **Returned telemetry is fenced as untrusted data.** Not a containment
   control in the same sense as the others — it defends against an agent
   *acting on an instruction smuggled into a log line*, not against a query
