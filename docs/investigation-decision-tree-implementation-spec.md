@@ -275,3 +275,26 @@ adds:
 - Whether a SOC tree is ever worth it, and if so, how small/finite it
   would need to be to avoid the maintenance-relocation failure mode named
   above.
+
+## Amendment 2026-09-26: freshness check and baseline context
+
+From the MCP guidance review (`docs/mcp-guidance-review-2026-09-26.md`, P2):
+
+- **Freshness before a "no errors" verdict.** An empty `errors_by_service`
+  result is also what a silent source or stalled ingest produces. The start
+  node now runs the fixed `list_services` query over the same window and
+  uses its log counts (metrics alone do not show that logs arrive). It
+  reports "no errors while logs are arriving" only when log events arrived;
+  with none it reports "silence, not health"; if that check fails, or no
+  services query is configured, it does not claim the window is healthy.
+- **Baseline as context, not policy.** The start node re-runs the same
+  `errors_by_service` query over twice the window and reports the worst
+  service's error count and rate in the previous window of equal length
+  (the doubled window is expressed in seconds, so sub-minute windows are
+  exact; if counts moved between the two queries it says "indeterminate";
+  a doubled window too long for a `since` value is reported, not queried).
+  Verdict text states facts only: it is fenced as untrusted data at
+  dispatch, so a directive inside it could not be followed.
+  Branching still uses the primer's fixed `>10/min` threshold (user
+  decision, 2026-09-26). A failed baseline query is reported and does not
+  halt the tree.

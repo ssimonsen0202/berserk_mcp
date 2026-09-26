@@ -2142,6 +2142,7 @@ investigation.configure(
     q_errors=Q_ERRORS,
     q_soc_log_spike=q_soc_log_spike_for_service,
     q_trace_find_errors=q_trace_find_errors_for_service,
+    q_services=Q_SERVICES,
 )
 ai_finops.configure(
     search=bzrk_search_json,

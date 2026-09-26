@@ -18,6 +18,7 @@ _since_hours = None
 _q_errors = None
 _q_soc_log_spike = None
 _q_trace_find_errors = None
+_q_services = None
 
 # From primers/sre.md's "Escalation thresholds" table. Single source of
 # truth for this module; the primer's prose copy is not auto-synced
@@ -32,9 +33,11 @@ _RECENT_BUCKET_COUNT = 5
 _SPIKE_MULTIPLIER = 3
 _MIN_SPIKE_BUCKETS = _RECENT_BUCKET_COUNT * 2  # need real baseline, not just recent
 _MAX_EXAMPLE_TRACES = 3
+# berserk_mcp.valid_since rejects longer `since` strings.
+_MAX_SINCE_CHARS = 32
 
 
-def configure(bzrk_search, since_hours, q_errors, q_soc_log_spike, q_trace_find_errors):
+def configure(bzrk_search, since_hours, q_errors, q_soc_log_spike, q_trace_find_errors, q_services=None):
     """bzrk_search: callable(kql, since) -> (json_text, is_error), the same
     bzrk_search_json berserk_mcp.py wires into agent_analytics. since_hours:
     callable(since_str) -> float hours, berserk_mcp.py's own _since_hours
@@ -48,13 +51,16 @@ def configure(bzrk_search, since_hours, q_errors, q_soc_log_spike, q_trace_find_
     filter ever runs, so a service outside that global top-N silently
     reads as "no data" even when it has real matching rows -- scoping the
     query itself, not just post-filtering its already-truncated result,
-    is the actual fix)."""
-    global _bzrk_search, _since_hours, _q_errors, _q_soc_log_spike, _q_trace_find_errors
+    is the actual fix). q_services: the fixed list_services KQL (all
+    events per service), used to check that telemetry is arriving before a
+    "no errors" verdict; None skips that check."""
+    global _bzrk_search, _since_hours, _q_errors, _q_soc_log_spike, _q_trace_find_errors, _q_services
     _bzrk_search = bzrk_search
     _since_hours = since_hours
     _q_errors = q_errors
     _q_soc_log_spike = q_soc_log_spike
     _q_trace_find_errors = q_trace_find_errors
+    _q_services = q_services
 
 
 def _run_json(kql, since):
@@ -111,6 +117,58 @@ def _as_int(value):
         return 0
 
 
+def _no_errors_verdict(since):
+    """Verdict for an empty errors_by_service result. Empty is also what a
+    silent source or stalled ingest produces (review 2026-09-26, P2), so
+    check that any telemetry arrived before calling the window healthy."""
+    head = f"Checked: errors_by_service (since={since})\nResult: no errors\n"
+    if _q_services is None:
+        return head + "Investigation complete.\nVerdict: no errors found; whether logs are arriving was not checked."
+    rows, err = _run_json(_q_services, since)
+    if err is not None:
+        return (
+            head + f"Checked: list_services (since={since}) — FAILED\nError: {err}\n"
+            "Investigation complete.\n"
+            "Verdict: no errors found; whether logs are arriving could not be checked."
+        )
+    # Error counts come from logs, so only log events show the source is
+    # alive; metrics alone do not.
+    reporting = [row for row in rows if _as_int(row.get("logs")) > 0]
+    logs = sum(_as_int(row.get("logs")) for row in reporting)
+    if not reporting:
+        return (
+            head + f"Checked: list_services (since={since})\nResult: no log events at all in window\n"
+            "Investigation complete.\n"
+            "Verdict: no errors because no logs arrived — silence, not health."
+        )
+    return (
+        head + f"Checked: list_services (since={since})\n"
+        f"Result: {len(reporting)} services sent {logs} log events\n"
+        "Investigation complete.\n"
+        "Verdict: no errors in window while logs are arriving, nothing to investigate."
+    )
+
+
+def _baseline_line(since, service, count):
+    """The same service's error rate in the previous window of equal length,
+    as context only: branching uses the SRE primer's fixed threshold."""
+    hours = _since_hours(since)
+    if hours <= 0:
+        return "Previous window: not applicable\n"
+    doubled = f"{max(1, round(hours * 7200))}s ago"  # seconds: exact for sub-minute windows too
+    if len(doubled) > _MAX_SINCE_CHARS:
+        return "Previous window: not computed (window too large)\n"
+    rows, err = _run_json(_q_errors, doubled)
+    if err is not None:
+        return "Previous window: unavailable (query failed)\n"
+    both = next((_as_int(r.get("errors")) for r in rows if str(r.get("service")) == service), 0)
+    if both < count:
+        # New errors arrived between the two queries; no honest number.
+        return "Previous window: indeterminate (counts changed between queries)\n"
+    previous = both - count
+    return f"Previous window of the same length: {previous} errors (~{previous / (60.0 * hours):.1f}/min)\n"
+
+
 def _node_start(since):
     rows, err = _run_json(_q_errors, since)
     if err is not None:
@@ -121,15 +179,7 @@ def _node_start(since):
             None,
         )
     if not rows:
-        return (
-            f"Checked: errors_by_service (since={since})\n"
-            f"Result: no errors\n"
-            f"Investigation complete.\n"
-            f"Verdict: no errors in window, nothing to investigate.",
-            False,
-            None,
-            None,
-        )
+        return (_no_errors_verdict(since), False, None, None)
     top = max(rows, key=lambda r: _as_int(r.get("errors")))
     service = str(top.get("service") or "(unknown)")
     count = _as_int(top.get("errors"))
@@ -140,7 +190,8 @@ def _node_start(since):
             f"Checked: errors_by_service (since={since})\n"
             f"Result: worst service is {service!r} at {count} errors "
             f"(~{rate:.1f}/min)\n"
-            f"Threshold: >{ERROR_RATE_INVESTIGATE_PER_MIN}/min to investigate\n"
+            + _baseline_line(since, service, count)
+            + f"Threshold: >{ERROR_RATE_INVESTIGATE_PER_MIN}/min to investigate\n"
             f"Investigation complete.\n"
             f"Verdict: error rate normal, no further checks.",
             False,
@@ -150,7 +201,8 @@ def _node_start(since):
     return (
         f"Checked: errors_by_service (since={since})\n"
         f"Result: {count} errors for service {service!r} (~{rate:.1f}/min)\n"
-        f"Threshold: >{ERROR_RATE_INVESTIGATE_PER_MIN}/min investigate\n"
+        + _baseline_line(since, service, count)
+        + f"Threshold: >{ERROR_RATE_INVESTIGATE_PER_MIN}/min investigate\n"
         f"Branch: investigate (elevated)",
         False,
         "check_log_spike",

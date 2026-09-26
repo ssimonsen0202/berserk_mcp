@@ -114,6 +114,173 @@ class RunJsonTest(unittest.TestCase):
         self.assertIn("--json", err)
 
 
+class FreshnessAndBaselineTest(unittest.TestCase):
+    """Review 2026-09-26 (docs/mcp-guidance-review-2026-09-26.md), P2: an empty
+    errors result is also what a silent source produces, so the start node
+    checks telemetry is arriving before a "no errors" verdict. It also
+    reports the previous window's rate, as context only (user decision:
+    branching stays on the SRE primer's fixed threshold)."""
+
+    def setUp(self):
+        self.calls = []
+        inv.configure(
+            bzrk_search=self._search,
+            since_hours=lambda s: {"1h ago": 1.0, "now": 0.0}.get(s, 2.0),
+            q_errors="Q_ERRORS",
+            q_soc_log_spike=_fixed("Q_SPIKE"),
+            q_trace_find_errors=_fixed("Q_TRACE"),
+            q_services="Q_SERVICES",
+        )
+        self.responses = {}
+
+    def _search(self, kql, since):
+        self.calls.append((kql, since))
+        return self.responses.get((kql, since), self.responses.get(kql))
+
+    def services(self, rows):
+        self.responses["Q_SERVICES"] = (bzrk_json_table(["service", "total", "logs", "metrics"], rows), False)
+
+    def test_no_errors_with_telemetry_arriving_is_healthy(self):
+        self.responses["Q_ERRORS"] = ("(no rows)", False)
+        self.services([["checkout", 900, 800, 100], ["auth", 100, 60, 40]])
+        text, is_error, next_node, _ = inv.run_error_rate_node("start", "1h ago", None)
+        self.assertFalse(is_error)
+        self.assertIsNone(next_node)
+        self.assertIn("2 services sent 860 log events", text)
+        self.assertIn("while logs are arriving", text)
+
+    def test_metrics_only_is_not_evidence_that_logs_arrive(self):
+        self.responses["Q_ERRORS"] = ("(no rows)", False)
+        self.services([["node", 500, 0, 500], ["idle", 0, 0, 0]])
+        text, _, _, _ = inv.run_error_rate_node("start", "1h ago", None)
+        self.assertIn("silence, not health", text)
+        self.assertNotIn("nothing to investigate", text)
+
+    def test_without_a_services_query_the_verdict_does_not_claim_health(self):
+        inv.configure(
+            bzrk_search=self._search,
+            since_hours=lambda s: 1.0,
+            q_errors="Q_ERRORS",
+            q_soc_log_spike=_fixed("Q_SPIKE"),
+            q_trace_find_errors=_fixed("Q_TRACE"),
+        )
+        self.responses["Q_ERRORS"] = ("(no rows)", False)
+        text, _, _, _ = inv.run_error_rate_node("start", "1h ago", None)
+        self.assertIn("was not checked", text)
+        self.assertNotIn("nothing to investigate", text)
+
+    def test_no_directive_inside_the_fenced_verdict(self):
+        # Output is fenced as untrusted data at dispatch; a directive there
+        # cannot be followed, so the verdict states facts only.
+        self.responses["Q_ERRORS"] = ("(no rows)", False)
+        self.responses["Q_SERVICES"] = ("(no rows)", False)
+        text, _, _, _ = inv.run_error_rate_node("start", "1h ago", None)
+        self.assertNotIn("Check ", text)
+
+    def test_no_errors_and_no_telemetry_is_silence_not_health(self):
+        self.responses["Q_ERRORS"] = ("(no rows)", False)
+        self.responses["Q_SERVICES"] = ("(no rows)", False)
+        text, is_error, _, _ = inv.run_error_rate_node("start", "1h ago", None)
+        self.assertFalse(is_error)
+        self.assertIn("silence, not health", text)
+        self.assertNotIn("nothing to investigate", text)
+
+    def test_failed_freshness_check_never_claims_health(self):
+        self.responses["Q_ERRORS"] = ("(no rows)", False)
+        self.responses["Q_SERVICES"] = ("bzrk timed out", True)
+        text, _, _, _ = inv.run_error_rate_node("start", "1h ago", None)
+        self.assertIn("could not be checked", text)
+        self.assertNotIn("nothing to investigate", text)
+        self.assertNotIn("do not", text.lower())
+
+    def test_baseline_is_reported_from_the_doubled_window(self):
+        # 700 now; 1000 over the doubled window, so 300 in the previous hour.
+        self.responses[("Q_ERRORS", "1h ago")] = (bzrk_json_table(["service", "errors"], [["checkout", 700]]), False)
+        self.responses[("Q_ERRORS", "7200s ago")] = (
+            bzrk_json_table(["service", "errors"], [["checkout", 1000]]),
+            False,
+        )
+        text, _, next_node, _ = inv.run_error_rate_node("start", "1h ago", None)
+        self.assertIn("Previous window of the same length: 300 errors (~5.0/min)", text)
+        self.assertIn(("Q_ERRORS", "7200s ago"), self.calls)
+        self.assertEqual(next_node, "check_log_spike")
+
+    def test_baseline_never_changes_the_branch(self):
+        # Steady and noisy: the same rate before and now still branches on the threshold.
+        self.responses[("Q_ERRORS", "1h ago")] = (bzrk_json_table(["service", "errors"], [["checkout", 700]]), False)
+        self.responses[("Q_ERRORS", "7200s ago")] = (
+            bzrk_json_table(["service", "errors"], [["checkout", 1400]]),
+            False,
+        )
+        _, _, next_node, _ = inv.run_error_rate_node("start", "1h ago", None)
+        self.assertEqual(next_node, "check_log_spike")
+        # A tenfold spike below the threshold is reported, not escalated.
+        self.responses[("Q_ERRORS", "1h ago")] = (bzrk_json_table(["service", "errors"], [["checkout", 100]]), False)
+        self.responses[("Q_ERRORS", "7200s ago")] = (bzrk_json_table(["service", "errors"], [["checkout", 110]]), False)
+        text, _, next_node, _ = inv.run_error_rate_node("start", "1h ago", None)
+        self.assertIsNone(next_node)
+        self.assertIn("Previous window of the same length: 10 errors", text)
+
+    def test_sub_minute_window_doubles_exactly(self):
+        inv.configure(
+            bzrk_search=self._search,
+            since_hours=lambda s: 15 / 3600.0,
+            q_errors="Q_ERRORS",
+            q_soc_log_spike=_fixed("Q_SPIKE"),
+            q_trace_find_errors=_fixed("Q_TRACE"),
+            q_services="Q_SERVICES",
+        )
+        self.responses["Q_ERRORS"] = (bzrk_json_table(["service", "errors"], [["checkout", 1]]), False)
+        inv.run_error_rate_node("start", "15s ago", None)
+        self.assertIn(("Q_ERRORS", "30s ago"), self.calls)
+
+    def test_counts_that_moved_between_queries_are_indeterminate(self):
+        self.responses[("Q_ERRORS", "1h ago")] = (bzrk_json_table(["service", "errors"], [["checkout", 700]]), False)
+        self.responses[("Q_ERRORS", "7200s ago")] = (bzrk_json_table(["service", "errors"], [["checkout", 650]]), False)
+        text, _, _, _ = inv.run_error_rate_node("start", "1h ago", None)
+        self.assertIn("Previous window: indeterminate", text)
+
+    def test_oversized_doubled_window_is_reported_not_queried(self):
+        inv.configure(
+            bzrk_search=self._search,
+            since_hours=lambda s: 10.0**30,
+            q_errors="Q_ERRORS",
+            q_soc_log_spike=_fixed("Q_SPIKE"),
+            q_trace_find_errors=_fixed("Q_TRACE"),
+            q_services="Q_SERVICES",
+        )
+        self.responses["Q_ERRORS"] = (bzrk_json_table(["service", "errors"], [["checkout", 1]]), False)
+        text, _, _, _ = inv.run_error_rate_node("start", "huge", None)
+        self.assertIn("not computed (window too large)", text)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_failed_baseline_query_does_not_halt(self):
+        self.responses[("Q_ERRORS", "1h ago")] = (bzrk_json_table(["service", "errors"], [["checkout", 700]]), False)
+        self.responses[("Q_ERRORS", "7200s ago")] = ("bzrk timed out", True)
+        text, is_error, next_node, _ = inv.run_error_rate_node("start", "1h ago", None)
+        self.assertFalse(is_error)
+        self.assertEqual(next_node, "check_log_spike")
+        self.assertIn("Previous window: unavailable", text)
+
+    def test_berserk_mcp_wires_the_services_query(self):
+        # Fresh interpreter: setUp above reconfigures the shared module.
+        import os
+        import subprocess
+        import tempfile
+
+        home = tempfile.mkdtemp()
+        env = dict(os.environ, HOME=home, USERPROFILE=home)
+        code = "import berserk_mcp as bm, investigation as inv; print(inv._q_services == bm.Q_SERVICES)"
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(Path(__file__).resolve().parent.parent),
+        )
+        self.assertEqual(result.stdout.strip().splitlines()[-1], "True", result.stderr[-500:])
+
+
 class StartNodeTest(unittest.TestCase):
     def setUp(self):
         inv.configure(
