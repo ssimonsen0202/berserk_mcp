@@ -42,10 +42,16 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.34.0**. This is a bullet-point overview, most recent
+Current version: **1.34.1**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.34.1** (2026-09-26) — The HTTP transport now reads the body of a
+  refused request before it replies. Windows resets a connection closed with
+  unread data, so clients saw "connection aborted" instead of the 403, 404,
+  415 or 429 status. The read stops at a fixed two-second deadline, so a slow
+  unauthorised client cannot hold a server thread. See
+  [details](docs/releases/v1.34.1.md).
 - **v1.34.0** (2026-09-26) — Optional egress policy for sovereign or
   air-gapped deployments, ported and reworked from the unmerged
   `feat/local-only-egress-hardening` branch. `BERSERK_LOCAL_ONLY=1` refuses the

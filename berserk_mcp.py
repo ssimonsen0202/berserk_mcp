@@ -68,7 +68,7 @@ import hmac
 import ipaddress
 import unicodedata
 from urllib.parse import urlsplit
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, UTC
 from pathlib import Path
 
@@ -88,7 +88,7 @@ import schema_registry
 import secret_scan
 import tool_discovery
 
-__version__ = "1.34.0"
+__version__ = "1.34.1"
 
 
 def log(msg):
@@ -4841,6 +4841,47 @@ def _http_request_allowed(handler, config):
     return True, 200, "ok"
 
 
+_REFUSED_BODY_DRAIN_TIMEOUT = 2.0
+
+
+def _discard_request_body(handler, cap):
+    """Read and drop a refused request's body, up to `cap` bytes, before
+    replying. Closing a socket with unread data makes Windows send a TCP reset,
+    so the client could see "connection aborted" instead of the error status.
+    The request is not yet authorised, so the drain stops at an absolute
+    deadline: a client that trickles bytes cannot hold the handler thread."""
+    try:
+        remaining = int(handler.headers.get("Content-Length", "0"))
+    except ValueError:
+        return
+    if not 0 < remaining <= cap:
+        return
+    sock = handler.connection
+    previous = sock.gettimeout()
+    deadline = time.monotonic() + _REFUSED_BODY_DRAIN_TIMEOUT
+    try:
+        while remaining > 0:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            sock.settimeout(left)
+            chunk = handler.rfile.read1(min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+    except OSError:
+        pass
+    finally:
+        with suppress(OSError):
+            sock.settimeout(previous)
+
+
+def _http_refuse(handler, config, status, message):
+    """Send an error for a request whose body was never read."""
+    _discard_request_body(handler, config["max_request_bytes"])
+    _http_error(handler, status, message)
+
+
 def _make_http_handler(config):
     class BerserkMcpHttpHandler(BaseHTTPRequestHandler):
         server_version = "berserk-mcp"
@@ -4866,15 +4907,15 @@ def _make_http_handler(config):
 
         def do_POST(self):
             if self.path != "/mcp":
-                _http_error(self, 404, "not found")
+                _http_refuse(self, config, 404, "not found")
                 return
             ok, status, message = _http_request_allowed(self, config)
             if not ok:
-                _http_error(self, status, message)
+                _http_refuse(self, config, status, message)
                 return
             ctype = self.headers.get("Content-Type", "")
             if "application/json" not in ctype.lower():
-                _http_error(self, 415, "content-type must be application/json")
+                _http_refuse(self, config, 415, "content-type must be application/json")
                 return
             try:
                 length = int(self.headers.get("Content-Length", ""))
@@ -4885,7 +4926,7 @@ def _make_http_handler(config):
                 _http_error(self, 413, "request too large")
                 return
             if not config["semaphore"].acquire(blocking=False):
-                _http_error(self, 429, "too many concurrent requests")
+                _http_refuse(self, config, 429, "too many concurrent requests")
                 return
             try:
                 raw = self.rfile.read(length)

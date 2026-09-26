@@ -6,16 +6,20 @@ generated KQL, default time windows, injection guards, JSON-RPC shape, and the
 learning loop — without a real backend.
 """
 
+import io
 import os
 import re
 import sys
 import json
+import socket
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -2298,6 +2302,90 @@ class BerserkMcpTest(unittest.TestCase):
                     status = exc.code
                     exc.close()
                 self.assertEqual(status, expected)
+
+    def test_refused_request_body_is_drained_before_the_reply(self):
+        # Windows resets a socket closed with unread data, so an undrained
+        # refusal reached the client as ConnectionAbortedError, not 403.
+        class Handler:
+            def __init__(self, body, length):
+                self.headers = {"Content-Length": length}
+                self.rfile = io.BufferedReader(io.BytesIO(body))
+                self.connection = mock.Mock()
+                self.connection.gettimeout.return_value = None
+
+        drained = Handler(b"x" * 100, "100")
+        bm._discard_request_body(drained, 1024)
+        self.assertEqual(drained.rfile.read(), b"")
+        # The socket timeout is restored afterwards.
+        self.assertIsNone(drained.connection.settimeout.call_args_list[-1].args[0])
+        for length in ("2000", "-1", "junk", "0"):
+            with self.subTest(length=length):
+                untouched = Handler(b"x" * 100, length)
+                bm._discard_request_body(untouched, 1024)
+                self.assertEqual(len(untouched.rfile.read()), 100)
+
+    def _raw_refused_post(self, port, headers, parts, gap):
+        """Send a POST that the server refuses, body in `parts` spaced `gap`
+        seconds apart; return (reply bytes, seconds from headers to reply)."""
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+            sock.sendall(headers)
+            started = time.monotonic()
+            reply = b""
+            for part in parts:
+                sock.settimeout(gap)
+                try:
+                    reply = sock.recv(64)
+                except TimeoutError:
+                    pass
+                if reply:
+                    break
+                sock.sendall(part)
+            if not reply:
+                sock.settimeout(10)
+                reply = sock.recv(64)
+            return reply, time.monotonic() - started
+
+    def _refused_headers(self, length):
+        return (
+            b"POST /mcp HTTP/1.1\r\nHost: evil.example.com\r\n"
+            b"Content-Type: application/json\r\nContent-Length: " + str(length).encode() + b"\r\n\r\n"
+        )
+
+    def test_refused_request_reply_waits_for_the_body(self):
+        # The server reads the whole promised body before it answers, on every
+        # refusal whose length is known and bounded.
+        base = self._serve_http_for_test(self._http_config())
+        port = int(base.rsplit(":", 1)[1])
+        for status, headers in (
+            (b"403", self._refused_headers(20)),
+            (b"404", self._refused_headers(20).replace(b"/mcp", b"/nope").replace(b"evil.example.com", b"127.0.0.1")),
+            (
+                b"415",
+                self._refused_headers(20)
+                .replace(b"application/json", b"text/plain")
+                .replace(b"evil.example.com", b"127.0.0.1"),
+            ),
+        ):
+            with self.subTest(status=status), socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+                sock.sendall(headers + b"x" * 10)
+                sock.settimeout(0.3)
+                with self.assertRaises(TimeoutError):
+                    sock.recv(64)
+                sock.sendall(b"x" * 10)
+                sock.settimeout(5)
+                self.assertTrue(sock.recv(64).startswith(b"HTTP/1.0 " + status))
+
+    def test_refused_request_drain_has_an_absolute_deadline(self):
+        # An unauthorised client that stalls, or trickles bytes, must not hold
+        # the handler thread past the drain deadline.
+        base = self._serve_http_for_test(self._http_config())
+        port = int(base.rsplit(":", 1)[1])
+        with mock.patch.object(bm, "_REFUSED_BODY_DRAIN_TIMEOUT", 0.5):
+            for name, parts in (("stalled", []), ("trickle", [b"x"] * 40)):
+                with self.subTest(name):
+                    reply, elapsed = self._raw_refused_post(port, self._refused_headers(50), parts, 0.1)
+                    self.assertTrue(reply.startswith(b"HTTP/1.0 403"), reply)
+                    self.assertLess(elapsed, 2.5)
 
     def test_issue_84_host_header_parsing_is_strict(self):
         for value, expected in (

@@ -142,5 +142,11 @@
     "reviewed": "2026-09-26",
     "by": "claude + codex review",
     "note": "resolve once per connection; loopback names must resolve to loopback; under the policy, hostnames not approved by name keep only addresses inside the allowed CIDRs, else EgressRefused. v1.34.0."
+  },
+  "berserk_mcp:_discard_request_body": {
+    "fingerprint": "72caf4c1b3f97cce",
+    "reviewed": "2026-09-26",
+    "by": "codex",
+    "note": "drains a refused, not-yet-authorised request body (Content-Length <= max_request_bytes) so Windows clients get the status, not a TCP reset. Absolute wall-clock deadline (_REFUSED_BODY_DRAIN_TIMEOUT), not an idle timeout, so a trickling client cannot hold the handler thread; previous socket timeout restored. v1.34.1, two Codex review passes."
   }
 }
