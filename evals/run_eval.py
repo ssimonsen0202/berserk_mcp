@@ -529,6 +529,25 @@ def aggregate_usage(rows):
 
 
 # ---------- scoring ----------
+def applicable(case, served):
+    """True when the server under test serves the tool the case expects."""
+    return case["expect_tool"] in served
+
+
+def split_applicable(cases, tools):
+    """(cases to score, ids not applicable) for the served tool list. Both
+    run modes use this, so a lane run never scores a case for a tool the
+    lane cannot see as a routing miss."""
+    served = {t["name"] for t in tools}
+    return [c for c in cases if applicable(c, served)], [c["id"] for c in cases if not applicable(c, served)]
+
+
+def _print_not_applicable(cases, not_applicable):
+    for case in cases:
+        if case["id"] in not_applicable:
+            print(f"{case['id']:<22}{case['expect_tool']:<20}{'(not served)':<20}{'n/a':<6}{'n/a':<5}")
+
+
 def score_case(case, tool_name, args):
     tool_ok = tool_name == case["expect_tool"]
     arg_ok = True
@@ -639,6 +658,11 @@ def _run_tier_policy(args_ns, cases):
 
     rows, tool_hits, total = [], 0, 0
     small_handled = 0
+    all_cases = cases
+    cases, not_applicable = split_applicable(cases, tools)
+    _print_not_applicable(all_cases, not_applicable)
+    if not cases:
+        sys.exit("no applicable cases for this lane/tier")
 
     for case in cases:
         # ── small tier ────────────────────────────────────────────────────────
@@ -685,6 +709,8 @@ def _run_tier_policy(args_ns, cases):
         )
 
     print("-" * 82)
+    if not_applicable:
+        print(f"not applicable          : {len(not_applicable)} case(s) expect a tool this lane/tier does not serve")
     print(f"tool-selection accuracy : {tool_hits}/{total} = {100 * tool_hits / total:.0f}%")
     print(f"small-tier handled      : {small_handled}/{total} = {100 * small_handled / total:.0f}%")
     print(f"deep-tier escalations   : {total - small_handled}/{total}")
@@ -692,6 +718,7 @@ def _run_tier_policy(args_ns, cases):
     safe = label.replace(":", "_").replace("/", "_").replace("→", "-")
     report = {
         "mode": "tier-policy",
+        "not_applicable": not_applicable,
         "small_model": args_ns.small_model,
         "small_backend": args_ns.small_backend,
         "deep_model": args_ns.deep_model,
@@ -867,6 +894,13 @@ def main():
     is_anthropic = args_ns.backend == "anthropic"
     rows, tool_hits, arg_hits, lat = [], 0, 0, []
     total = 0
+    # A case whose expected tool this server does not serve (hidden by
+    # BERSERK_MCP_ROLE / BERSERK_MCP_TIER) cannot be answered in this lane:
+    # count it as not applicable rather than as a routing miss, so a lane
+    # run measures that lane. Role `all` serves every tool and skips none.
+    all_cases = cases
+    cases, not_applicable = split_applicable(cases, tools)
+    _print_not_applicable(all_cases, not_applicable)
     for case in cases:
         for _ in range(args_ns.repeats):
             if total > 0 and args_ns.call_delay_ms > 0:
@@ -909,6 +943,10 @@ def main():
 
     agg = aggregate_usage(rows)
     print("-" * 80)
+    if not_applicable:
+        print(f"not applicable          : {len(not_applicable)} case(s) expect a tool this lane/tier does not serve")
+    if total == 0:
+        sys.exit("no applicable cases for this lane/tier")
     print(f"tool-selection accuracy : {tool_hits}/{total} = {100 * tool_hits / total:.0f}%")
     print(f"argument accuracy       : {arg_hits}/{total} = {100 * arg_hits / total:.0f}%")
     if any(lat):
@@ -925,6 +963,7 @@ def main():
     report = {
         "backend": args_ns.backend,
         "tool_schema_version": tool_schema_version(tools),
+        "not_applicable": not_applicable,
         "model": args_ns.model,
         "repeats": args_ns.repeats,
         "tool_accuracy": tool_hits / total,
@@ -946,6 +985,7 @@ def main():
         arg_accuracy=arg_hits / total,
         agg=agg,
         lat=lat,
+        extra={"not_applicable": len(not_applicable)},
     )
 
 

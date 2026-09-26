@@ -1,0 +1,21 @@
+{"id": "conf_cpu_container", "prompt": "Which docker container is using the most CPU right now?", "expect_tool": "top_cpu"}
+{"id": "conf_cpu_box", "prompt": "Is the server's CPU running hot?", "expect_tool": "host_cpu"}
+{"id": "conf_mem_container", "prompt": "Which container is eating the most memory?", "expect_tool": "top_memory"}
+{"id": "conf_mem_box", "prompt": "How much memory is the box using?", "expect_tool": "host_memory"}
+{"id": "conf_error_counts", "prompt": "How many errors has each service logged in the last hour?", "expect_tool": "errors_by_service"}
+{"id": "conf_error_lines", "prompt": "Show me the actual error log lines from nginx.", "expect_tool": "logs_for_service", "expect_args": {"service": "nginx"}}
+{"id": "conf_error_rate", "prompt": "Is the error rate climbing, and which service is burning error budget?", "expect_tool": "sre_error_rate"}
+{"id": "conf_error_signature", "prompt": "Which error message is dominating right now?", "expect_tool": "sre_top_error_messages"}
+{"id": "conf_hosts", "prompt": "Which hosts are sending telemetry?", "expect_tool": "list_hosts"}
+{"id": "conf_containers", "prompt": "Which containers are sending metrics?", "expect_tool": "list_containers"}
+{"id": "conf_container_host", "prompt": "Which host is the checkout container running on?", "expect_tool": "container_hosts"}
+{"id": "conf_trace_slow", "prompt": "Find the slowest requests in the last hour.", "expect_tool": "trace_find_slow"}
+{"id": "conf_trace_failed", "prompt": "Which requests failed in the last hour?", "expect_tool": "trace_find_errors"}
+{"id": "conf_volume_raw", "prompt": "Show per-minute log volume for each service so I can see which source is bursting.", "expect_tool": "soc_log_spike"}
+{"id": "conf_volume_stats", "prompt": "Is anything behaving statistically abnormally in event volume?", "expect_tool": "detect_anomalies"}
+{"id": "conf_logs_recent", "prompt": "Show the recent logs from postgres.", "expect_tool": "logs_for_service", "expect_args": {"service": "postgres"}}
+{"id": "conf_timeline", "prompt": "Reconstruct the incident timeline for postgres.", "expect_tool": "soc_timeline", "expect_args": {"service": "postgres"}}
+{"id": "conf_workflow_hotspots", "prompt": "Where are the error hotspots across my Claude Code sessions?", "expect_tool": "claude_workflow_insights"}
+{"id": "conf_token_burn", "prompt": "How many tokens did Claude Code burn per tool and file target in the last 6 hours, and do the high-burn targets show loop signals?", "expect_tool": "claude_token_burn"}
+{"id": "conf_cost_daily", "prompt": "Give me the daily Claude Code cost trend for the last 7 days.", "expect_tool": "claude_cost_report"}
+{"id": "conf_spend_team", "prompt": "Show enterprise Claude spend grouped by team using the pricing catalog.", "expect_tool": "claude_spend_overview"}
