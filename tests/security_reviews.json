@@ -18,10 +18,10 @@
     "note": "BZRK_BIN resolved once; Windows CWD executable planting refused. Fingerprint recorded 2026-09-23; no dedicated review yet."
   },
   "berserk_mcp:_dispatch_tools_call": {
-    "fingerprint": "94d8322e7b3ed3e1",
-    "reviewed": "2026-09-22",
-    "by": "Codex review",
-    "note": "role-visibility gate (F-008) and modern preflight before handle_call; output filter applied. 2026-09-22: two passes over b648346..d545097 found it equivalent to the pre-refactor tools/call branch"
+    "fingerprint": "7e15402554c1675b",
+    "reviewed": "2026-09-26",
+    "by": "claude + codex review",
+    "note": "visibility first (hidden tool answers 'unknown tool'), then _unknown_argument_error rejects undeclared argument names before preflight, task creation and handle_call. Review 2026-09-26 P2 (docs/mcp-guidance-review-2026-09-26.md); reviewed by Codex, one P3 doc fix, no P1/P2."
   },
   "berserk_mcp:_fence_untrusted": {
     "fingerprint": "5ea84c0a0dc8187e",
@@ -100,5 +100,11 @@
     "reviewed": "2026-09-25",
     "by": "claude + codex review (2 passes)",
     "note": "constant auth message when the marker is anywhere in stderr; fails closed when a stream was not fully read. Fix for Codex Security scan 77004e6e (2026-09-25); fixes reviewed by Codex in two passes, second pass clean."
+  },
+  "berserk_mcp:_unknown_argument_error": {
+    "fingerprint": "ebbc443283d47be0",
+    "reviewed": "2026-09-26",
+    "by": "claude + codex review",
+    "note": "rejects argument names the schema does not declare (protocol keys as_task/allow_expensive allowed); echoed names bounded to 5 x 64 chars. Review 2026-09-26 P2 (docs/mcp-guidance-review-2026-09-26.md); reviewed by Codex, one P3 doc fix, no P1/P2."
   }
 }

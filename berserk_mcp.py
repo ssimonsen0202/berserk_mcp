@@ -4376,6 +4376,35 @@ def _dispatch_tools_list(params, id_, is_notification, mode):
     return _jsonrpc_result(id_, _tool_list_result(mode))
 
 
+# Argument names every tool accepts although no inputSchema declares them:
+# protocol-level keys read before handle_call (modern task creation, and the
+# cost-approval retry after an input_required preflight).
+_PROTOCOL_ARGUMENTS = frozenset({"as_task", "allow_expensive"})
+_MAX_REPORTED_ARGUMENT_NAMES = 5
+_MAX_REPORTED_ARGUMENT_CHARS = 64
+
+
+def _unknown_argument_error(tool, arguments):
+    """Error text when `arguments` holds a name the tool's schema does not
+    declare, else None.
+
+    Review 2026-09-26 P2: a misspelled optional filter (`svc` for `service`)
+    used to be ignored, so the call ran unfiltered and the answer looked
+    filtered. Rejecting the name and listing the valid ones lets the model
+    correct itself. Caller-supplied names are bounded before being echoed.
+    """
+    declared = set(tool.get("inputSchema", {}).get("properties", {}))
+    unknown = sorted(name for name in arguments if name not in declared and name not in _PROTOCOL_ARGUMENTS)
+    if not unknown:
+        return None
+    shown = [repr(name[:_MAX_REPORTED_ARGUMENT_CHARS]) for name in unknown[:_MAX_REPORTED_ARGUMENT_NAMES]]
+    if len(unknown) > _MAX_REPORTED_ARGUMENT_NAMES:
+        shown.append(f"and {len(unknown) - _MAX_REPORTED_ARGUMENT_NAMES} more")
+    valid = ", ".join(sorted(declared)) or "(none)"
+    label = "argument" if len(unknown) == 1 else "arguments"
+    return f"unknown {label} {', '.join(shown)} for {tool['name']}; valid: {valid}"
+
+
 def _dispatch_tools_call(params, id_, mode):
     """Handle tools/call (never a notification). Returns response."""
     if mode == PROTOCOL_MODE_MODERN and not _valid_modern_meta(params):
@@ -4391,8 +4420,15 @@ def _dispatch_tools_call(params, id_, mode):
     matched_tool = next((t for t in TOOLS + MGMT_TOOLS if t["name"] == name), None)
     if matched_tool is None and name.startswith("saved__"):
         matched_tool = next((t for t in _saved_query_tools() if t["name"] == name), None)
+    # Visibility first: a hidden tool must answer "unknown tool" whatever its
+    # arguments, or the argument error below would reveal its schema.
+    argument_error = None
+    if matched_tool is not None and tool_visible(matched_tool):
+        argument_error = _unknown_argument_error(matched_tool, arguments)
     if matched_tool is not None and not tool_visible(matched_tool):
         text, is_err = "unknown tool: " + name, True
+    elif argument_error is not None:
+        text, is_err = argument_error, True
     else:
         if mode == PROTOCOL_MODE_MODERN:
             input_required = _modern_preflight_input_required(name, arguments)

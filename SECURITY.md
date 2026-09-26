@@ -11,6 +11,11 @@ impact, reproduction steps, and any relevant configuration.
 berserk-mcp treats MCP clients, telemetry values, provider responses, configured
 HTTP endpoints, and operator-supplied filesystem paths as separate boundaries.
 The operator controls environment variables, credentials, and deployment ACLs.
+`tools/call` rejects any argument name the tool's input schema does not declare,
+and lists the valid names, so a misspelled filter cannot silently widen a query.
+The only exceptions are the protocol-level `as_task` and `allow_expensive`.
+A hidden tool answers `unknown tool` before its arguments are checked, so the
+error never reveals its schema.
 The Berserk cluster and `bzrk` authentication configuration remain outside this
 project.
 
