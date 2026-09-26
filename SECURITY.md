@@ -90,7 +90,12 @@ checks can be enabled separately.
 
 Parser generation sends bounded, redacted samples and allowlisted structural
 keys to providers. Generated KQL is validated, bounded, execution-verified, and
-cannot silently replace a human query. Provider errors expose only their status,
+cannot silently replace a human query. A generated query is stored as pending
+and the small tier cannot see or run it until an operator approves it with
+`berserk-mcp --approve-generated <name>`; no tool can approve one. A regenerated
+query, or an older generated entry without a status, counts as pending. The
+gate covers everything the parser-factory pipeline writes; a deep-tier agent's
+`save_query` stays trusted, as that tier may author any query. Provider errors expose only their status,
 not response bodies or request credentials.
 
 AI FinOps output always applies secret and PII redaction. Stable structural IDs

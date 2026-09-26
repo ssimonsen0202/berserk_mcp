@@ -737,9 +737,33 @@ def tool_visible(tool):
     return not (ACTIVE_TIER_RESOLVED == TIER_SMALL and tool["name"] in _DEEP_TIER_TOOLS)
 
 
+# A query the parser factory generated from telemetry (an LLM wrote its KQL,
+# name and description) waits for an operator's approval before the small
+# tier can see or run it (review 2026-09-26, P2). Approval is CLI-only
+# (--approve-generated): no tool approves a pipeline-written query. A
+# deep-tier agent's save_query stays trusted, as that tier may author any
+# query. An entry with no status, e.g. from an older store, counts as pending.
+GENERATED_PENDING = "pending"
+GENERATED_APPROVED = "approved"
+
+
+def is_generated(item):
+    return item.get("origin") == "generated" or "generated_by" in item
+
+
+def awaiting_approval(item):
+    return is_generated(item) and item.get("status") != GENERATED_APPROVED
+
+
 def item_visible(item):
+    """The single visibility predicate for saved queries: tools/list
+    projection, list_saved, run_saved and saved__* dispatch all use it."""
     roles = item.get("roles")
-    return not roles or ACTIVE_ROLE == "all" or ACTIVE_ROLE in roles
+    # A non-list `roles` (a corrupt or hand-edited store) hides the entry
+    # rather than crashing the membership test.
+    if roles and ACTIVE_ROLE != "all" and (not isinstance(roles, (list, tuple)) or ACTIVE_ROLE not in roles):
+        return False
+    return not (ACTIVE_TIER_RESOLVED == TIER_SMALL and awaiting_approval(item))
 
 
 def normalize_roles(value):
@@ -1962,6 +1986,22 @@ def _saved_query_tools():
     return tools
 
 
+def approve_generated_query(name):
+    """Mark a generated query approved (operator CLI). Returns (entry, error)."""
+    nm = sanitize_name(name)
+    with _FileLock(LEARNED_PATH):
+        items = load_learned()
+        match = next((it for it in items if it["name"] == nm), None)
+        if match is None:
+            return None, f"no saved query named {nm!r}"
+        if not is_generated(match):
+            return None, f"{nm!r} is not a generated query; only generated queries need approval"
+        match["status"] = GENERATED_APPROVED
+        match["approved_at"] = now_iso()
+        save_learned(items)
+    return match, None
+
+
 def persist_learned_query(entry, action_source):
     """Storage core shared by the save_query tool and the parser-factory
     pipeline: dedupe by name, append, cap at 500, and log the amendment.
@@ -1986,7 +2026,10 @@ def persist_learned_query(entry, action_source):
         existing = next((it for it in all_items if it["name"] == nm), None)
         is_amendment = existing is not None
         if action_source == "generated":
-            entry = {**entry, "origin": "generated"}
+            # Every generated write starts pending, including a regenerated
+            # query replacing an approved one: new KQL needs a new approval.
+            entry = {**entry, "origin": "generated", "status": GENERATED_PENDING}
+            entry.pop("approved_at", None)
             by_name = {it["name"]: it for it in all_items}
 
             def _is_free_or_generated(candidate):
@@ -2756,6 +2799,11 @@ def _handle_discovery(name, arguments):
         if not items:
             return "No discovery jobs queued.", False
         lines = []
+        saved_by_name = {
+            entry["name"]: entry
+            for entry in load_learned()
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+        }
         for it in items:
             lines.append(
                 f"- {it.get('source', '?')} [{it.get('kind', '?')}] status={it.get('status', '?')} "
@@ -2764,9 +2812,21 @@ def _handle_discovery(name, arguments):
             report = it.get("report")
             if report:
                 if "queries_saved" in report:
-                    lines.append(
-                        f"  -> {report.get('provider', '?')}: saved {', '.join(report.get('queries_saved', []))}"
-                    )
+                    # Name only the queries this lane can run: a pending
+                    # generated query (or another role's) is just counted.
+                    saved = report.get("queries_saved", [])
+                    shown = [n for n in saved if n in saved_by_name and item_visible(saved_by_name[n])]
+                    line = f"  -> {report.get('provider', '?')}: saved {', '.join(shown) or 'none usable here'}"
+                    if len(saved) > len(shown):
+                        line += (
+                            f" ({len(saved) - len(shown)} not available here: pending operator "
+                            "approval, another role, or removed)"
+                        )
+                    lines.append(line)
+                elif ACTIVE_TIER_RESOLVED == TIER_SMALL:
+                    # A failure reason is pipeline output that can name a
+                    # pending query; the small tier cannot act on it anyway.
+                    lines.append("  -> not completed; details are shown at the deep tier")
                 else:
                     lines.append(f"  -> {report.get('reason', '')}")
         return "Discovery jobs:\n" + "\n".join(lines), False
@@ -2832,11 +2892,18 @@ def _handle_parser_core(name, arguments):
         lines = []
         for it in generated:
             gb = it.get("generated_by", {})
+            status = GENERATED_PENDING if awaiting_approval(it) else GENERATED_APPROVED
             lines.append(
                 f"- {it['name']}: {it.get('description', '')} "
-                f"[{gb.get('provider', '?')}/{gb.get('model', '?')} @ {gb.get('ts', '?')}]"
+                f"[{gb.get('provider', '?')}/{gb.get('model', '?')} @ {gb.get('ts', '?')}] "
+                f"status={status}"
             )
-        return "Generated queries:\n" + "\n".join(lines), False
+        return (
+            "Generated queries:\n"
+            + "\n".join(lines)
+            + "\nA pending query is hidden from the small tier until an operator runs "
+            "berserk-mcp --approve-generated <name>."
+        ), False
     return None
 
 
@@ -5342,6 +5409,41 @@ def _attach_fingerprints(record, model):
         print(f"fingerprint skipped for {model}: {exc}", file=sys.stderr)
 
 
+def _terminal_safe(value):
+    """Show LLM-authored text on an operator's terminal without letting it
+    emit control sequences (ANSI escapes could hide or forge the receipt)."""
+    return "".join(c if c.isprintable() else repr(c)[1:-1] for c in str(value))
+
+
+def _cli_approve_generated(name):
+    """--approve-generated: approve, print exactly what was approved, return the exit code."""
+    entry, error = approve_generated_query(name)
+    if error:
+        print(f"not approved: {_terminal_safe(error)}", file=sys.stderr)
+        return 2
+    generated_by = entry.get("generated_by") or {}
+    safe = _terminal_safe
+    print(f"approved {safe(repr(entry['name']))} at {safe(entry['approved_at'])}")
+    print(f"  description: {safe(entry.get('description', ''))}")
+    print(f"  since:       {safe(entry.get('since', ''))}")
+    print(
+        f"  generated:   {safe(generated_by.get('provider', '?'))}/{safe(generated_by.get('model', '?'))} "
+        f"@ {safe(generated_by.get('ts', '?'))}"
+    )
+    print(f"  kql:         {safe(entry.get('kql', ''))}")
+    return 0
+
+
+def _run_admin_command(ns):
+    """One-shot operator commands that exit without starting a server.
+    Returns an exit code, or None when none was requested."""
+    if ns.approve_generated:
+        return _cli_approve_generated(ns.approve_generated)
+    if ns.doctor:
+        return run_doctor(json_output=ns.json)
+    return None
+
+
 def main():
     import argparse
 
@@ -5400,9 +5502,15 @@ def main():
         "--doctor", action="store_true", help="run preflight readiness checks and exit (0 pass / 1 degraded / 2 broken)"
     )
     cli.add_argument("--json", action="store_true", help="(--doctor) emit the report as JSON instead of a table")
+    cli.add_argument(
+        "--approve-generated",
+        metavar="NAME",
+        help="approve a generated saved query so the small tier can use it; prints what was approved",
+    )
     ns = cli.parse_args()
-    if ns.doctor:
-        sys.exit(run_doctor(json_output=ns.json))
+    admin_exit = _run_admin_command(ns)
+    if admin_exit is not None:
+        sys.exit(admin_exit)
     if ns.import_business_data:
         if not ns.input:
             cli.error("--import-business-data requires --input")

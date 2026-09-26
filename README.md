@@ -898,6 +898,21 @@ source. Tries cheap/local providers first, has hard runaway fail-safes
 (per-run caps on both queuing and generation), and never lets a generated
 query silently overwrite a human-saved one.
 
+A generated query is stored as **pending**. The deep tier can see and review
+it (`review_generated` shows the status), but the small tier cannot see or run
+it until an operator approves it from a shell:
+
+```bash
+berserk-mcp --approve-generated <name>
+```
+
+The command prints the query it approved, with control characters shown as
+escapes. No tool can approve a query, and a regenerated query becomes pending
+again. The gate covers every query the parser-factory pipeline writes, whether a
+worker or an agent started it. A deep-tier agent's `save_query` is trusted, as
+before: that tier can author any query, and a query it saves is a
+human-origin entry.
+
 Tools: `detect_new_sources`, `generate_parser`, `run_discovery_worker`,
 `review_generated`. Full pipeline mapping, configuration reference,
 headless/cron mode, and safety details:

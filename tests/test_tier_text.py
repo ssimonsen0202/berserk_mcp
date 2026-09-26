@@ -43,7 +43,7 @@ def check(source, text):
 import os
 os.makedirs(os.path.dirname(bm.LEARNED_PATH), exist_ok=True)
 with open(bm.LEARNED_PATH, "w") as fh:
-    json.dump([{"name": "probe_saved", "kql": bm.TABLE + " | take 1", "since": "1h ago", "origin": "generated",
+    json.dump([{"name": "probe_saved", "kql": bm.TABLE + " | take 1", "since": "1h ago", "origin": "generated", "status": "approved",
                 "description": "Counts rows. Refine it with `search` or see soc_log_spike."}], fh)
 meta = {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
         "io.modelcontextprotocol/clientInfo": {"name": "t", "version": "1"},

@@ -64,15 +64,20 @@ haproxy_top_backends        – requests grouped by backend
 ```
 
 Each entry is stored with `generated_by: {provider, model, ts, job_source}`.
-Each is immediately runnable on the cheap lane via
-`run_saved name=haproxy_overview`.
+Each is stored as pending. Once an operator approves it with
+`berserk-mcp --approve-generated haproxy_overview`, it is runnable on the cheap
+lane via `run_saved name=haproxy_overview`.
 
-**Safety.** Generated KQL passes through the same `_KQL_PREFIX_RE` guard as
-human input. berserk-mcp saves a generated query only if it executes
+**Safety.** Generated KQL passes through the same execution boundary
+(`_kql_boundary.check`) as human input. berserk-mcp saves a generated query only if it executes
 successfully against Berserk. A generated query never silently overwrites a
 human-saved one; on a name collision, it saves as `<name>_gen` instead. Every
 generated entry carries `generated_by: {provider, model, ts, job_source}`,
-so `review_generated` can audit it before anyone trusts it in production. See
+so `review_generated` can audit it before anyone trusts it in production.
+Each generated entry is stored as `status: pending`: the small tier cannot see
+or run it until an operator runs `berserk-mcp --approve-generated <name>`,
+which prints the approved query. No tool can approve one, and a regenerated
+query becomes pending again. See
 [SECURITY.md](../SECURITY.md) for the full threat model, including the
 indirect-prompt-injection risk from log data fed into generation prompts.
 
