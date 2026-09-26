@@ -1,0 +1,12 @@
+{"id": "since_errors_2h", "prompt": "Which services logged the most errors in the last 2 hours?", "expect_tool": "errors_by_service", "expect_since_any": ["2h", "2 h", "120"], "expect_since_valid": true}
+{"id": "since_cpu_30m", "prompt": "Which containers used the most CPU over the past 30 minutes?", "expect_tool": "top_cpu", "expect_since_any": ["30m", "30 m", "30 min"], "expect_since_valid": true}
+{"id": "since_hostmem_45m", "prompt": "Show host memory usage for the last 45 minutes.", "expect_tool": "host_memory", "expect_since_any": ["45"], "expect_since_valid": true}
+{"id": "since_services_3d", "prompt": "List every service that reported telemetry in the last 3 days.", "expect_tool": "list_services", "expect_since_any": ["3d", "3 d", "72"], "expect_since_valid": true}
+{"id": "since_toperr_week", "prompt": "What were the most common error messages this past week?", "expect_tool": "sre_top_error_messages", "expect_since_any": ["7d", "7 d", "1w", "1 w", "week", "168"], "expect_since_valid": true}
+{"id": "since_spike_90m", "prompt": "Show per-minute log volume for each service over the last 90 minutes.", "expect_tool": "soc_log_spike", "expect_since_any": ["90"], "expect_since_valid": true}
+{"id": "since_highsev_10m", "prompt": "Any critical or fatal logs in the last 10 minutes?", "expect_tool": "soc_high_severity_logs", "expect_since_any": ["10m", "10 m", "10 min"], "expect_since_valid": true}
+{"id": "since_ingest_6h", "prompt": "Has Berserk ingest been healthy over the last 6 hours?", "expect_tool": "sre_ingest_health", "expect_since_any": ["6h", "6 h", "360"], "expect_since_valid": true}
+{"id": "since_hosts_2d", "prompt": "Which hosts have reported in the past 2 days?", "expect_tool": "list_hosts", "expect_since_any": ["2d", "2 d", "48"], "expect_since_valid": true}
+{"id": "since_sessions_12h", "prompt": "Show Claude Code sessions from the last 12 hours.", "expect_tool": "claude_sessions", "expect_since_any": ["12h", "12 h", "720"], "expect_since_valid": true}
+{"id": "since_slow_20m", "prompt": "What were the slowest requests in the last 20 minutes?", "expect_tool": "trace_find_slow", "expect_since_any": ["20"], "expect_since_valid": true}
+{"id": "since_repeated_2w", "prompt": "Which errors have kept repeating over the last two weeks?", "expect_tool": "soc_repeated_errors", "expect_since_any": ["2w", "2 w", "14d", "14 d", "336"], "expect_since_valid": true}

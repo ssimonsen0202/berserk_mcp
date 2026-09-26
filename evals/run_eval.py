@@ -539,7 +539,23 @@ def score_case(case, tool_name, args):
     since = str(args.get("since", "")).lower()
     if case.get("expect_since_any"):
         arg_ok = arg_ok and any(s in since for s in case["expect_since_any"])
+    if case.get("expect_since_valid"):
+        arg_ok = arg_ok and _server_accepts_since(args.get("since"))
     return tool_ok, arg_ok
+
+
+def _server_accepts_since(value):
+    """True when the server would accept `value` as `since`, judged by the
+    server's own normaliser and validator rather than a copy of them. The
+    advertised schema pattern is deliberately looser than the server (it
+    accepts any unit word), so this is what shows whether a model sends
+    values the server then rejects. A missing value fails: these cases name
+    a time window, so falling back to the tool's default is wrong."""
+    if value is None or not str(value).strip():
+        return False
+    import berserk_mcp as bm  # repo root is on sys.path (module top)
+
+    return bm.valid_since(bm._normalize_since(str(value)))
 
 
 def _make_tier_caller(backend, model, base_url, api_key, system, oa_tools, an_tools):
