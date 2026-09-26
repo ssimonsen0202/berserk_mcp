@@ -42,10 +42,19 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.29.1**. This is a bullet-point overview, most recent
+Current version: **1.30.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.30.0** (2026-09-26) — Security hardening and small-tier consistency.
+  User KQL cannot read other tables in any validation mode; the untrusted-data
+  fence decodes encoded tags; unknown tool arguments are rejected; generated
+  queries need `--approve-generated` before the small tier sees them;
+  small-tier text never names a hidden tool; the `since` schema is 84%
+  smaller (about 47% fewer input tokens measured); results carry evidence
+  fields; plaintext OpenRouter forwarding to a remote host needs
+  `--allow-plaintext-remote`; new fail-closed CI gates and eval case sets.
+  **Read the upgrade notes** in [`docs/releases/v1.30.0.md`](docs/releases/v1.30.0.md).
 - **v1.29.1** (2026-09-20) — Security and correctness hardening from Codex
   review of 8 oversized functions: reject non-finite floats in FinOps helpers
   (OverflowError crash), validate KQL table name at configure time, cap ReDoS
@@ -529,7 +538,7 @@ logs a warning naming it.
 | `discover_schema` | Field metadata (type, cardinality, representative values) via Berserk's native `fieldstats`, plus a structural presence sample, to learn an unknown source without exporting raw telemetry (v1.17.0; previously `bag_keys`-based). |
 | `validate_kql` | Validate custom KQL before saving or running it. Static mode checks syntax shape, schema fields, bounds, and cost-risk without executing the query; live mode is opt-in and returns a runtime receipt when enabled. |
 | `bzrk_query_perf` | Berserk query engine latency percentiles (p50/p95/p99 in µs). |
-| `search` | Run arbitrary KQL (escape hatch). Static validation runs before execution in the default `warn` mode. Save the result with `save_query` once it works. Fields are nested `resource`/`attributes`, not flat columns — for example `resource['service.name']`, not `service_name`. Call `discover_schema` first if you don't know the field names for a source. |
+| `search` | Run custom KQL against the configured table (escape hatch; deep tier only). A query that reads another table (`union`, `join`, `where x in (Table)`, and similar) is refused in every validation mode. Static validation runs before execution in the default `warn` mode. Save the result with `save_query` once it works. Fields are nested `resource`/`attributes`, not flat columns — for example `resource['service.name']`, not `service_name`. Call `discover_schema` first if you don't know the field names for a source. |
 
 Every query tool takes an optional `since` argument (`"15m ago"`, `"1h ago"`,
 `"2d ago"`, …) with a sensible per-tool default.
@@ -774,7 +783,8 @@ Monitor whether a canaried model still performs as well as when it was chosen. S
 - **Near-miss case set.** `evals/router_cases_nearmiss.jsonl` pairs tools with overlapping vocabulary (error counts vs. error text, rate vs. root cause, queue vs. generate now, validate vs. run). Each prompt carries one detail that decides the answer. Use it to separate models that all score 100% on the extended set. Real-model runs only.
 - **Confusable-pair case set.** `evals/router_cases_confusable.jsonl` asks the same kind of question both ways for each pair the tool descriptions separate: per-container vs per-host CPU and memory, error counts vs error lines, error rate vs top error message, hosts vs containers, slow vs failed traces, raw log volume vs statistical anomalies, recent logs vs incident timeline, workflow hotspots vs token burn, and daily cost trend vs enterprise spend. Real-model runs only.
 - **`since` case set.** `evals/router_cases_since.jsonl` names a time window in every prompt. `expect_since_valid` fails a case whose `since` value the server would reject (for example `1.5h ago`).
-- **Lane runs.** Set `BERSERK_MCP_ROLE` (and optionally `BERSERK_MCP_TIER`) when running `run_eval.py` to measure one lane. A case whose expected tool that lane or tier does not serve is reported as not applicable instead of scored as a routing miss, and the ledger records the count. Role `all` serves every tool and skips none. `--tier-policy` runs use the same rule. Known gap: a case cannot yet name a different expected tool for the small tier (for example a `saved__*` query where the deep tier would use `search`); such a case is reported as not applicable.
+- **Lane runs.** Set `BERSERK_MCP_ROLE` (and optionally `BERSERK_MCP_TIER`) when running `run_eval.py` to measure one lane. A case whose expected tool that lane or tier does not serve is reported as not applicable instead of scored as a routing miss, and the ledger records the count. Role `all` serves every tool and skips none. `--tier-policy` runs use the same rule.
+- **Tier-specific answers.** A case can name `expect_tool_when_hidden`, the answer for a lane or tier that hides `expect_tool` (for example a `saved__*` query where the deep tier would use `search`), and `also_accept`, other tools that also count as correct. `evals/router_cases_tiered.jsonl` uses both. Run it with `--saved-queries evals/fixtures/saved_queries.json`: the server gets a temporary copy of that store, so the `saved__*` tools exist and your real store is never touched.
 - **Version is self-maintaining.** The case-set version is a hash of its contents. Editing the file automatically changes the version, stopping cross-version comparison. No discipline required.
 - **Behavioral fingerprints.** Two independent signals catch provider changes: a metadata fingerprint (hashes the provider's declared model entry — context length, pricing, version) and a behavioral fingerprint (hashes temperature-0 completions for a fixed prompt set). A changed fingerprint is a signal to investigate, never proof the provider swapped the model — hardware nondeterminism and batching can change output without a model change.
 - **Noise band is calibrated, not a permanent constant.** The `0.02` (2-point) noise band comes from 5 live canary runs against `deepseek-v4-flash` on 2026-09-01 (mean tool_accuracy 0.9514, stdev 0.0049, range 0.0139 — full run-by-run data in [docs/model-routing-cost-validation-2026-08-23.md](docs/model-routing-cost-validation-2026-08-23.md)). It's a starting point from one model's one calibration sweep — re-run the calibration if the case set changes size materially, or once real production history accumulates to compare against.
