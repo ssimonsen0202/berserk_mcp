@@ -1568,7 +1568,7 @@ python3 -m unittest discover -s evals -p "test_*.py"
 python3 -m unittest discover -s ingestion -p "test_*.py"
 ```
 
-CI runs all four on Ubuntu and Windows with Python 3.9, 3.11 and 3.12 (about
+CI runs all four on Ubuntu and Windows with Python 3.9, 3.11, 3.12, 3.13 and 3.14 (about
 1,440 tests), plus the protocol smoke test, the router-eval gate, and the
 three scanners under [Security tooling](#security-tooling-what-runs-and-what-deliberately-does-not).
 A `lint` job runs ruff (lint rules including a complexity cap, and the format
