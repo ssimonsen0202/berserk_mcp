@@ -168,6 +168,20 @@ All store paths are absolute, traversal-free, and control-character-free. The
 same shared validator covers learned queries, parser state, schema snapshots,
 AI FinOps stores, reports, primer overrides, and BI output paths.
 
+On POSIX, store reads, atomic writes and lock files never follow a symlink.
+Each operation opens the parent directory one component at a time without
+following symlinks, then creates, renames, reads and removes files relative to
+that open directory. A symlink planted at a store file, or a parent directory
+swapped for a symlink after the path was checked, makes the operation fail
+instead of redirecting it, and a lock file is removed only if it is the one
+this process created. An operator who points a store file at another location
+through a symlink must use the real path instead. Input files an operator
+names (pricing catalog, business-data import, primers) and eval outputs are
+read and written as ordinary files: they are operator configuration, not
+private stores. Windows has no
+directory-relative calls in Python; there the per-user DACL is what keeps
+other users from planting links in a private store directory.
+
 Private JSON stores are atomically replaced using unique temporary files. On
 POSIX, files created by the module are `0600` and directories it creates are
 `0700`. On Windows, a protected DACL grants full control only to the current
@@ -184,15 +198,22 @@ An explicit `BERSERK_MCP_PRIMERS_DIR` must be an absolute validated path and
 must contain a readable `<role>.md` for an active role. Misconfiguration fails
 startup instead of silently removing high-trust role guidance.
 
-### Accepted lock limitation
+### Store locks
 
-JSON read-modify-write cycles use an atomic lockfile. A lock older than 30
+JSON read-modify-write cycles hold a lock. On POSIX it is a kernel lock
+(`fcntl.flock`) on a lock file opened without following symlinks. The kernel
+releases it when the holder exits or crashes, so no lock is ever broken as
+stale and two writers cannot both hold it; the lock file is kept rather than
+deleted, because deleting it would reopen that race. A process that is
+suspended while holding the lock makes other writers time out instead of
+racing it. `flock` is only reliable on a local filesystem, so keep
+private stores off network mounts (NFS, SMB).
+
+On Windows the lock is an atomically created lock file, and one older than 30
 seconds is treated as abandoned so a crashed process cannot deadlock future
-writes. A process suspended longer than 30 seconds could have its lock broken;
-if it later resumes, two writers could race and one update could be lost. Slow
-LLM work is deliberately performed outside these critical sections. Deployments
-that routinely suspend processes should avoid overlapping worker runs or place
-the stores on infrastructure with an external single-writer schedule.
+writes. A Windows process suspended longer than that could have its lock
+broken; if it later resumes, two writers could race and one update could be
+lost. Slow LLM work is deliberately performed outside these critical sections.
 
 ## Test expectations
 

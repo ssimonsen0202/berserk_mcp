@@ -42,10 +42,18 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.32.0**. This is a bullet-point overview, most recent
+Current version: **1.33.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.33.0** (2026-09-26) — Store files are no longer read or written
+  through symlinks. On POSIX every store read, atomic write and lock-file
+  operation works relative to a parent directory opened without following
+  symlinks, so a symlink planted at a store file, or a parent directory
+  swapped for one after the path was checked, fails the operation instead of
+  redirecting it (Codex Security scan findings 3 and 5). **If you symlinked a
+  store file to another location,** point the setting at the real path. See
+  [details](docs/releases/v1.33.0.md).
 - **v1.32.0** (2026-09-26) — DNS-rebinding protection for the HTTP
   transport is on by default (issue #84, the one open finding from the MCP
   conformance run). A loopback bind now accepts only loopback `Host` names,

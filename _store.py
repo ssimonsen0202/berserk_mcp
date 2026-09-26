@@ -17,6 +17,11 @@ import warnings
 from pathlib import Path
 import contextlib
 
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None  # type: ignore[assignment]
+
 
 LOCK_STALE_SECONDS = 30
 LOCK_TIMEOUT_SECONDS = 10
@@ -31,7 +36,12 @@ class StorePathError(ValueError):
 
 
 def validate_store_path(candidate, purpose="store"):
-    """Return a resolved absolute path after rejecting traversal and controls."""
+    """Return an absolute path whose parent is resolved, after rejecting
+    traversal and controls.
+
+    The last component is kept as given, not resolved: a symlink planted at a
+    store file must be refused by the no-follow operations below rather than
+    silently followed (Codex Security scan, finding 5)."""
     if not candidate:
         raise StorePathError(f"{purpose} path is empty")
     if not isinstance(candidate, (str, Path)):
@@ -44,7 +54,7 @@ def validate_store_path(candidate, purpose="store"):
         raise StorePathError(f"{purpose} path must be absolute (got {text!r})")
     if ".." in candidate_path.parts:
         raise StorePathError(f"{purpose} path must not contain '..' segments")
-    resolved = candidate_path.resolve(strict=False)
+    resolved = candidate_path.parent.resolve(strict=False) / candidate_path.name
     if ".." in resolved.parts:
         raise StorePathError(f"{purpose} path resolves through '..'")
     return resolved
@@ -61,6 +71,83 @@ def _warn_once(message, path, logger=None):
         logger(rendered)
     else:
         warnings.warn(rendered, RuntimeWarning, stacklevel=3)
+
+
+# Symlink- and race-safe file operations (Codex Security scan, findings 3 and
+# 5). validate_store_path resolves a path once, but every later operation used
+# to look the path up again, so a parent directory swapped for a symlink in
+# between -- or a symlink planted at the file itself -- redirected reads and
+# writes. On POSIX each operation now opens the parent directory component by
+# component without following symlinks, then works relative to that open
+# directory with O_NOFOLLOW on the file. Windows has no directory-relative
+# calls in Python; there the per-user DACL is what keeps other users out.
+_NOFOLLOW_DIRS = (
+    os.name != "nt"
+    and fcntl is not None
+    and hasattr(os, "O_NOFOLLOW")
+    and hasattr(os, "O_DIRECTORY")
+    and os.open in os.supports_dir_fd
+)
+
+
+class StoreRedirectError(OSError):
+    """A store path contains a symlink or non-directory that was not there when
+    it was validated, or the store file itself is a symlink."""
+
+
+def _open_dir_nofollow(directory):
+    """File descriptor for the absolute `directory`, opened one component at a
+    time without following symlinks. Raises StoreRedirectError when any
+    component is a symlink or not a directory."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in Path(directory).parts[1:]:
+            try:
+                next_fd = os.open(part, flags, dir_fd=fd)
+            except OSError as exc:
+                if isinstance(exc, FileNotFoundError):
+                    raise
+                raise StoreRedirectError(
+                    exc.errno, f"refusing store directory component {part!r}: {exc.strerror}"
+                ) from None
+            os.close(fd)
+            fd = next_fd
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+# macOS can fail a create-open relative to a directory descriptor with ENOENT
+# while another thread creates the same name (measured: about 1 in 9 opens
+# with 16 threads; a path-based open never does). One retry always succeeded
+# in 6,400 trials; the bound keeps a directory that is really gone an error.
+_CREATE_ENOENT_RETRIES = 20
+
+
+def _open_file_nofollow(dir_fd, name, flags, mode=0o600):
+    for attempt in range(_CREATE_ENOENT_RETRIES + 1):
+        try:
+            return os.open(name, flags | os.O_NOFOLLOW, mode, dir_fd=dir_fd)
+        except FileNotFoundError:
+            if not flags & os.O_CREAT or attempt == _CREATE_ENOENT_RETRIES:
+                raise
+            time.sleep(0.0005)
+        except OSError as exc:
+            if isinstance(exc, FileExistsError):
+                raise
+            if stat.S_ISLNK(_lstat_at(dir_fd, name, default=0)):
+                raise StoreRedirectError(exc.errno, f"refusing symlinked store file {name!r}") from None
+            raise
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _lstat_at(dir_fd, name, default=None):
+    try:
+        return os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode
+    except OSError:
+        return default
 
 
 def _windows_api():
@@ -345,7 +432,15 @@ def ensure_parent(path, *, private=True, logger=None, purpose="store"):
     for directory in reversed(missing):
         try:
             os.mkdir(directory, 0o700 if private else 0o777)
-            if private:
+            if private and _NOFOLLOW_DIRS:
+                # chmod the directory just created, not whatever a racing
+                # process swapped in at that name (scan finding 3).
+                dir_fd = _open_dir_nofollow(directory)
+                try:
+                    os.fchmod(dir_fd, 0o700)
+                finally:
+                    os.close(dir_fd)
+            elif private:
                 restrict_private_path(directory, logger=logger)
         except FileExistsError:
             if private:
@@ -361,9 +456,14 @@ def ensure_private_dir(path, logger=None):
 
 
 class FileLock:
-    """Portable advisory lock using atomic lock-file creation.
+    """Portable advisory lock.
 
-    A lock older than ``LOCK_STALE_SECONDS`` is treated as abandoned. This
+    On POSIX it is a kernel lock (``fcntl.flock``) on a kept lock file, taken
+    without following symlinks: the kernel releases it when the holder exits or
+    crashes, so nothing is ever broken as stale.
+
+    Elsewhere (Windows) it uses atomic lock-file creation: a lock older than
+    ``LOCK_STALE_SECONDS`` is treated as abandoned. This
     prevents permanent deadlock after a crash but can permit two writers after
     a process is suspended longer than that threshold. The residual lost-update
     risk is documented in SECURITY.md; these critical sections must stay short.
@@ -372,13 +472,17 @@ class FileLock:
     def __init__(self, target_path, *, stale_seconds=None, timeout_seconds=None, retry_interval=None):
         self.lock_path = str(target_path) + ".lock"
         self._fd = None
+        self._dir_fd = None
+        self._name = None
         self.stale_seconds = LOCK_STALE_SECONDS if stale_seconds is None else float(stale_seconds)
         self.timeout_seconds = LOCK_TIMEOUT_SECONDS if timeout_seconds is None else float(timeout_seconds)
         self.retry_interval = LOCK_RETRY_INTERVAL if retry_interval is None else float(retry_interval)
 
     def __enter__(self):
         deadline = time.monotonic() + self.timeout_seconds
-        ensure_parent(Path(self.lock_path), private=True)
+        safe = ensure_parent(Path(self.lock_path), private=True)
+        if _NOFOLLOW_DIRS:
+            return self._enter_nofollow(safe, deadline)
         while True:
             try:
                 self._fd = os.open(
@@ -409,7 +513,47 @@ class FileLock:
                     ) from None
                 time.sleep(self.retry_interval)
 
+    def _enter_nofollow(self, safe, deadline):
+        """POSIX: a kernel lock (flock) on a lock file opened relative to its
+        no-follow directory. The kernel releases it when the holder exits or
+        crashes, so there is no stale lock to break and no unlink race (scan
+        finding 3); the lock file itself is kept, never removed."""
+        self._dir_fd = _open_dir_nofollow(safe.parent)
+        self._name = safe.name
+        try:
+            self._fd = _open_file_nofollow(self._dir_fd, self._name, os.O_CREAT | os.O_RDWR)
+            if not stat.S_ISREG(os.fstat(self._fd).st_mode):
+                raise StoreRedirectError(0, f"refusing non-file lock {self._name!r}")
+            while True:
+                try:
+                    fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return self
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"could not acquire lock {self.lock_path} within {self.timeout_seconds:g}s"
+                        ) from None
+                    time.sleep(self.retry_interval)
+        except BaseException:
+            if self._fd is not None:
+                os.close(self._fd)
+                self._fd = None
+            os.close(self._dir_fd)
+            self._dir_fd = None
+            raise
+
     def __exit__(self, exc_type, exc, tb):
+        if self._dir_fd is not None:
+            try:
+                if self._fd is not None:
+                    with contextlib.suppress(OSError):
+                        fcntl.flock(self._fd, fcntl.LOCK_UN)
+                    os.close(self._fd)
+                    self._fd = None
+            finally:
+                os.close(self._dir_fd)
+                self._dir_fd = None
+            return False
         if self._fd is not None:
             os.close(self._fd)
             self._fd = None
@@ -436,8 +580,40 @@ def atomic_replace(tmp, safe):
             time.sleep(0.05)
 
 
+def _atomic_write_nofollow(safe, text, private):
+    """POSIX atomic write relative to the parent directory (scan findings 3, 5):
+    the temporary file, its mode, the rename and cleanup never follow a symlink,
+    and a symlink at the target name is refused, not written through."""
+    dir_fd = _open_dir_nofollow(safe.parent)
+    tmp_name = unique_tmp_path(safe).name
+    try:
+        existing = _lstat_at(dir_fd, safe.name)
+        if existing is not None and stat.S_ISLNK(existing):
+            raise StoreRedirectError(0, f"refusing symlinked store file {safe.name!r}")
+        fd = _open_file_nofollow(dir_fd, tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600 if private else 0o666)
+        try:
+            if private:
+                os.fchmod(fd, 0o600)
+            elif existing is not None:
+                os.fchmod(fd, stat.S_IMODE(existing))
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                fd = None
+                handle.write(str(text))
+        finally:
+            if fd is not None:
+                os.close(fd)
+        os.replace(tmp_name, safe.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name, dir_fd=dir_fd)
+        os.close(dir_fd)
+    return safe
+
+
 def atomic_write_text(path, text, *, private=True, logger=None, purpose="output"):
     safe = ensure_parent(path, private=private, logger=logger, purpose=purpose)
+    if _NOFOLLOW_DIRS:
+        return _atomic_write_nofollow(safe, text, private)
     tmp = unique_tmp_path(safe)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     mode = 0o600 if private else 0o666
@@ -475,6 +651,33 @@ def atomic_write_json(path, value, *, private=True, logger=None, purpose="store"
     )
 
 
+def read_private_text(path):
+    """Text of a private store file, or None when it does not exist.
+
+    On POSIX the file is opened relative to its no-follow parent directory with
+    O_NOFOLLOW, so a symlink raises StoreRedirectError instead of being read
+    through (Codex Security scan, finding 5)."""
+    safe = validate_store_path(path)
+    if not _NOFOLLOW_DIRS:
+        try:
+            with open(safe, encoding="utf-8") as handle:
+                return handle.read()
+        except FileNotFoundError:
+            return None
+    try:
+        dir_fd = _open_dir_nofollow(safe.parent)
+    except FileNotFoundError:
+        return None
+    try:
+        fd = _open_file_nofollow(dir_fd, safe.name, os.O_RDONLY)
+    except FileNotFoundError:
+        return None
+    finally:
+        os.close(dir_fd)
+    with os.fdopen(fd, encoding="utf-8") as handle:
+        return handle.read()
+
+
 def _load_json(path, expected_type, empty_value, logger=None):
     try:
         safe = validate_store_path(path)
@@ -483,11 +686,11 @@ def _load_json(path, expected_type, empty_value, logger=None):
             logger(f"load_json refused: {exc}")
         return empty_value
     try:
-        with open(safe, encoding="utf-8") as handle:
-            value = json.load(handle)
+        text = read_private_text(safe)
+        if text is None:
+            return empty_value
+        value = json.loads(text)
         return value if isinstance(value, expected_type) else empty_value
-    except FileNotFoundError:
-        return empty_value
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         if logger:
             logger(f"load_json({safe}): {type(exc).__name__}: {exc}")

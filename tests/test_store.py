@@ -7,10 +7,13 @@ here -- it cannot run on this platform and is covered by the Windows CI job.
 
 import json
 import os
+import select
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import warnings
@@ -296,12 +299,14 @@ class FileLockTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
+    @mock.patch.object(_store, "_NOFOLLOW_DIRS", False)  # the Windows lock-file protocol
     def test_basic_acquire_release(self):
         lock_path = Path(str(self.target) + ".lock")
         with _store.FileLock(self.target):
             self.assertTrue(lock_path.exists())
         self.assertFalse(lock_path.exists())
 
+    @mock.patch.object(_store, "_NOFOLLOW_DIRS", False)  # the Windows lock-file protocol
     def test_stale_lock_is_recovered(self):
         lock_path = Path(str(self.target) + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -314,6 +319,7 @@ class FileLockTest(unittest.TestCase):
             self.assertEqual(lock_path.read_text(), str(os.getpid()))
         self.assertFalse(lock_path.exists())
 
+    @mock.patch.object(_store, "_NOFOLLOW_DIRS", False)  # the Windows lock-file protocol
     def test_timeout_when_lock_held_and_fresh(self):
         lock_path = Path(str(self.target) + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -340,6 +346,7 @@ class FileLockTest(unittest.TestCase):
         with _store.FileLock(self.target, timeout_seconds=1):
             pass
 
+    @mock.patch.object(_store, "_NOFOLLOW_DIRS", False)  # the Windows/fallback path
     def test_getmtime_race_falls_back_to_timeout(self):
         # Simulate: os.open always contends (FileExistsError), and the
         # lock file vanishes out from under getmtime (another process wins
@@ -356,6 +363,7 @@ class FileLockTest(unittest.TestCase):
                 with _store.FileLock(self.target, timeout_seconds=0.15, retry_interval=0.05):
                     pass
 
+    @mock.patch.object(_store, "_NOFOLLOW_DIRS", False)  # the Windows/fallback path
     def test_getmtime_race_then_recovers(self):
         # First contention hits the getmtime-OSError branch (file removed
         # concurrently), then a later attempt succeeds normally.
@@ -565,6 +573,223 @@ class JsonRoundTripTest(unittest.TestCase):
         self.assertEqual(result, {})
         self.assertEqual(len(calls), 1)
         self.assertIn("refused", calls[0])
+
+
+@unittest.skipUnless(_store._NOFOLLOW_DIRS, "POSIX directory-relative operations")
+class NoFollowStoreTest(unittest.TestCase):
+    """Codex Security scan findings 3 and 5: store reads, writes and locks must
+    not follow a symlink planted at the file or swapped in for a parent."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve()
+        self.store_dir = self.root / "store"
+        self.store_dir.mkdir()
+        self.target = self.store_dir / "learned.json"
+        self.victim = self.root / "victim.json"
+        self.victim.write_text('["victim"]')
+
+    # Covers SECURITY.md#filesystem-stores-and-publication-outputs
+    def test_symlinked_store_file_is_not_read_through(self):
+        os.symlink(self.victim, self.target)
+        self.assertEqual(_store.load_json_list(self.target, logger=lambda m: None), [])
+
+    def test_read_private_text_refuses_symlinks_and_reports_missing(self):
+        self.assertIsNone(_store.read_private_text(self.target))
+        self.assertIsNone(_store.read_private_text(self.root / "missing-dir" / "x.json"))
+        os.symlink(self.victim, self.target)
+        with self.assertRaises(_store.StoreRedirectError):
+            _store.read_private_text(self.target)
+
+    def test_ai_finops_read_modify_write_holds_the_store_file_lock(self):
+        import ai_finops
+
+        taken = []
+        real = _store.FileLock
+
+        class Recording(real):
+            def __enter__(self):
+                taken.append(self.lock_path)
+                return super().__enter__()
+
+        business = self.store_dir / "business.json"
+        source = self.root / "features.json"
+        source.write_text("[]")
+        decisions = self.store_dir / "decisions.json"
+        with (
+            mock.patch.object(_store, "FileLock", Recording),
+            mock.patch.object(ai_finops, "_decision_store_path", decisions),
+        ):
+            ai_finops.import_business_data("feature", source, store_path=business, emit_otlp=False)
+            with (
+                mock.patch.object(ai_finops, "_pseudonymize", return_value="h"),
+                mock.patch.object(ai_finops, "emit_otlp_records", return_value=False),
+            ):
+                text, is_error = ai_finops.record_recommendation_decision("rec_" + "a" * 16, "approved", "owner", "why")
+                self.assertFalse(is_error, text)
+        self.assertIn(str(business) + ".lock", taken)
+        self.assertIn(str(decisions) + ".lock", taken)
+
+    def test_ai_finops_private_stores_do_not_follow_symlinks(self):
+        import ai_finops
+
+        attacker_key = self.root / "attacker.key"
+        attacker_key.write_text("ab" * 32 + "\n")
+        key_path = self.store_dir / "pseudonym.key"
+        os.symlink(attacker_key, key_path)
+        saved = (ai_finops._pseudonym_key_cache, ai_finops._pseudonym_key_source)
+        try:
+            ai_finops._pseudonym_key_cache = ai_finops._pseudonym_key_source = None
+            with mock.patch.dict(os.environ), mock.patch.object(ai_finops, "_pseudonym_key_path", key_path):
+                os.environ.pop("BERSERK_MCP_PSEUDONYM_KEY", None)
+                with self.assertRaises(OSError):
+                    ai_finops._deployment_pseudonym_key()
+        finally:
+            ai_finops._pseudonym_key_cache, ai_finops._pseudonym_key_source = saved
+        business = self.store_dir / "business.json"
+        os.symlink(self.victim, business)
+        self.assertEqual(ai_finops.load_business_store(business), ai_finops._empty_business_store())
+
+    def test_symlinked_store_file_is_not_written_through(self):
+        os.symlink(self.victim, self.target)
+        with self.assertRaises(_store.StoreRedirectError):
+            _store._atomic_write_nofollow(self.target, "[]", True)
+        self.assertEqual(self.victim.read_text(), '["victim"]')
+
+    def test_parent_swapped_for_symlink_after_validation_is_refused(self):
+        safe = _store.ensure_parent(self.target, private=True)
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        self.store_dir.rename(self.root / "moved")
+        os.symlink(elsewhere, self.store_dir)  # the swap happens after validation
+        with self.assertRaises(_store.StoreRedirectError):
+            _store._atomic_write_nofollow(safe, "[1]", True)
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_write_is_atomic_private_and_leaves_no_temp_file(self):
+        _store.atomic_write_json(self.target, [1, 2])
+        self.assertEqual(json.loads(self.target.read_text()), [1, 2])
+        self.assertEqual(stat.S_IMODE(self.target.stat().st_mode), 0o600)
+        self.assertEqual(sorted(p.name for p in self.store_dir.iterdir()), ["learned.json"])
+
+    def test_public_write_keeps_the_existing_mode(self):
+        self.target.write_text("x")
+        os.chmod(self.target, 0o644)
+        _store.atomic_write_text(self.target, "y", private=False)
+        self.assertEqual(stat.S_IMODE(self.target.stat().st_mode), 0o644)
+        self.assertEqual(self.target.read_text(), "y")
+
+    def test_lock_is_not_taken_through_a_symlink(self):
+        os.symlink(self.victim, str(self.target) + ".lock")
+        with self.assertRaises((_store.StoreRedirectError, TimeoutError)):
+            with _store.FileLock(self.target, timeout_seconds=0.1, retry_interval=0.02):
+                pass
+        self.assertEqual(self.victim.read_text(), '["victim"]')
+        self.assertTrue(self.victim.exists())
+
+    def test_posix_lock_is_a_kernel_lock_on_a_kept_file(self):
+        lock_path = Path(str(self.target) + ".lock")
+        with _store.FileLock(self.target, timeout_seconds=1):
+            self.assertTrue(lock_path.exists())
+        self.assertTrue(lock_path.exists())  # kept: removing it would reopen the unlink race
+        with _store.FileLock(self.target, timeout_seconds=1):
+            pass
+
+    def test_leftover_lock_file_does_not_block(self):
+        lock_path = Path(str(self.target) + ".lock")
+        lock_path.write_text("99999")  # e.g. from the old lock-file protocol or a crash
+        with _store.FileLock(self.target, timeout_seconds=0.5, retry_interval=0.02):
+            pass
+
+    def _hold_lock_in_child(self, seconds):
+        code = (
+            "import sys, time; sys.path.insert(0, sys.argv[1]); import _store\n"
+            "with _store.FileLock(sys.argv[2], timeout_seconds=5):\n"
+            "    print('held', flush=True); time.sleep(float(sys.argv[3]))\n"
+        )
+        child = subprocess.Popen(
+            [sys.executable, "-c", code, str(Path(_store.__file__).parent), str(self.target), str(seconds)],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        ready, _, _ = select.select([child.stdout], [], [], 20)
+        if not ready:
+            child.kill()
+            child.wait()
+            child.stdout.close()
+            self.fail("lock-holding child did not start within 20s")
+        self.assertEqual(child.stdout.readline().strip(), "held")
+        return child
+
+    def test_lock_held_by_another_process_times_out(self):
+        child = self._hold_lock_in_child(30)
+        try:
+            with self.assertRaises(TimeoutError):
+                with _store.FileLock(self.target, timeout_seconds=0.2, retry_interval=0.02):
+                    pass
+        finally:
+            child.kill()
+            child.wait()
+            child.stdout.close()
+
+    def test_lock_of_a_crashed_process_is_released_by_the_kernel(self):
+        child = self._hold_lock_in_child(30)
+        child.kill()  # no cleanup runs, as in a crash
+        child.wait()
+        child.stdout.close()
+        with _store.FileLock(self.target, timeout_seconds=0.5, retry_interval=0.02):
+            pass
+
+    def test_threads_contending_for_the_lock_lose_no_update(self):
+        # Caught a macOS kernel race (create-open via a directory fd failing
+        # with ENOENT under contention) that lost about 1 update in 8 rounds.
+        for round_no in range(8):
+            target = self.store_dir / f"q{round_no}.json"
+
+            def worker(i, target=target):
+                with _store.FileLock(target):
+                    items = _store.load_json_list(target)
+                    items.append(i)
+                    _store.save_json_list(target, items)
+
+            threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=20)
+            self.assertEqual(sorted(_store.load_json_list(target)), list(range(20)))
+
+    def test_create_open_retries_a_transient_enoent_only(self):
+        dir_fd = os.open(self.store_dir, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, dir_fd)
+        real_open = os.open
+        calls = {"n": 0}
+
+        def once(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise FileNotFoundError(2, "transient")
+            return real_open(*args, **kwargs)
+
+        with mock.patch.object(_store.os, "open", side_effect=once):
+            os.close(_store._open_file_nofollow(dir_fd, "a.lock", os.O_CREAT | os.O_RDWR))
+        self.assertEqual(calls["n"], 2)
+        with self.assertRaises(FileNotFoundError):  # a plain open of a missing file is not retried
+            _store._open_file_nofollow(dir_fd, "missing.json", os.O_RDONLY)
+        with mock.patch.object(_store.os, "open", side_effect=FileNotFoundError(2, "gone")) as always:
+            with self.assertRaises(FileNotFoundError):
+                _store._open_file_nofollow(dir_fd, "b.lock", os.O_CREAT | os.O_RDWR)
+        self.assertEqual(always.call_count, _store._CREATE_ENOENT_RETRIES + 1)
+
+    def test_lock_failure_leaks_no_descriptor(self):
+        before = len(os.listdir("/dev/fd"))
+        with mock.patch.object(_store.fcntl, "flock", side_effect=OSError("boom")):
+            for _ in range(20):
+                with self.assertRaises(OSError):
+                    with _store.FileLock(self.target, timeout_seconds=0.1):
+                        pass
+        self.assertLessEqual(len(os.listdir("/dev/fd")), before)
 
 
 if __name__ == "__main__":

@@ -42,10 +42,10 @@
     "note": "outbound URL rules. Codex Security scoped scan 2026-09-24 of secret_scan.py/_http.py/_store.py (9 findings, coverage complete): finding 6 (LLM opt-in applied to OTLP/CanonLoom) fixed in the JSON wrappers and callers; finding 4 (ambient proxy could route validated loopback HTTP off host) fixed 2026-09-24: loopback requests use a proxy-free opener."
   },
   "_store:validate_store_path": {
-    "fingerprint": "03d01833212c6c35",
-    "reviewed": "2026-09-24",
-    "by": "Codex Security scan",
-    "note": "store paths absolute, traversal-free, control-free. Codex Security scoped scan 2026-09-24 of secret_scan.py/_http.py/_store.py (9 findings, coverage complete): finding 3 (validation not bound to later operations; FileLock uses the unresolved path) and finding 5 (follows planted symlinks) still open; finding 9 (codex adapter state path) fixed 2026-09-24."
+    "fingerprint": "0d94ec9e17481e86",
+    "reviewed": "2026-09-26",
+    "by": "claude + codex review",
+    "note": "resolves the parent only; the last component is kept so a symlinked store file is refused by the no-follow operations (scan finding 5). Absolute, traversal-free, control-character-free as before."
   },
   "_kql_boundary:check": {
     "fingerprint": "9b95981058d61b54",
@@ -106,5 +106,29 @@
     "reviewed": "2026-09-26",
     "by": "claude + codex review",
     "note": "rejects argument names the schema does not declare (protocol keys as_task/allow_expensive allowed); echoed names bounded to 5 x 64 chars. Review 2026-09-26 P2 (docs/mcp-guidance-review-2026-09-26.md); reviewed by Codex, one P3 doc fix, no P1/P2."
+  },
+  "_store:_open_dir_nofollow": {
+    "fingerprint": "39e372604cf7bafa",
+    "reviewed": "2026-09-26",
+    "by": "claude + codex review",
+    "note": "walks the parent directory from / with O_DIRECTORY|O_NOFOLLOW per component; a symlink or non-directory raises StoreRedirectError (scan finding 3)."
+  },
+  "_store:_atomic_write_nofollow": {
+    "fingerprint": "ac993c9e66004467",
+    "reviewed": "2026-09-26",
+    "by": "claude + codex review",
+    "note": "temp file, fchmod, rename and cleanup relative to the no-follow parent fd; refuses a symlinked target (scan findings 3, 5)."
+  },
+  "_store:_load_json": {
+    "fingerprint": "4444a82a85d4c3f0",
+    "reviewed": "2026-09-26",
+    "by": "claude + codex review",
+    "note": "reads through read_private_text (no-follow on POSIX); refusal logs and returns the empty value (scan finding 5)."
+  },
+  "_store:read_private_text": {
+    "fingerprint": "242f2bbf40dc657c",
+    "reviewed": "2026-09-26",
+    "by": "claude + codex review",
+    "note": "private store read: O_NOFOLLOW relative to the no-follow parent fd on POSIX; None when missing; StoreRedirectError on a symlink. Used by _load_json and ai_finops' pseudonym key, business and decision stores."
   }
 }

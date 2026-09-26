@@ -117,8 +117,11 @@ def _deployment_pseudonym_key():
         if _pseudonym_key_source == source and _pseudonym_key_cache is not None:
             return _pseudonym_key_cache
         with _store.FileLock(path):
-            if path.exists():
-                encoded = path.read_text(encoding="utf-8").strip()
+            # Never read through a symlink: a planted link could substitute a
+            # known key and make every pseudonym predictable (fails closed).
+            existing = _store.read_private_text(path)
+            if existing is not None:
+                encoded = existing.strip()
                 if not re.fullmatch(r"[a-f0-9]{64}", encoded):
                     raise ValueError("persisted AI FinOps pseudonym key is malformed")
             else:
@@ -1101,8 +1104,10 @@ def load_business_store(path=None):
         return _empty_business_store()
     try:
         safe = _safe_absolute(target, "business store")
-        with open(safe, encoding="utf-8") as handle:
-            data = json.load(handle)
+        text = _store.read_private_text(safe)
+        if text is None:
+            raise FileNotFoundError(safe)
+        data = json.loads(text)
     except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
         return _empty_business_store()
     if not isinstance(data, dict):
@@ -1396,7 +1401,9 @@ def import_business_data(kind, input_path, fmt=None, store_path=None, emit_otlp=
         raise ValueError("business store path is not configured")
     raw_records = _load_import_file(input_path, fmt)
     normalized = [normalize_business_record(kind, row) for row in raw_records]
-    with _store_lock:
+    # The file lock makes the whole read-modify-write atomic across processes;
+    # _store_lock alone covers only this process's threads.
+    with _store_lock, _store.FileLock(_safe_absolute(target, "business store")):
         store = load_business_store(target)
         if kind == "feature":
             store["features"] = _merge_latest(
@@ -2105,8 +2112,10 @@ def _load_decisions(path=None):
         return []
     try:
         safe = _safe_absolute(target, "decision store")
-        with open(safe, encoding="utf-8") as handle:
-            value = json.load(handle)
+        text = _store.read_private_text(safe)
+        if text is None:
+            raise FileNotFoundError(safe)
+        value = json.loads(text)
     except (FileNotFoundError, OSError, json.JSONDecodeError, ValueError):
         return []
     return value if isinstance(value, list) else []
@@ -2134,7 +2143,7 @@ def record_recommendation_decision(recommendation_id, decision, owner, rationale
         "rationale_hash": hashlib.sha256(rationale.encode("utf-8")).hexdigest(),
         "ts": _now_iso(),
     }
-    with _store_lock:
+    with _store_lock, _store.FileLock(_safe_absolute(_decision_store_path, "decision store")):
         decisions = _load_decisions()
         duplicate = next(
             (
@@ -2402,7 +2411,9 @@ def generate_dashboard(dashboard="portfolio", identifier="", since="90d ago", fm
         name_part = f"-{identifier}" if identifier else ""
         filename = f"claude-{dashboard}{name_part}{suffix}"
     target = _safe_absolute(Path(_report_dir).resolve() / filename, "report")
-    root = _safe_absolute(Path(_report_dir), "report directory")
+    # Compare like with like: validate_store_path keeps the last component
+    # unresolved, so resolve the directory here as the target's parent is.
+    root = _safe_absolute(Path(_report_dir).resolve(), "report directory")
     if target.parent != root:
         return "report output must remain inside BERSERK_MCP_REPORT_DIR", True
     title = "Claude " + dashboard.replace("_", " ").title()
