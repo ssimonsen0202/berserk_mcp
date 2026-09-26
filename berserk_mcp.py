@@ -52,6 +52,7 @@ with or endorsed by the Berserk project.
 """
 
 import sys
+import hashlib
 import json
 import subprocess
 import re
@@ -2400,6 +2401,21 @@ def _envelope(tool, since, out, fence_body=False):
         header = f"window={since}"
         if rows is not None:
             header = f"{header}  rows={rows}"
+        # Evidence fields (review 2026-09-26): where the rows came from, the
+        # redaction policy the MCP boundary (dispatch) applies to this result,
+        # when the rows were queried (a cached result keeps its original
+        # time), and a stable reference: identical tool, window and delivered
+        # rows always give the same ref. The ref hashes the rows as the client
+        # receives them (after the same output filter dispatch applies), never
+        # the raw rows, so it cannot confirm a guess at a redacted value.
+        delivered = secret_scan.apply_output_filter(
+            out,
+            mode=REDACT_MODE,
+            include_entropy=REDACT_ENTROPY,
+            pii_types=REDACT_PII_TYPES,
+        )
+        digest = hashlib.sha256(f"{tool}\n{since}\n{delivered}".encode("utf-8", "replace")).hexdigest()[:12]
+        header = f"{header}  source=fixed:{tool}  redaction={REDACT_MODE}  at={now_iso()}  ref={tool}#{digest}"
         body = _fence_untrusted(out) if fence_body else out
         return f"{header}\n\n{body}"
     except Exception:

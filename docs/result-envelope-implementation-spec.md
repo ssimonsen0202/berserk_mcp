@@ -265,3 +265,29 @@ gh pr checks <n> --repo ssimonsen0202/berserk_mcp
 Include one real before/after example in the PR — an actual `top_cpu` empty
 result and an actual populated one, copied from a live run, not composed by
 hand.
+
+## Amendment 2026-09-26: evidence fields
+
+From the MCP guidance review (`docs/mcp-guidance-review-2026-09-26.md`,
+section 7). The header keeps `window=` and `rows=` first and adds, on the
+same line:
+
+```
+window=1h ago  rows=12  source=fixed:list_hosts  redaction=redact  at=2026-09-26T15:00:00Z  ref=list_hosts#3f9a1c2b7d4e
+```
+
+- `source=fixed:<tool>`: the rows come from that tool's fixed query.
+- `redaction=`: the output redaction policy (`BERSERK_MCP_REDACT`) the MCP
+  boundary applies to this result, so a model can tell redacted output from
+  unredacted. It describes what MCP clients receive; an in-process
+  `handle_call` caller (tests, evals) bypasses that boundary.
+- `at=`: when the rows were queried, UTC. A cached result keeps its original
+  time, so this states freshness.
+- `ref=<tool>#<12 hex>`: SHA-256 of tool, window and the rows as the client
+  receives them (after the output filter). Identical evidence always has the
+  same reference; a model can cite it. Hashing delivered rather than raw rows
+  means the ref cannot confirm a guess at a redacted value.
+
+The rows stay byte-identical below the header, the empty-result sentence is
+unchanged, errors are not enveloped, and `BERSERK_MCP_ENVELOPE=0` still
+restores the pre-envelope output.

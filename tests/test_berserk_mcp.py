@@ -5583,6 +5583,15 @@ class SavedQueryProjectionTest(unittest.TestCase):
             bm.send = orig_send
 
 
+def _envelope_header(tool, window, rows):
+    """Regex for the envelope header line: window and rows as before, then
+    the evidence fields (review 2026-09-26). `at` varies per call."""
+    return (
+        rf"window={re.escape(window)}  rows={rows}  source=fixed:{tool}  redaction={bm.REDACT_MODE}  "
+        rf"at=\d{{4}}-\d\d-\d\dT\d\d:\d\d:\d\dZ  ref={tool}#[0-9a-f]{{12}}"
+    )
+
+
 class ResultEnvelopeTest(unittest.TestCase):
     """FR-1 through FR-4: result envelope for the SIMPLE fixed-query path."""
 
@@ -5624,16 +5633,19 @@ class ResultEnvelopeTest(unittest.TestCase):
         self._next_return = ("col_a\nrow1\nrow2", False)
         text, err = bm.handle_call("list_hosts", {})
         self.assertFalse(err)
-        self.assertEqual(
+        self.assertRegex(
             text,
-            f"window=1h ago  rows=2\n\n{bm._UNTRUSTED_DATA_OPEN}\ncol_a\nrow1\nrow2\n{bm._UNTRUSTED_DATA_CLOSE}",
+            "^"
+            + _envelope_header("list_hosts", "1h ago", 2)
+            + re.escape(f"\n\n{bm._UNTRUSTED_DATA_OPEN}\ncol_a\nrow1\nrow2\n{bm._UNTRUSTED_DATA_CLOSE}")
+            + "$",
         )
 
     def test_02_explicit_since_appears_in_header(self):
         self._next_return = ("col_a\nrow1", False)
         text, err = bm.handle_call("list_hosts", {"since": "6h ago"})
         self.assertFalse(err)
-        self.assertTrue(text.startswith("window=6h ago  rows=1\n\n"))
+        self.assertRegex(text, "^" + _envelope_header("list_hosts", "6h ago", 1) + "\n\n")
 
     def test_03_no_rows_returns_interpreted_sentence(self):
         self._next_return = ("(no rows)", False)
@@ -5702,9 +5714,38 @@ class ResultEnvelopeTest(unittest.TestCase):
         # _SIMPLE_JSON_TOOLS body content is fenced (issue #11) -- the raw
         # JSON is inside the untrusted-data marker, not a bare header
         # prefix followed directly by the JSON.
-        self.assertTrue(text.startswith(f"window=6h ago  rows=2\n\n{bm._UNTRUSTED_DATA_OPEN}\n"))
+        self.assertRegex(
+            text, "^" + _envelope_header("claude_errors", "6h ago", 2) + re.escape(f"\n\n{bm._UNTRUSTED_DATA_OPEN}\n")
+        )
         self.assertIn(kusto_json, text)
         self.assertTrue(text.rstrip().endswith(bm._UNTRUSTED_DATA_CLOSE))
+
+    def test_08b_evidence_ref_is_stable_for_identical_rows(self):
+        self._next_return = ("col_a\nrow1", False)
+        first, _ = bm.handle_call("list_hosts", {"since": "2h ago"})
+        second, _ = bm.handle_call("list_hosts", {"since": "2h ago"})
+        self._next_return = ("col_a\nrow2", False)
+        other, _ = bm.handle_call("list_hosts", {"since": "2h ago"})
+
+        def ref(text):
+            return re.search(r"ref=(\S+)", text).group(1)
+
+        self.assertEqual(ref(first), ref(second))
+        self.assertNotEqual(ref(first), ref(other))
+
+    def test_08c_ref_hashes_delivered_rows_not_redacted_secrets(self):
+        # The ref must not confirm a guess at a value redaction removed.
+        original = (bm.REDACT_MODE, bm.REDACT_ENTROPY, bm.REDACT_PII_TYPES)
+        try:
+            bm.REDACT_MODE = "redact"
+            refs = set()
+            for secret in ("password=alpha1234", "password=bravo5678"):
+                self._next_return = (f"col_a\n{secret}", False)
+                text, _ = bm.handle_call("list_hosts", {"since": "3h ago"})
+                refs.add(re.search(r"ref=(\S+)", text).group(1))
+            self.assertEqual(len(refs), 1, "different secrets behind the same redacted output gave different refs")
+        finally:
+            bm.REDACT_MODE, bm.REDACT_ENTROPY, bm.REDACT_PII_TYPES = original
 
     def test_09_auth_failure_unenveloped(self):
         self._next_return = (bm.AUTH_FAILURE_MESSAGE, True)
