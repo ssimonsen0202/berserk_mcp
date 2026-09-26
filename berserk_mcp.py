@@ -2176,25 +2176,18 @@ ingestion_advisor.configure(
 
 
 # ---------- tool definitions ----------
-def _case_insensitive_literal(word):
-    """Fold an ASCII-letter literal into a bracket-class-per-letter form,
-    e.g. 'now' -> '[nN][oO][wW]'. JSON Schema `pattern` has no portable
-    case-insensitive flag, but _SINCE_RE matches with re.IGNORECASE -- this
-    keeps the advertised schema accepting exactly what the runtime already
-    does (e.g. 'NOW', '2 HOURS AGO') without duplicating and drifting from
-    the unit list _SINCE_RE and _SINCE_HOURS_FACTORS already define."""
-    return "".join(f"[{c.lower()}{c.upper()}]" if c.isalpha() else c for c in word)
-
-
-_SINCE_SCHEMA_PATTERN = (
-    "^("
-    + _case_insensitive_literal("now")
-    + r"|\d+\s*("
-    + "|".join(_case_insensitive_literal(u) for u in _SINCE_HOURS_FACTORS)
-    + r")(\s+"
-    + _case_insensitive_literal("ago")
-    + r")?)$"
-)
+# The advertised `since` pattern. JSON Schema `pattern` has no portable
+# case-insensitive flag, and _SINCE_RE matches with re.IGNORECASE, so the
+# schema must accept any letter case, or a client doing grammar-constrained
+# decoding rejects values the server accepts ('NOW', '2 HOURS AGO').
+#
+# It accepts any unit of up to the longest real unit's length rather than
+# spelling each unit out letter by letter: the spelled-out form was ~370
+# bytes repeated in every tool, about 30% of each lane's tools/list (review
+# 2026-09-26, P2). An unknown unit ('5 xyz') passes the schema and is then
+# rejected by valid_since with a message naming the accepted forms.
+_SINCE_MAX_UNIT_CHARS = max(len(unit) for unit in _SINCE_HOURS_FACTORS)
+_SINCE_SCHEMA_PATTERN = rf"^([Nn][Oo][Ww]|\d+\s*[A-Za-z]{{1,{_SINCE_MAX_UNIT_CHARS}}}(\s+[Aa][Gg][Oo])?)$"
 
 
 def _since():
