@@ -180,7 +180,7 @@ def build_tools(
         {
             "name": "find_similar",
             "roles": ["sre", "soc"],
-            "description": "Find log messages by meaning rather than exact text, for example 'database timeouts' or 'authentication failures'. Semantic indexing must be enabled on the Berserk cluster; use search with has for exact terms. Optional service filter and k (1-50).",
+            "description": "Find log messages by meaning rather than exact text, for example 'database timeouts' or 'authentication failures'. Semantic indexing must be enabled on the Berserk cluster; use `search` with has for exact terms. Optional service filter and k (1-50).",
             "inputSchema": {
                 "type": "object",
                 "properties": dict(

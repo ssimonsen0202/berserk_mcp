@@ -31,8 +31,8 @@ ranking, or maximizing query volume.
 | Management-ready portfolio/project/feature report | `claude_management_report` |
 | Markdown/HTML dashboard snapshot | `claude_generate_dashboard` |
 | What services are sending data? | `list_services` |
-| Validate custom KQL before saving/running | `validate_kql` |
-| Ad-hoc KQL | `search` |
+| Validate custom KQL before saving/running | `validate_kql` | <!-- deep-tier -->
+| Ad-hoc KQL | `search` | <!-- deep-tier -->
 
 ## What "claude-code" telemetry contains
 
@@ -92,5 +92,5 @@ Key attributes:
 If asked to integrate a new metric or service not covered by existing tools, call
 `request_discovery` rather than authoring KQL by hand.
 
-Validate custom KQL before saving or running it. Use `validate_kql mode=live`
-only when runtime cost or engine statistics are needed.
+Validate custom KQL before saving or running it. Use `validate_kql mode=live` <!-- deep-tier -->
+only when runtime cost or engine statistics are needed. <!-- deep-tier -->

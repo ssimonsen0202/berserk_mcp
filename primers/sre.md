@@ -18,8 +18,8 @@ signals, and give operators the data they need to decide whether to page, roll b
 | How is service X doing overall? | `sre_service_health service=<name>` |
 | What services exist? | `list_services` |
 | Recent logs for a service | `logs_for_service service=<name>` |
-| Validate custom KQL before saving/running | `validate_kql` |
-| Ad-hoc KQL | `search` |
+| Validate custom KQL before saving/running | `validate_kql` | <!-- deep-tier -->
+| Ad-hoc KQL | `search` | <!-- deep-tier -->
 
 ## Escalation thresholds (example deployment baselines)
 
@@ -35,14 +35,14 @@ signals, and give operators the data they need to decide whether to page, roll b
 - Post-incident review: `6h ago` or `24h ago`
 - Rollback window check: match your deploy window
 
-## KQL authoring rules
+## KQL authoring rules <!-- deep-tier -->
 
-- Validate custom KQL before saving or running it. Use `validate_kql mode=live` only when runtime cost or engine statistics are needed.
-- Always scope with `where isnotnull(body)` before log filters
-- Use `bin(timestamp, 1m)` for per-minute trend buckets
-- `countif(severity_text == 'ERROR')` works; `avgif` may not — use `summarize` + filter
-- `otel_histogram_percentile($raw, N)` for histogram metrics (e.g. query latency)
-- Never use `$raw` in interactive bash — write a script file with single-quoted KQL
+- Validate custom KQL before saving or running it. Use `validate_kql mode=live` only when runtime cost or engine statistics are needed. <!-- deep-tier -->
+- Always scope with `where isnotnull(body)` before log filters <!-- deep-tier -->
+- Use `bin(timestamp, 1m)` for per-minute trend buckets <!-- deep-tier -->
+- `countif(severity_text == 'ERROR')` works; `avgif` may not — use `summarize` + filter <!-- deep-tier -->
+- `otel_histogram_percentile($raw, N)` for histogram metrics (e.g. query latency) <!-- deep-tier -->
+- Never use `$raw` in interactive bash — write a script file with single-quoted KQL <!-- deep-tier -->
 
 ## New data sources
 

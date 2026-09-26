@@ -25,9 +25,9 @@ enabled.
 1. Call `list_services` and identify the stable Windows event `service.name`.
 2. Call `discover_schema service=<name>` with a bounded window and record the real nested keys.
 3. Confirm whether the event fields are flattened attributes or JSON embedded in `body`.
-4. Build each `win_*` query against those observed fields, verify it live, and only then add it as
-   a role-tagged fixed tool. Save one-off verified queries with `roles=windows-forensics`.
+4. Build each `win_*` query against those observed fields, verify it live, and only then add it as <!-- deep-tier -->
+   a role-tagged fixed tool. Save one-off verified queries with `roles=windows-forensics`. <!-- deep-tier -->
 
-Until those checks succeed, use `suggest_ingestion role_or_usecase=soc/endpoint-identity` for
-ingestion guidance. Do not hand-author Windows KQL against customary `winlog.*` or Sysmon field
-names and present it as verified.
+Until those checks succeed, use `suggest_ingestion role_or_usecase=soc/endpoint-identity` for <!-- deep-tier -->
+ingestion guidance. Do not hand-author Windows KQL against customary `winlog.*` or Sysmon field <!-- deep-tier -->
+names and present it as verified. <!-- deep-tier -->

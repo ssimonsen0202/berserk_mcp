@@ -16,8 +16,8 @@ an incident. Focus on first-seen services, log spikes, repeated failures, and hi
 | Walk me through service X's recent activity | `soc_timeline service=<name>` |
 | What services exist? | `list_services` |
 | Recent logs for a specific service | `logs_for_service service=<name>` |
-| Validate custom KQL before saving/running | `validate_kql` |
-| Ad-hoc KQL | `search` |
+| Validate custom KQL before saving/running | `validate_kql` | <!-- deep-tier -->
+| Ad-hoc KQL | `search` | <!-- deep-tier -->
 
 ## Anomaly signals to watch
 
@@ -41,8 +41,8 @@ an incident. Focus on first-seen services, log spikes, repeated failures, and hi
 4. `soc_timeline service=<suspect>` — drill into the specific service
 5. `soc_new_services` — anything that appeared recently?
 
-Validate custom KQL before saving or running it. Use `validate_kql mode=live`
-only when runtime cost or engine statistics are needed.
+Validate custom KQL before saving or running it. Use `validate_kql mode=live` <!-- deep-tier -->
+only when runtime cost or engine statistics are needed. <!-- deep-tier -->
 
 ## New data sources
 

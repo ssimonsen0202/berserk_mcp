@@ -499,6 +499,13 @@ Primers live in `primers/<role>.md`, next to the server file. An explicit
 for the active lane; otherwise startup fails with a configuration error. The
 `all` role receives no primer and routes from tool descriptions directly.
 
+The small tier hides the KQL-authoring tools, so its guidance must not send the
+model to them. End a primer line with `<!-- deep-tier -->` to keep it out of the
+small tier; the deep tier shows the line without the marker. Tool descriptions
+and empty-result next steps drop any sentence that names a tool hidden in the
+current lane and tier. If an active primer still names a hidden tool, startup
+logs a warning naming it.
+
 ---
 
 ## Tools

@@ -14,9 +14,9 @@ validated custom queries when fixed tools do not fit.
 | Host CPU or memory pressure | `host_cpu`, `host_memory` |
 | Container CPU or memory pressure | `top_cpu`, `top_memory` |
 | Recent logs for a service | `logs_for_service service=<name>` |
-| Validate custom KQL before saving/running | `validate_kql` |
+| Validate custom KQL before saving/running | `validate_kql` | <!-- deep-tier -->
 | Reuse an existing custom query | `list_saved`, then `run_saved` |
-| Ad-hoc KQL | `search` |
+| Ad-hoc KQL | `search` | <!-- deep-tier -->
 
-Validate custom KQL before saving or running it. Use `validate_kql mode=live`
-only when runtime cost or engine statistics are needed.
+Validate custom KQL before saving or running it. Use `validate_kql mode=live` <!-- deep-tier -->
+only when runtime cost or engine statistics are needed. <!-- deep-tier -->
