@@ -31,9 +31,11 @@ import json
 import os
 import re
 import secrets
+import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 from pathlib import Path
@@ -47,8 +49,26 @@ import _http  # noqa: E402
 
 
 # ---------- MCP stdio handshake ----------
-def get_mcp_tools_and_instructions():
-    """Launch berserk_mcp.py, do the MCP handshake, return (tools, instructions)."""
+def get_mcp_tools_and_instructions(saved_queries=None):
+    """Launch berserk_mcp.py, do the MCP handshake, return (tools, instructions).
+
+    saved_queries: optional JSON file of saved queries. The server gets a
+    temporary copy as its learned-query store, so the eval sees those
+    `saved__*` tools and never touches the operator's real store. The copy is
+    removed once the handshake is done, whether it succeeded or not."""
+    if not saved_queries:
+        return _mcp_handshake(None)
+    store_dir = tempfile.mkdtemp(prefix="berserk-eval-store-")
+    try:
+        store = Path(store_dir) / "learned.json"
+        shutil.copyfile(saved_queries, store)
+        return _mcp_handshake(dict(os.environ, BERSERK_MCP_LEARNED_PATH=str(store)))
+    finally:
+        shutil.rmtree(store_dir, ignore_errors=True)
+
+
+def _mcp_handshake(env):
+    """Start the server with `env` (None: inherit), return (tools, instructions)."""
     proc = subprocess.Popen(
         [sys.executable, str(SERVER)],
         stdin=subprocess.PIPE,
@@ -56,6 +76,7 @@ def get_mcp_tools_and_instructions():
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
+        env=env,
     )
 
     def send(obj):
@@ -529,17 +550,39 @@ def aggregate_usage(rows):
 
 
 # ---------- scoring ----------
+def resolve_case(case, served):
+    """The case as scored against this server, or None if not applicable.
+
+    `expect_tool` is the answer when served. When it is hidden (by role or
+    tier) and the case names `expect_tool_when_hidden`, that tool becomes the
+    answer, with `expect_args_when_hidden` as its arguments: e.g. `search` in
+    the deep tier, a `saved__*` query in the small tier. `also_accept` lists
+    other tools that also count as correct wherever they are served.
+    """
+    if case["expect_tool"] in served:
+        return case
+    fallback = case.get("expect_tool_when_hidden")
+    if fallback and fallback in served:
+        resolved = {k: v for k, v in case.items() if k not in ("expect_args", "expect_since_any", "expect_since_valid")}
+        resolved["expect_tool"] = fallback
+        if case.get("expect_args_when_hidden"):
+            resolved["expect_args"] = case["expect_args_when_hidden"]
+        return resolved
+    return None
+
+
 def applicable(case, served):
-    """True when the server under test serves the tool the case expects."""
-    return case["expect_tool"] in served
+    """True when the server under test can answer the case."""
+    return resolve_case(case, served) is not None
 
 
 def split_applicable(cases, tools):
-    """(cases to score, ids not applicable) for the served tool list. Both
-    run modes use this, so a lane run never scores a case for a tool the
-    lane cannot see as a routing miss."""
+    """(resolved cases to score, ids not applicable) for the served tool
+    list. Both run modes use this, so a lane run never scores a case for a
+    tool the lane cannot see as a routing miss."""
     served = {t["name"] for t in tools}
-    return [c for c in cases if applicable(c, served)], [c["id"] for c in cases if not applicable(c, served)]
+    resolved = [resolve_case(c, served) for c in cases]
+    return [r for r in resolved if r is not None], [c["id"] for c, r in zip(cases, resolved) if r is None]
 
 
 def _print_not_applicable(cases, not_applicable):
@@ -549,7 +592,7 @@ def _print_not_applicable(cases, not_applicable):
 
 
 def score_case(case, tool_name, args):
-    tool_ok = tool_name == case["expect_tool"]
+    tool_ok = tool_name == case["expect_tool"] or tool_name in (case.get("also_accept") or ())
     arg_ok = True
     for k, v in (case.get("expect_args") or {}).items():
         got = str(args.get(k, "")).strip().lower()
@@ -613,7 +656,7 @@ def _run_tier_policy(args_ns, cases):
     if not args_ns.deep_model:
         sys.exit("--tier-policy requires --deep-model")
 
-    tools, instructions = get_mcp_tools_and_instructions()
+    tools, instructions = get_mcp_tools_and_instructions(args_ns.saved_queries)
     system = (
         instructions or "Use the provided tools to answer."
     ) + "\nChoose exactly one tool call that best answers the user's question."
@@ -820,6 +863,11 @@ def main():
     ap.add_argument("--base-url", default="")
     ap.add_argument("--key-env", default="", help="env var holding the API key")
     ap.add_argument("--repeats", type=int, default=1)
+    ap.add_argument(
+        "--saved-queries",
+        default="",
+        help="JSON file of saved queries to serve as saved__* tools (e.g. evals/fixtures/saved_queries.json)",
+    )
     ap.add_argument("--limit", type=int, default=0, help="run only first N cases")
     ap.add_argument("--tool-choice", default="", help="override tool_choice")
     ap.add_argument(
@@ -881,7 +929,7 @@ def main():
     if not args_ns.backend:
         ap.error("--backend is required (or use --tier-policy for two-tier mode)")
 
-    tools, instructions = get_mcp_tools_and_instructions()
+    tools, instructions = get_mcp_tools_and_instructions(args_ns.saved_queries)
     system = (
         instructions or "Use the provided tools to answer."
     ) + "\nChoose exactly one tool call that best answers the user's question."

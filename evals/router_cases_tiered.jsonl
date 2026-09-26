@@ -1,0 +1,3 @@
+{"id": "tier_nginx_5xx", "prompt": "How many nginx 5xx responses did each request path get in the last hour?", "expect_tool": "search", "also_accept": ["saved__nginx_5xx_by_path"], "expect_tool_when_hidden": "saved__nginx_5xx_by_path"}
+{"id": "tier_pg_slow", "prompt": "Which postgres statements took longer than one second?", "expect_tool": "search", "also_accept": ["saved__postgres_slow_statements"], "expect_tool_when_hidden": "saved__postgres_slow_statements"}
+{"id": "tier_failed_logins", "prompt": "Show failed login attempts grouped by user and source address.", "expect_tool": "search", "also_accept": ["saved__failed_logins_by_user"], "expect_tool_when_hidden": "saved__failed_logins_by_user"}

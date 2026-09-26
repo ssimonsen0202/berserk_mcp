@@ -32,6 +32,7 @@ class RouterCaseCoverageTest(unittest.TestCase):
     def setUpClass(cls):
         cls.files, cls.cases = _load_cases()
         cls.tool_names = {t["name"] for t in berserk_mcp.TOOLS + berserk_mcp.MGMT_TOOLS}
+        cls.schemas = {t["name"]: t["inputSchema"] for t in berserk_mcp.TOOLS + berserk_mcp.MGMT_TOOLS}
         cls.covered = {case["expect_tool"] for _, _, case in cls.cases}
 
     def test_case_files_found(self):
@@ -60,6 +61,25 @@ class RouterCaseCoverageTest(unittest.TestCase):
         for filename, lineno, case in self.cases:
             with self.subTest(file=filename, line=lineno):
                 self.assertIn(case.get("expect_tool"), self.tool_names)
+
+    def test_alternative_answers_are_real_tools(self):
+        # expect_tool_when_hidden / also_accept may name a saved__ tool, but
+        # only one the eval fixture store defines (run_eval --saved-queries).
+        fixture = ROOT / "evals" / "fixtures" / "saved_queries.json"
+        saved = {"saved__" + berserk_mcp.sanitize_name(q["name"]) for q in json.loads(fixture.read_text())}
+        for filename, lineno, case in self.cases:
+            alternatives = list(case.get("also_accept") or [])
+            if case.get("expect_tool_when_hidden"):
+                alternatives.append(case["expect_tool_when_hidden"])
+            for name in alternatives:
+                with self.subTest(file=filename, line=lineno, tool=name):
+                    self.assertIn(name, self.tool_names | saved)
+            fallback = case.get("expect_tool_when_hidden")
+            for arg in case.get("expect_args_when_hidden") or {}:
+                with self.subTest(file=filename, line=lineno, arg=arg):
+                    # A saved__ tool takes only `since`; a built-in tool takes its schema's arguments.
+                    props = {"since"} if fallback in saved else set(self.schemas[fallback].get("properties", {}))
+                    self.assertIn(arg, props)
 
     def test_case_ids_unique_across_files(self):
         seen = {}

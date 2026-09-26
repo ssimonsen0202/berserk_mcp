@@ -35,8 +35,33 @@ class SplitApplicableTest(unittest.TestCase):
         self.assertEqual(skipped, ["b"])
 
 
+class ResolveCaseTest(unittest.TestCase):
+    CASE = {
+        "id": "t",
+        "expect_tool": "search",
+        "expect_args": {"kql": "x"},
+        "also_accept": ["saved__q"],
+        "expect_tool_when_hidden": "saved__q",
+    }
+
+    def test_expected_tool_served_is_scored_as_is(self):
+        self.assertIs(run_eval.resolve_case(self.CASE, {"search", "saved__q"}), self.CASE)
+
+    def test_hidden_expected_tool_falls_back(self):
+        resolved = run_eval.resolve_case(self.CASE, {"saved__q"})
+        self.assertEqual(resolved["expect_tool"], "saved__q")
+        self.assertNotIn("expect_args", resolved)
+
+    def test_no_served_answer_is_not_applicable(self):
+        self.assertIsNone(run_eval.resolve_case(self.CASE, {"top_cpu"}))
+
+    def test_also_accept_counts_as_correct(self):
+        self.assertTrue(run_eval.score_case(self.CASE, "saved__q", {})[0])
+        self.assertFalse(run_eval.score_case(self.CASE, "top_cpu", {})[0])
+
+
 class LaneRunTest(unittest.TestCase):
-    def _invoke(self, role, cases_path, tier=""):
+    def _invoke(self, role, cases_path, tier="", extra=()):
         tmp = tempfile.mkdtemp()
         env = dict(os.environ)
         for key in [k for k in env if k.startswith(("BERSERK_MCP_", "BERSERK_LLM_"))]:
@@ -44,7 +69,16 @@ class LaneRunTest(unittest.TestCase):
         env.update({"HOME": tmp, "USERPROFILE": tmp, "BERSERK_MCP_ROLE": role, "BERSERK_MCP_TIER": tier})
         out = Path(tmp) / "report.json"
         result = subprocess.run(
-            [sys.executable, str(HERE / "run_eval.py"), "--backend", "mock", "--out", str(out), str(cases_path)],
+            [
+                sys.executable,
+                str(HERE / "run_eval.py"),
+                "--backend",
+                "mock",
+                "--out",
+                str(out),
+                *extra,
+                str(cases_path),
+            ],
             capture_output=True,
             text=True,
             env=env,
@@ -73,6 +107,25 @@ class LaneRunTest(unittest.TestCase):
             self.assertEqual(deep.returncode, 0, deep.stderr[-1000:])
             self.assertEqual(json.loads(small_out.read_text())["not_applicable"], ["kql"])
             self.assertEqual(json.loads(deep_out.read_text())["not_applicable"], [])
+
+    def test_tier_specific_answer_uses_the_saved_query_fixture(self):
+        cases = HERE / "router_cases_tiered.jsonl"
+        fixture = ("--saved-queries", str(HERE / "fixtures" / "saved_queries.json"))
+        small, small_out = self._invoke("ops", cases, tier="small", extra=fixture)
+        deep, deep_out = self._invoke("ops", cases, tier="deep", extra=fixture)
+        bare, bare_out = self._invoke("ops", cases, tier="small")
+        self.assertEqual(small.returncode, 0, small.stderr[-800:])
+        self.assertEqual(deep.returncode, 0, deep.stderr[-800:])
+        self.assertNotEqual(bare.returncode, 0)
+        small_rows = json.loads(small_out.read_text())["rows"]
+        deep_rows = json.loads(deep_out.read_text())["rows"]
+        self.assertEqual(
+            {r["expect"] for r in small_rows},
+            {"saved__nginx_5xx_by_path", "saved__postgres_slow_statements", "saved__failed_logins_by_user"},
+        )
+        self.assertEqual({r["expect"] for r in deep_rows}, {"search"})
+        # Without the fixture the small tier serves neither answer.
+        self.assertIn("no applicable cases", bare.stderr + bare.stdout)
 
     def test_no_applicable_cases_exits_nonzero(self):
         with tempfile.TemporaryDirectory() as tmp:

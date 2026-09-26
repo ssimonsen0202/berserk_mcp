@@ -1,0 +1,20 @@
+[
+  {
+    "name": "nginx_5xx_by_path",
+    "description": "Count nginx 5xx responses by request path, most first.",
+    "kql": "default | where resource['service.name'] == 'nginx' and toint(attributes['http.status_code']) >= 500 | summarize n=count() by path=tostring(attributes['http.target']) | sort by n desc | take 20",
+    "since": "1h ago"
+  },
+  {
+    "name": "postgres_slow_statements",
+    "description": "Postgres statements slower than one second, slowest first.",
+    "kql": "default | where resource['service.name'] == 'postgres' and todouble(attributes['db.duration_ms']) > 1000 | project timestamp, statement=tostring(attributes['db.statement']), ms=todouble(attributes['db.duration_ms']) | sort by ms desc | take 20",
+    "since": "1h ago"
+  },
+  {
+    "name": "failed_logins_by_user",
+    "description": "Failed login attempts grouped by user and source address.",
+    "kql": "default | where body has 'authentication failure' | summarize attempts=count() by user=tostring(attributes['user.name']), source=tostring(attributes['source.address']) | sort by attempts desc | take 20",
+    "since": "1h ago"
+  }
+]
