@@ -135,6 +135,12 @@ Answers to the brief's six outcome questions:
   Expected saving: 318 bytes per tool (377 down to 59 bytes serialized), which is about 5.7 KB (about 1,400 tokens) in `ops` and about 18.8 KB in `all`. I checked that the example pattern accepts every form the two existing `since` schema tests require, including `NOW`, `2 HOURS AGO` and `1D`.
 - **Compatibility risk:** low. Upper-case forms stay valid. A client doing grammar-constrained decoding could now produce an unknown unit, which the server rejects with a clear message.
 
+- **Outcome (2026-09-26):** shipped as a 59-byte case-insensitive pattern. Before/after router evals with role `all` (DeepSeek v4.1 Flash and Claude Haiku 4.5 via OpenRouter; `router_cases`, `router_cases_nearmiss` and a new `router_cases_since` with server-validity scoring; 1 repeat each):
+  - input tokens fell about 47% per run, far more than the 24% byte saving, because the per-letter pattern tokenised badly; cost fell 35–41%;
+  - tool and argument accuracy were unchanged within one case per run, and no difference involved `since`;
+  - every `since` value was server-valid, and the new `since` cases scored 100% on both sides.
+  The 12 runs are in `evals/run_ledger.jsonl`.
+
 ### P2: The error-rate investigation reports "healthy" when a source has gone silent
 
 - **File:line:** `investigation._node_start` (`investigation.py:114-160`); `ERROR_RATE_INVESTIGATE_PER_MIN = 10` (`investigation.py:25`).
