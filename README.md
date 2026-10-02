@@ -1616,9 +1616,9 @@ for full detail, known limits, and the regression test for each.
 ## Testing
 
 ```bash
-python -m pytest tests/ -q
-# stdlib unittest is also supported:
 python3 -m unittest discover -s tests
+# pytest also works if it is installed (it is not a dependency):
+#   python3 -m pytest tests/ -q
 python3 tests/test_berserk_mcp.py
 python3 -m unittest discover -s evals -p "test_*.py"
 python3 -m unittest discover -s ingestion -p "test_*.py"
