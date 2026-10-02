@@ -109,9 +109,9 @@ can be reviewed, tested, and cited as one thing.
   matching instruction to treat the content strictly as data. This fencing
   is issue #11; see `_fence_untrusted` and the `UntrustedDataFencing*` test
   classes for the full call-site coverage and threat-model detail. Since
-  v1.36.0, results of user-written KQL (`search`, saved queries) go through
-  `_fence_limited`, which cuts them to `BERSERK_MCP_MAX_OUTPUT_CHARS` first
-  and then fences them. A cut result carries a note after the closing tag
-  that says how many rows were shown, so a partial result never reads as
-  the whole answer. Both `_fence_limited` and `_fence_untrusted` are
-  sanitizers in `.semgrep/fence-untrusted-data.yml`.
+  v1.36.0, `_fence_limited` handles results of user-written KQL (`search`
+  and saved queries). It cuts the result to `BERSERK_MCP_MAX_OUTPUT_CHARS`,
+  then fences it. After the closing tag, it adds a note that gives the rows
+  or characters the model received. The model therefore cannot mistake a
+  partial result for the whole answer. `.semgrep/fence-untrusted-data.yml`
+  lists both `_fence_limited` and `_fence_untrusted` as sanitizers.

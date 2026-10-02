@@ -47,13 +47,16 @@ first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
 - **v1.36.0** (2026-10-02) — Bounded output. `search` and saved queries
-  used to return the whole result to the model, up to the 10 MiB stdout cap.
-  They now send at most `BERSERK_MCP_MAX_OUTPUT_CHARS` (40,000, about 10k
-  tokens), cut by whole rows, with a note outside the untrusted-data fence
-  saying how many rows were shown. JSON results from eight tools are compact
-  instead of pretty-printed (32% fewer characters on `find_tool`). The result
-  cache and fail-cooldown table are bounded by `BERSERK_MCP_CACHE_MAX_ENTRIES`
-  (256). See [docs/releases/v1.36.0.md](docs/releases/v1.36.0.md).
+  sent the model the whole result, up to the 10 MiB stdout cap. They now
+  send at most `BERSERK_MCP_MAX_OUTPUT_CHARS` characters (default 40,000,
+  about 10k tokens). The server cuts JSON up to 1,000,000 characters by whole
+  rows, and cuts anything larger at a line break. A note after the
+  untrusted-data fence tells the model how much it received. Eight tools now
+  return compact JSON, which is 32% shorter on `find_tool`. The result cache
+  and the fail-cooldown table keep at most `BERSERK_MCP_CACHE_MAX_ENTRIES`
+  entries (default 256). A Codex Security scan found two low-severity memory
+  faults in the first version of the cut. This release fixes both. See
+  [docs/releases/v1.36.0.md](docs/releases/v1.36.0.md).
 - **v1.35.0** (2026-09-26) — Output redaction closes the non-JSON gaps.
   After a credential key, the whole value is now removed: YAML block
   scalars, quoted values with a line break, bare values with spaces, and
