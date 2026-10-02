@@ -21,6 +21,7 @@ Configuration (all optional, via environment):
   BERSERK_MCP_TOOL_BUDGET_SECONDS interactive tools/call budget (default: "10")
   BERSERK_MCP_FAIL_COOLDOWN_SECONDS identical timeout suppression (default: "30")
   BERSERK_MCP_CACHE_TTL_SECONDS read-only result cache TTL (default: "120")
+  BERSERK_MCP_CACHE_MAX_ENTRIES entries kept in the result cache and the fail-cooldown table (default: "256")
   BERSERK_MCP_KQL_VALIDATION validation policy: off/warn/strict (default: "warn")
   BERSERK_MCP_KQL_LIVE_VALIDATION enable validate_kql mode=live (default: "0")
   BERSERK_MCP_MAX_CONCURRENT_QUERIES in-process query concurrency (default: "2")
@@ -28,6 +29,7 @@ Configuration (all optional, via environment):
   BERSERK_MCP_KQL_MAX_ROWS recommended arbitrary-query row bound (default: "2000")
   BERSERK_MCP_KQL_STATS stats handling: off/auto/required (default: "auto")
   BERSERK_MCP_MAX_RESULT_BYTES hard cap for bzrk stdout (default: 10485760)
+  BERSERK_MCP_MAX_OUTPUT_CHARS characters of search/saved-query result sent to the model; 0 = no cap (default: "40000")
   BERSERK_MCP_FINOPS_REDACT_ENTROPY enable entropy redaction in FinOps free text (default: "0")
   BERSERK_TABLE            the Berserk table to query             (default: "default")
   BERSERK_MCP_LEARNED_PATH where saved queries persist  (default: per-user config dir)
@@ -88,7 +90,7 @@ import schema_registry
 import secret_scan
 import tool_discovery
 
-__version__ = "1.35.0"
+__version__ = "1.36.0"
 
 
 def log(msg):
@@ -237,6 +239,8 @@ def _window_budget(base, since, multiplier=1.0):
 
 FAIL_COOLDOWN_SECONDS = _nonnegative_float_env("BERSERK_MCP_FAIL_COOLDOWN_SECONDS", 30)
 CACHE_TTL_SECONDS = _nonnegative_float_env("BERSERK_MCP_CACHE_TTL_SECONDS", 120)
+# A bound, not a switch: 0 falls back to the default rather than disabling it.
+CACHE_MAX_ENTRIES = _nonnegative_int_env("BERSERK_MCP_CACHE_MAX_ENTRIES", 256) or 256
 KQL_VALIDATION_MODE = _choice_env("BERSERK_MCP_KQL_VALIDATION", "warn", {"off", "warn", "strict"})
 KQL_LIVE_VALIDATION = os.environ.get("BERSERK_MCP_KQL_LIVE_VALIDATION", "0").strip().lower() in {
     "1",
@@ -249,6 +253,10 @@ KQL_MAX_CHARS = _nonnegative_int_env("BERSERK_MCP_KQL_MAX_CHARS", 50000) or 5000
 KQL_MAX_ROWS = _nonnegative_int_env("BERSERK_MCP_KQL_MAX_ROWS", 2000) or 2000
 KQL_STATS_MODE = _choice_env("BERSERK_MCP_KQL_STATS", "auto", {"off", "auto", "required"})
 MAX_BZRK_RESULT_BYTES = _nonnegative_int_env("BERSERK_MCP_MAX_RESULT_BYTES", 10 * 1024 * 1024) or 10 * 1024 * 1024
+# Model-facing budget for user-written KQL results (search, saved queries).
+# MAX_BZRK_RESULT_BYTES protects the process; this protects the model's
+# context. ~40,000 characters is roughly 10k tokens. 0 disables the cap.
+MAX_OUTPUT_CHARS = _nonnegative_int_env("BERSERK_MCP_MAX_OUTPUT_CHARS", 40000)
 FINOPS_REDACT_ENTROPY = os.environ.get("BERSERK_MCP_FINOPS_REDACT_ENTROPY", "0").strip().lower() in {
     "1",
     "true",
@@ -275,6 +283,21 @@ def _reset_fleet_state():
         _RESULT_CACHE.clear()
         _FAIL_COOLDOWN.clear()
         _FLEET_BACKEND_ID = None
+
+
+def _bounded_put(store, key, value, *, ttl, now):
+    """Insert into a fleet table (an insertion-ordered dict of
+    key -> (text, is_err, stamp)). Expired entries used to stay until the
+    same key came back, so a long-running server kept every distinct query
+    it had answered. Sweeps expired entries, then evicts the oldest beyond
+    CACHE_MAX_ENTRIES. Caller holds _FLEET_LOCK."""
+    if ttl > 0:
+        for stale in [k for k, v in store.items() if now - v[2] >= ttl]:
+            del store[stale]
+    store.pop(key, None)  # re-insert at the end so eviction order stays oldest-first
+    store[key] = value
+    while len(store) > CACHE_MAX_ENTRIES:
+        del store[next(iter(store))]
 
 
 # F-009: default to the safest output mode. An invalid mode string fails
@@ -550,6 +573,99 @@ def _fence_untrusted(text, inline=False):
     body = _tag_guard.neutralize(text, _UNTRUSTED_DATA_TAG_RE, "untrusted_log_data")
     sep = "" if inline else "\n"
     return f"{_UNTRUSTED_DATA_OPEN}{sep}{body}{sep}{_UNTRUSTED_DATA_CLOSE}"
+
+
+_TRUNCATION_HINT = "Add `| take N`, a narrower `where`, or `summarize` to see the rest."
+
+
+def _compact(value):
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+def _cut_rows(doc, rows, budget):
+    """Trim `rows` (a list inside `doc`) in place to the leading rows whose
+    compact JSON fits in `budget` characters. Sizes each row once instead of
+    re-serializing the whole document per row, since the input can be up to
+    MAX_BZRK_RESULT_BYTES. Returns (kept, total), or None with `rows` left
+    unchanged when even the document without rows doesn't fit."""
+    source = list(rows)
+    rows[:] = []
+    size = len(_compact(doc))
+    if size > budget:
+        rows[:] = source
+        return None
+    kept = 0
+    for row in source:
+        size += len(_compact(row)) + (1 if kept else 0)
+        if size > budget:
+            break
+        kept += 1
+    rows[:] = source[:kept]
+    return kept, len(source)
+
+
+def _limit_model_output(out, budget):
+    """Cut a user-KQL result (search, saved queries) to `budget` characters
+    before it is fenced, so the fence stays intact and the returned note is
+    server text the caller appends outside it. Returns (out, note); output
+    within budget comes back untouched with an empty note.
+
+    bzrk --json results ({"Tables": [{"schema": ..., "rows": [[...]]}]}) and
+    bare JSON arrays are cut by whole rows and stay valid JSON. Anything else
+    (table text from a bzrk without --json, an unknown shape) is cut at a
+    line boundary."""
+    text = str(out)
+    if not budget or len(text) <= budget:
+        return out, ""
+    try:
+        doc = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        doc = None
+    rows = None
+    if isinstance(doc, list):
+        rows = doc
+    elif isinstance(doc, dict):
+        tables = doc.get("Tables")
+        if (
+            isinstance(tables, list)
+            and tables
+            and isinstance(tables[0], dict)
+            and isinstance(tables[0].get("rows"), list)
+        ):
+            rows = tables[0]["rows"]
+    if rows is not None:
+        cut = _cut_rows(doc, rows, budget)
+        if cut is not None:
+            kept, total = cut
+            note = (
+                f"[berserk-mcp: result truncated, showing {kept} of {total} rows to stay within "
+                f"{budget} characters (BERSERK_MCP_MAX_OUTPUT_CHARS). {_TRUNCATION_HINT}]"
+            )
+            return _compact(doc), note
+    lines = text.splitlines()
+    kept_lines, size = [], 0
+    for line in lines:
+        size += len(line) + (1 if kept_lines else 0)
+        if size > budget:
+            break
+        kept_lines.append(line)
+    cut_text = "\n".join(kept_lines) if kept_lines else text[:budget]
+    note = (
+        f"[berserk-mcp: result truncated, showing {len(kept_lines)} of {len(lines)} lines "
+        f"({len(cut_text)} of {len(text)} characters, BERSERK_MCP_MAX_OUTPUT_CHARS). {_TRUNCATION_HINT}]"
+    )
+    return cut_text, note
+
+
+def _fence_limited(out):
+    """Fence a user-KQL result after cutting it to MAX_OUTPUT_CHARS. The
+    truncation note is server text built only from counts, so it goes after
+    the closing fence tag. Listed as a sanitizer in
+    .semgrep/fence-untrusted-data.yml because it always calls
+    _fence_untrusted on the content."""
+    limited, note = _limit_model_output(out, MAX_OUTPUT_CHARS)
+    fenced = _fence_untrusted(limited)
+    return f"{fenced}\n{note}" if note else fenced
 
 
 def _wrap_analytics(result):
@@ -2290,7 +2406,7 @@ def _canonloom_call(path: str, method: str = "GET", body=None):
             data, err = _http.http_post_json(url, headers, body or {}, timeout=300, allow_plaintext_remote=False)
         if err:
             return f"CanonLoom API error: {err}", True
-        return _json.dumps(data, indent=2), False
+        return _json.dumps(data, separators=(",", ":")), False
     except Exception as exc:
         return f"CanonLoom API error: {exc}", True
 
@@ -2683,7 +2799,9 @@ def _run_saved_entry(match, since_arg):
         if _blocking_validation(report):
             return prefix + _format_validation_rejection(report), True
     out, err = bzrk_search_json(match["kql"], since)
-    return prefix + _fence_untrusted(out), err
+    if err:
+        return prefix + _fence_untrusted(out), err
+    return prefix + _fence_limited(out), err
 
 
 def _handle_learning_loop(name, arguments):
@@ -2882,7 +3000,7 @@ def _handle_parser_core(name, arguments):
             "role_hint": role_hint[0] if role_hint else "",
         }
         report, ok = parser_factory.generate_parser_for(job)
-        return json.dumps(report, indent=2), not ok
+        return json.dumps(report, separators=(",", ":")), not ok
     if name == "run_discovery_worker":
         raw_max = arguments.get("max_jobs")
         try:
@@ -2903,7 +3021,7 @@ def _handle_parser_core(name, arguments):
             match = next((it for it in generated if it["name"] == nm), None)
             if not match:
                 return f"No generated query named '{nm}'.", True
-            return json.dumps(match, indent=2), False
+            return json.dumps(match, separators=(",", ":")), False
         if not generated:
             return "No generated queries yet.", False
         lines = []
@@ -2947,7 +3065,7 @@ def _handle_validate_kql(arguments):
                 True,
             )
         if any(f.get("severity") == "error" for f in report.get("findings", [])):
-            return json.dumps(report, indent=2), True
+            return json.dumps(report, separators=(",", ":")), True
         # The report above is advisory; this is the same mandatory check
         # bzrk_search applies, since this path calls run_bzrk directly.
         boundary_error = _kql_boundary.check(str(kql), TABLE)
@@ -2992,8 +3110,8 @@ def _handle_validate_kql(arguments):
         # report; the taint tracker can't follow it through the
         # dict-field write and json.dumps, but the fencing genuinely
         # happened.
-        return json.dumps(report, indent=2), bool(err)  # nosemgrep: unfenced-bzrk-output-reaches-return
-    return json.dumps(report, indent=2), False
+        return json.dumps(report, separators=(",", ":")), bool(err)  # nosemgrep: unfenced-bzrk-output-reaches-return
+    return json.dumps(report, separators=(",", ":")), False
 
 
 def _handle_diagnostic_tools(name, arguments):
@@ -3221,7 +3339,7 @@ def _handle_query_tools(name, arguments):
     if name == "self_check":
         results = _run_doctor_checks()
         code = _doctor_exit_code(results)
-        return json.dumps({"checks": results, "exit_code": code}, indent=2, sort_keys=True), code == 2
+        return json.dumps({"checks": results, "exit_code": code}, separators=(",", ":"), sort_keys=True), code == 2
     if name == "schema":
         return do_schema()
     if name == "discover_schema":
@@ -3293,7 +3411,7 @@ def _handle_search_tools(name, arguments):
         out, err = bzrk_search_json(str(kql), since)
         if err:
             return _fence_untrusted(out), err
-        out = _fence_untrusted(out)
+        out = _fence_limited(out)
         if warning:
             return warning + "\n\n" + out, False
         return out, False
@@ -3317,7 +3435,7 @@ def _handle_search_tools(name, arguments):
             payload["message"] = (
                 "No confident match for that intent -- these are the always-available anchor tools instead."
             )
-        return json.dumps(payload, indent=2), False
+        return json.dumps(payload, separators=(",", ":")), False
     if name == "claude_search":
         term = arguments.get("term")
         if not term:
@@ -3794,10 +3912,11 @@ def handle_call(name, arguments):
     # introduce a false-positive risk.
     timed_out = is_err and f"{name} exceeded its " in text
     with _FLEET_LOCK:
+        stamp = time.monotonic()
         if timed_out and FAIL_COOLDOWN_SECONDS > 0:
-            _FAIL_COOLDOWN[key] = (text, True, time.monotonic())
+            _bounded_put(_FAIL_COOLDOWN, key, (text, True, stamp), ttl=FAIL_COOLDOWN_SECONDS, now=stamp)
         elif name in _CACHEABLE_TOOLS and not is_err and CACHE_TTL_SECONDS > 0:
-            _RESULT_CACHE[key] = (text, False, time.monotonic())
+            _bounded_put(_RESULT_CACHE, key, (text, False, stamp), ttl=CACHE_TTL_SECONDS, now=stamp)
     return text, is_err
 
 

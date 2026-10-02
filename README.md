@@ -42,10 +42,18 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.35.0**. This is a bullet-point overview, most recent
+Current version: **1.36.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.36.0** (2026-10-02) — Bounded output. `search` and saved queries
+  used to return the whole result to the model, up to the 10 MiB stdout cap.
+  They now send at most `BERSERK_MCP_MAX_OUTPUT_CHARS` (40,000, about 10k
+  tokens), cut by whole rows, with a note outside the untrusted-data fence
+  saying how many rows were shown. JSON results from eight tools are compact
+  instead of pretty-printed (32% fewer characters on `find_tool`). The result
+  cache and fail-cooldown table are bounded by `BERSERK_MCP_CACHE_MAX_ENTRIES`
+  (256). See [docs/releases/v1.36.0.md](docs/releases/v1.36.0.md).
 - **v1.35.0** (2026-09-26) — Output redaction closes the non-JSON gaps.
   After a credential key, the whole value is now removed: YAML block
   scalars, quoted values with a line break, bare values with spaces, and

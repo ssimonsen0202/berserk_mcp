@@ -28,6 +28,9 @@ rules:
       - pattern: _fence_untrusted(...)
       - pattern: _envelope(..., fence_body=True)
       - pattern: _wrap_analytics(...)
+      # Cuts to MAX_OUTPUT_CHARS, then calls _fence_untrusted; the note it
+      # appends after the fence holds only row/character counts.
+      - pattern: _fence_limited(...)
     pattern-sinks:
       - patterns:
           - pattern-either:

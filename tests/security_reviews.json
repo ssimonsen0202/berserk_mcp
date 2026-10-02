@@ -166,5 +166,11 @@
     "reviewed": "2026-09-26",
     "by": "codex",
     "note": "YAML block scalar / indented continuation: lines blank or deeper than the key line; past MAX_MULTILINE_VALUE_CHARS fails closed. v1.35.0."
+  },
+  "berserk_mcp:_fence_limited": {
+    "fingerprint": "2d89a36f42c90415",
+    "reviewed": "2026-10-02",
+    "by": "claude-code (self-review, needs independent review)",
+    "note": "sanitizer for the fencing semgrep rule (v1.36.0). Cuts a user-KQL result to MAX_OUTPUT_CHARS via _limit_model_output, then always calls _fence_untrusted on the content; the appended note sits after the closing tag and is built only from counts, the budget and fixed text. Rule canary checked: unfenced return and cut-without-fence are flagged, _fence_limited is not."
   }
 }
