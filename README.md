@@ -42,10 +42,16 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.36.1**. This is a bullet-point overview, most recent
+Current version: **1.36.2**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.36.2** (2026-10-02) — Usage corrections. `claude_spend_overview` now
+  also reads records with `service.name` `claude-code-usage-correction`. A
+  correction carries the full token usage of an older API call that reached
+  Berserk without its cache tokens. The query merges it into the call by
+  `message_id`, so the call still counts once. No other tool reads these
+  records. See [docs/releases/v1.36.2.md](docs/releases/v1.36.2.md).
 - **v1.36.1** (2026-10-02) — Current Claude prices. The pricing catalog had
   no entry for Opus 5.5, Opus 5, Sonnet 5.5, Fable 5.1 or Mythos 5.1, so
   `claude_spend_overview` priced their usage at $0. It also charged Sonnet 5

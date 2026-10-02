@@ -90,7 +90,7 @@ import schema_registry
 import secret_scan
 import tool_discovery
 
-__version__ = "1.36.1"
+__version__ = "1.36.2"
 
 
 def log(msg):

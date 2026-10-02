@@ -471,6 +471,16 @@ class NormalizationAndPricingTest(FinopsTestCase):
         self.assertEqual(result["public_api_equivalent_usd"], 61.0)
         self.assertEqual(result["pricing_variant"], "fast")
 
+    def test_usage_query_reads_usage_corrections(self):
+        # Corrections re-send the full usage of calls ingested before the
+        # forwarder sent cache tokens. They use their own service.name so
+        # that no other tool counts them as events; only this query reads
+        # them, and the max() merge by message_id folds them into the call.
+        query = af.usage_aggregate_query()
+        self.assertIn(af.USAGE_CORRECTION_SERVICE, query)
+        self.assertEqual(af.USAGE_CORRECTION_SERVICE, "claude-code-usage-correction")
+        self.assertIn("resource['service.name'] in ('claude-code', 'claude-code-usage-correction')", query)
+
     def test_query_is_bounded_and_aggregate_first(self):
         query = af.usage_aggregate_query()
         self.assertIn("summarize", query)

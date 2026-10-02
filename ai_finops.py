@@ -725,10 +725,17 @@ def _max_agg_clause(fields):
     return ", ".join(f"{f}=max({f})" for f in fields)
 
 
+# Records that re-send the full token usage of calls ingested before the
+# forwarder sent cache tokens (2026-10-02). Their own service.name keeps them
+# out of every event-counting tool; only this query reads them, and the
+# max() merge by dedupe_key and message_id folds each one into its call.
+USAGE_CORRECTION_SERVICE = "claude-code-usage-correction"
+
+
 def usage_aggregate_query():
     """Bounded, aggregate-first query for enterprise reporting."""
     return (
-        f"{_table} | where resource['service.name'] == 'claude-code' "
+        f"{_table} | where resource['service.name'] in ('claude-code', '{USAGE_CORRECTION_SERVICE}') "
         "| extend raw_attributes=$raw['attributes'], raw_resource=$raw['resource'] "
         "| extend event_name=tostring(raw_attributes['event.name']), "
         "legacy_type=tostring(raw_attributes['claude.type']) "
