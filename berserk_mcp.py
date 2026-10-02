@@ -604,23 +604,51 @@ def _cut_rows(doc, rows, budget):
     return kept, len(source)
 
 
-def _limit_model_output(out, budget):
+# Decoding JSON costs ~25x its size in Python objects (Codex Security, scan of
+# 6cc02c5: ~209 MB for an 8 MB tiny-row result). Above this size the limiter
+# does not decode; it cuts the text instead, so memory stays bounded.
+_MAX_JSON_PARSE_CHARS = 1_000_000
+# How long _fence_limited waits for a query slot before it falls back to the
+# text cut, which needs no slot because it allocates only the kept prefix.
+_POST_PROCESS_SLOT_WAIT_SECONDS = 10.0
+
+
+def _cut_text(text, budget, reason=""):
+    """Leading characters of `text` within `budget`, ending at the last line
+    break that fits. Uses rfind on the budget window only, never splitlines
+    on the whole text (Codex Security finding 2: ~71 MB for 10 MB of short
+    lines)."""
+    end = text.rfind("\n", 0, budget + 1)
+    cut = text[:end].rstrip("\r") if end > 0 else text[:budget]
+    note = (
+        f"[berserk-mcp: result truncated{reason}, showing the first {len(cut)} of {len(text)} characters "
+        f"(BERSERK_MCP_MAX_OUTPUT_CHARS). {_TRUNCATION_HINT}]"
+    )
+    return cut, note
+
+
+def _limit_model_output(out, budget, parse_json=True):
     """Cut a user-KQL result (search, saved queries) to `budget` characters
     before it is fenced, so the fence stays intact and the returned note is
     server text the caller appends outside it. Returns (out, note); output
     within budget comes back untouched with an empty note.
 
     bzrk --json results ({"Tables": [{"schema": ..., "rows": [[...]]}]}) and
-    bare JSON arrays are cut by whole rows and stay valid JSON. Anything else
-    (table text from a bzrk without --json, an unknown shape) is cut at a
-    line boundary."""
+    bare JSON arrays up to _MAX_JSON_PARSE_CHARS are cut by whole rows and
+    stay valid JSON. Larger JSON, table text from a bzrk without --json, and
+    unknown shapes are cut as text at a line boundary. parse_json=False
+    forces the text cut (used when no query slot is free)."""
     text = str(out)
     if not budget or len(text) <= budget:
         return out, ""
-    try:
-        doc = json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        doc = None
+    if len(text) > _MAX_JSON_PARSE_CHARS and text.lstrip()[:1] in ("{", "["):
+        return _cut_text(text, budget, reason=" (too large to cut by rows)")
+    doc = None
+    if parse_json:
+        try:
+            doc = json.loads(text)
+        except (json.JSONDecodeError, TypeError, RecursionError):
+            doc = None
     rows = None
     if isinstance(doc, list):
         rows = doc
@@ -642,19 +670,7 @@ def _limit_model_output(out, budget):
                 f"{budget} characters (BERSERK_MCP_MAX_OUTPUT_CHARS). {_TRUNCATION_HINT}]"
             )
             return _compact(doc), note
-    lines = text.splitlines()
-    kept_lines, size = [], 0
-    for line in lines:
-        size += len(line) + (1 if kept_lines else 0)
-        if size > budget:
-            break
-        kept_lines.append(line)
-    cut_text = "\n".join(kept_lines) if kept_lines else text[:budget]
-    note = (
-        f"[berserk-mcp: result truncated, showing {len(kept_lines)} of {len(lines)} lines "
-        f"({len(cut_text)} of {len(text)} characters, BERSERK_MCP_MAX_OUTPUT_CHARS). {_TRUNCATION_HINT}]"
-    )
-    return cut_text, note
+    return _cut_text(text, budget)
 
 
 def _fence_limited(out):
@@ -662,8 +678,19 @@ def _fence_limited(out):
     truncation note is server text built only from counts, so it goes after
     the closing fence tag. Listed as a sanitizer in
     .semgrep/fence-untrusted-data.yml because it always calls
-    _fence_untrusted on the content."""
-    limited, note = _limit_model_output(out, MAX_OUTPUT_CHARS)
+    _fence_untrusted on the content.
+
+    The query slot is released when bzrk exits, so it does not bound this
+    step on its own (Codex Security finding 1). An over-budget result is cut
+    while holding a slot again; if none frees up in time, the cut falls back
+    to the text path, which needs no decoding."""
+    limited, note = out, ""
+    if MAX_OUTPUT_CHARS and len(str(out)) > MAX_OUTPUT_CHARS:
+        acquired = _query_semaphore_acquire(_POST_PROCESS_SLOT_WAIT_SECONDS)
+        try:
+            limited, note = _limit_model_output(out, MAX_OUTPUT_CHARS, parse_json=acquired)
+        finally:
+            _query_semaphore_release(acquired)
     fenced = _fence_untrusted(limited)
     return f"{fenced}\n{note}" if note else fenced
 

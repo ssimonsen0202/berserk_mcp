@@ -20,7 +20,7 @@ All configuration is via environment variables. All are optional:
 | `BERSERK_MCP_KQL_MAX_ROWS` | `2000` | Recommended maximum arbitrary-query result bound used by validation warnings. |
 | `BERSERK_MCP_KQL_STATS` | `auto` | `off`, `auto`, or `required`; controls whether live validation asks the CLI for `--stats`. Missing or unrecognized stats are reported as unavailable, never invented. |
 | `BERSERK_MCP_MAX_RESULT_BYTES` | `10485760` | Hard cap on captured successful `bzrk` stdout. Overflow kills and reaps the child and asks the caller to narrow the query. |
-| `BERSERK_MCP_MAX_OUTPUT_CHARS` | `40000` | Characters of a `search` or saved-query result sent to the model (about 10k tokens). Larger results are cut by whole rows, stay valid JSON, and carry a note outside the untrusted-data fence saying how many rows were shown. `MAX_RESULT_BYTES` protects the process; this protects the model's context. `0` disables (v1.36.0). |
+| `BERSERK_MCP_MAX_OUTPUT_CHARS` | `40000` | Characters of a `search` or saved-query result sent to the model (about 10k tokens). Larger JSON results up to 1,000,000 characters are cut by whole rows and stay valid JSON; bigger ones and table text are cut at a line boundary. Both carry a note outside the untrusted-data fence saying how many rows were shown. `MAX_RESULT_BYTES` protects the process; this protects the model's context. `0` disables (v1.36.0). |
 | `BERSERK_TABLE` | `default` | The Berserk table to query. |
 | `BERSERK_MCP_LEARNED_PATH` | platform config dir | Where saved queries persist (`~/.config/berserk-mcp/learned.json` on Linux). |
 | `BERSERK_MCP_ROLE` | `all` | Active role lane: `sre`, `soc`, `claude`, `ops`, or `all`. Controls tool visibility and primer injection. |

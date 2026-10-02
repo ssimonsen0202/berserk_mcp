@@ -212,6 +212,95 @@ class BoundedFleetCacheTest(_BzrkHarness):
         self.assertEqual(list(cache), ["a", "c"])
 
 
+def _peak_extra_bytes(fn):
+    """Peak memory traced while fn() runs, beyond what existed before it."""
+    import tracemalloc
+
+    tracemalloc.start()
+    try:
+        before = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        fn()
+        return tracemalloc.get_traced_memory()[1] - before
+    finally:
+        tracemalloc.stop()
+
+
+class LimiterMemoryTest(unittest.TestCase):
+    """Codex Security findings 1 and 2 on 6cc02c5: the limiter decoded or
+    split the whole result (up to MAX_BZRK_RESULT_BYTES) before applying a
+    40,000-character budget -- ~209 MB for an 8 MB tiny-row JSON document and
+    ~71 MB for a 10 MB newline-dense text."""
+
+    def test_huge_tiny_row_json_is_not_fully_decoded(self):
+        doc = '{"Tables":[{"schema":{"columns":[{"name":"i"}]},"rows":[' + ",".join(["[0]"] * 2_000_000) + "]}]}"
+        result = {}
+        peak = _peak_extra_bytes(lambda: result.update(r=bm._limit_model_output(doc, 40000)))
+        out, note = result["r"]
+        self.assertLessEqual(len(out), 40000)
+        self.assertIn("result truncated", note)
+        self.assertLess(peak, 20_000_000, f"peak extra allocation {peak:,} bytes")
+
+    def test_newline_dense_text_is_not_fully_split(self):
+        text = "a\n" * 5_000_000
+        result = {}
+        peak = _peak_extra_bytes(lambda: result.update(r=bm._limit_model_output(text, 40000)))
+        out, note = result["r"]
+        self.assertLessEqual(len(out), 40000)
+        self.assertTrue(out.endswith("a"), "cut at a line boundary")
+        self.assertIn("result truncated", note)
+        self.assertLess(peak, 5_000_000, f"peak extra allocation {peak:,} bytes")
+
+    def test_json_above_the_parse_ceiling_is_cut_as_text(self):
+        doc = json.dumps([{"i": i, "pad": "p" * 40} for i in range(bm._MAX_JSON_PARSE_CHARS // 40)])
+        self.assertGreater(len(doc), bm._MAX_JSON_PARSE_CHARS)
+        out, note = bm._limit_model_output(doc, 5000)
+        self.assertLessEqual(len(out), 5000)
+        self.assertIn("too large to cut by rows", note)
+
+    def test_text_note_counts_characters_not_lines(self):
+        out, note = bm._limit_model_output("x" * 9000, 1000)
+        self.assertEqual(out, "x" * 1000)
+        self.assertIn("first 1000 of 9000 characters", note)
+
+
+class PostProcessingSlotTest(unittest.TestCase):
+    """Finding 1 also noted the query semaphore is released before the
+    output is cut, so it did not bound concurrent post-processing."""
+
+    def test_row_cut_runs_inside_a_query_slot_and_releases_it(self):
+        sem = bm.threading.BoundedSemaphore(1)
+        seen = []
+        real = bm._limit_model_output
+
+        def spy(out, budget, parse_json=True):
+            seen.append(sem._value)  # 0 while the slot is held
+            return real(out, budget, parse_json=parse_json)
+
+        with (
+            mock.patch.object(bm, "_QUERY_SEMAPHORE", sem),
+            mock.patch.object(bm, "MAX_OUTPUT_CHARS", 5000),
+            mock.patch.object(bm, "_limit_model_output", spy),
+        ):
+            text = bm._fence_limited(_tables_doc(1000))
+        self.assertEqual(seen, [0])
+        self.assertTrue(sem.acquire(blocking=False), "slot released afterwards")
+        self.assertIn("showing", text)
+
+    def test_busy_slot_falls_back_to_the_bounded_text_cut(self):
+        sem = bm.threading.BoundedSemaphore(1)
+        sem.acquire()
+        with (
+            mock.patch.object(bm, "_QUERY_SEMAPHORE", sem),
+            mock.patch.object(bm, "MAX_OUTPUT_CHARS", 5000),
+            mock.patch.object(bm, "_POST_PROCESS_SLOT_WAIT_SECONDS", 0.01),
+        ):
+            text = bm._fence_limited(_tables_doc(1000))
+        self.assertIn("result truncated", text)
+        self.assertNotIn("rows to stay within", text, "did not decode JSON without a slot")
+        self.assertEqual(text.count(bm._UNTRUSTED_DATA_CLOSE), 1)
+
+
 def _rpc_text(name, arguments):
     """Call a tool through dispatch(), the boundary where
     secret_scan.apply_output_filter runs -- handle_call() never reaches it."""

@@ -168,9 +168,9 @@
     "note": "YAML block scalar / indented continuation: lines blank or deeper than the key line; past MAX_MULTILINE_VALUE_CHARS fails closed. v1.35.0."
   },
   "berserk_mcp:_fence_limited": {
-    "fingerprint": "2d89a36f42c90415",
+    "fingerprint": "8d03bd27ef8fed84",
     "reviewed": "2026-10-02",
-    "by": "claude-code (self-review, needs independent review)",
-    "note": "sanitizer for the fencing semgrep rule (v1.36.0). Cuts a user-KQL result to MAX_OUTPUT_CHARS via _limit_model_output, then always calls _fence_untrusted on the content; the appended note sits after the closing tag and is built only from counts, the budget and fixed text. Rule canary checked: unfenced return and cut-without-fence are flagged, _fence_limited is not."
+    "by": "codex-security scan 5053dc0c (sanitizer judged sound) + claude-code fix; fix not re-scanned",
+    "note": "sanitizer for the fencing semgrep rule (v1.36.0); always calls _fence_untrusted on the content and appends a count-only note after the closing tag. After Codex Security findings 1-2 (low): holds a query slot while cutting (falls back to the no-decode text cut if none frees within _POST_PROCESS_SLOT_WAIT_SECONDS); _limit_model_output decodes JSON only up to _MAX_JSON_PARSE_CHARS (1,000,000) and cuts text with rfind instead of splitlines. Measured peak extra memory: 8 MB tiny-row JSON 209 MB -> 0.04 MB; 10 MB short lines 44 MB -> 0.04 MB; worst case under the ceiling ~26 MB."
   }
 }
