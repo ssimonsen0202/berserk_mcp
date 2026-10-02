@@ -64,9 +64,9 @@ first — full detail for each notable release lives in
   faults in the first version of the cut. This release fixes both. See
   [docs/releases/v1.36.0.md](docs/releases/v1.36.0.md).
 - **v1.35.0** (2026-09-26) — Output redaction closes the non-JSON gaps.
-  After a credential key, the whole value is now removed: YAML block
-  scalars, quoted values with a line break, bare values with spaces, and
-  typographic quotes. Prefixed keys (`db_password`, `client_secret`,
+  After a credential key, the redactor now removes the whole value. This
+  covers YAML block scalars, quoted values with a line break, bare values
+  with spaces, and typographic quotes. Prefixed keys (`db_password`, `client_secret`,
   `X-Api-Key`) and `Authorization: Basic/Digest/NTLM/Negotiate` headers are
   now caught. See [details](docs/releases/v1.35.0.md).
 - **v1.34.1** (2026-09-26) — The HTTP transport now reads the body of a
@@ -81,24 +81,24 @@ first — full detail for each notable release lives in
   cloud LLM providers even with keys set; `BERSERK_EGRESS_ALLOWED_HOSTS` and
   `_CIDRS` restrict every outbound integration to loopback and approved
   destinations. Every connection now resolves its host once and connects only
-  to checked addresses (a loopback name must resolve to loopback; under the
-  policy, a hostname must resolve inside the approved networks). Also: an
+  to checked addresses. A loopback name must resolve to loopback. Under the
+  policy, a hostname must resolve inside the approved networks. Also: an
   optional `BERSERK_MCP_MGMT_TOKEN` gate on `save_query`, a limit on stuck
   doctor probes, and `--doctor` reports the policy. Off by default; no change
   unless you set these. See [details](docs/releases/v1.34.0.md).
-- **v1.33.0** (2026-09-26) — Store files are no longer read or written
-  through symlinks. On POSIX every store read, atomic write and lock-file
-  operation works relative to a parent directory opened without following
-  symlinks, so a symlink planted at a store file, or a parent directory
-  swapped for one after the path was checked, fails the operation instead of
-  redirecting it (Codex Security scan findings 3 and 5). **If you symlinked a
+- **v1.33.0** (2026-09-26) — The server no longer reads or writes store
+  files through symlinks. On POSIX, every store read, atomic write, and
+  lock-file operation works from a parent directory that it opens without
+  following symlinks. A planted symlink now makes the operation fail instead
+  of redirecting it. So does a parent directory swapped after the check
+  (Codex Security scan findings 3 and 5). **If you symlinked a
   store file to another location,** point the setting at the real path. See
   [details](docs/releases/v1.33.0.md).
 - **v1.32.0** (2026-09-26) — DNS-rebinding protection for the HTTP
   transport is on by default (issue #84, the one open finding from the MCP
-  conformance run). A loopback bind now accepts only loopback `Host` names,
-  and a browser `Origin` must name an allowed host, so a web page can no
-  longer reach a local server through DNS rebinding. **If you reach a
+  conformance run). A loopback bind now accepts only loopback `Host` names.
+  A browser `Origin` must name an allowed host. A web page therefore cannot
+  reach a local server through DNS rebinding. **If you reach a
   loopback server under another hostname,** list it in
   `BERSERK_MCP_HTTP_ALLOWED_HOSTS`. See [details](docs/releases/v1.32.0.md).
 - **v1.31.0** (2026-09-26) — Python 3.11 is now the minimum; 3.9 (end of
@@ -109,43 +109,56 @@ first — full detail for each notable release lives in
   must upgrade Python before installing this version.** See
   [details](docs/releases/v1.31.0.md).
 - **v1.30.0** (2026-09-26) — Security hardening and small-tier consistency.
-  User KQL cannot read other tables in any validation mode; the untrusted-data
-  fence decodes encoded tags; unknown tool arguments are rejected; generated
-  queries need `--approve-generated` before the small tier sees them;
-  small-tier text never names a hidden tool; the `since` schema is 84%
-  smaller (about 47% fewer input tokens measured); results carry evidence
-  fields; plaintext OpenRouter forwarding to a remote host needs
-  `--allow-plaintext-remote`; new fail-closed CI gates and eval case sets.
+  The changes:
+  - User KQL cannot read other tables in any validation mode.
+  - The untrusted-data fence decodes encoded tags.
+  - The server rejects unknown tool arguments.
+  - Generated queries need `--approve-generated` before the small tier sees
+    them.
+  - Small-tier text never names a hidden tool.
+  - The `since` schema is 84% smaller (about 47% fewer input tokens measured).
+  - Results carry evidence fields.
+  - Plaintext OpenRouter forwarding to a remote host needs
+    `--allow-plaintext-remote`.
+  - New fail-closed CI gates and eval case sets.
   **Read the upgrade notes** in [`docs/releases/v1.30.0.md`](docs/releases/v1.30.0.md).
-- **v1.29.1** (2026-09-20) — Security and correctness hardening from Codex
-  review of 8 oversized functions: reject non-finite floats in FinOps helpers
-  (OverflowError crash), validate KQL table name at configure time, cap ReDoS
-  in KQL validator, early-return on oversized queries, fence all network-derived
-  excerpts in LLM prompts, fix success_flag miscounting errored api_requests,
-  include cache_create_1h in context-size calculation.
+- **v1.29.1** (2026-09-20) — Security and correctness fixes from a Codex
+  review of 8 oversized functions:
+  - FinOps helpers reject non-finite floats (an OverflowError crash).
+  - The server checks the KQL table name at configure time.
+  - The KQL validator has a ReDoS cap and returns early on oversized queries.
+  - The server fences every network-derived excerpt in an LLM prompt.
+  - `success_flag` no longer miscounts errored `api_requests`.
+  - The context-size calculation includes `cache_create_1h`.
 - **v1.29.0** (2026-09-20) — Decompose 933-line `_handle_call_uncached`
   dispatcher into 5 category handlers. Remove dead `_render_multi_table`.
   Fix body projection caps (240→2000) in claude search, error, and analytics
   queries for full-fidelity session forensics.
-- **v1.28.0** (2026-09-03) — Model-behavior monitoring: `model_drift_check`
+- **v1.28.0** (2026-09-03) — Model-behavior monitoring. `model_drift_check`
   and `model_drift_history` classify a canaried model's tool-routing
-  accuracy over time against a calibrated noise band, plus a `--drift-report`
-  CLI that alerts on sustained degradation. Two rounds of independent Codex
+  accuracy over time against a calibrated noise band. A `--drift-report` CLI
+  alerts on sustained degradation. Two rounds of independent Codex
   review, both fully re-verified by direct execution before and after each
   fix. See [details](docs/releases/v1.28.0.md).
 - **v1.27.0** (2026-08-28) — Five security fixes from an independent Codex
-  review: KQL validator bypasses, unfenced telemetry attributes, a gap in
-  the injection delimiter, an OAuth-header redirect leak, and a bug that
-  read the text `"false"` as true. Also adds `investigate_error_rate`
-  (issue #24): a fixed, step-by-step tool that walks a decision tree to
-  find the cause of an elevated error rate, scoped to the SRE/Ops lane.
-  See [details](docs/releases/v1.27.0.md).
-- **v1.26.0** (2026-08-24) — Untrusted-data fencing, tool tiers, just-in-time
-  tool discovery (`find_tool`, 92% measured token reduction), a live
-  quota-window check (`claude_quota_status`), an `agent` parameter on the base
-  Claude Code query tools for querying other ingested agents' data, and a
-  schema-fetcher bug fix (a failed backend call was silently cached as a
-  "fresh" schema). See [details](docs/releases/v1.26.0.md).
+  review:
+  - KQL validator bypasses.
+  - Unfenced telemetry attributes.
+  - A gap in the injection delimiter.
+  - An OAuth-header redirect leak.
+  - A bug that read the text `"false"` as true.
+
+  This release also adds `investigate_error_rate` (issue #24). This fixed,
+  step-by-step tool walks a decision tree to find the cause of an elevated
+  error rate. It is in the SRE/Ops lane. See
+  [details](docs/releases/v1.27.0.md).
+- **v1.26.0** (2026-08-24) — Untrusted-data fencing and tool tiers. Also:
+  - Just-in-time tool discovery (`find_tool`, 92% measured token reduction).
+  - A live quota-window check (`claude_quota_status`).
+  - An `agent` parameter on the base Claude Code query tools, to query other
+    ingested agents' data.
+  - A schema-fetcher fix: the server cached a failed backend call as a
+    "fresh" schema. See [details](docs/releases/v1.26.0.md).
 - **v1.25.1** (2026-08-11) — Performance bugfixes for shipped KQL: selective
   service filtering, shallower unfiltered schema discovery, CI cost guardrails,
   and validator-derived query-budget headroom. See
@@ -157,27 +170,36 @@ first — full detail for each notable release lives in
   separately-run `canonloom-server`. Landed after v1.24.0 with no dedicated
   release-notes entry; see
   [CanonLoom bridge](#canonloom-knowledge-artifact-lifecycle-bridge) below.
-- **v1.24.0** (2026-07-31) — MCP 2026-07-28 adaptation and safe-default HTTP
-  transport: gated modern discovery, modern result envelopes, structured
-  reporting output, private cache hints, input-required guidance, in-memory
-  task lifecycle support, and a closed-by-default HTTP listener with auth,
-  Host, CIDR, request-size, concurrency, and reverse-proxy guidance.
+- **v1.24.0** (2026-07-31) — MCP 2026-07-28 adaptation and a safe-default
+  HTTP transport. The MCP changes are gated modern discovery, modern result
+  envelopes, structured reporting output, private cache hints, input-required
+  guidance, and in-memory task lifecycle support. The HTTP listener is closed
+  by default. It has auth, Host, CIDR, request-size, and concurrency limits,
+  and guidance for a reverse proxy.
   See [details](docs/releases/v1.24.0.md).
-- **v1.23.0** (2026-07-27) — Security remediation Phase 3: generated-content
-  sanitization, per-deployment HMAC owner pseudonyms, spreadsheet-safe CSV,
-  model-facing fence hardening, mandatory Discord egress redaction, scrubbed
-  public deployment examples, and honest fixed-window Grafana dashboards.
+- **v1.23.0** (2026-07-27) — Security remediation Phase 3:
+  - Generated-content sanitization.
+  - Per-deployment HMAC owner pseudonyms.
+  - Spreadsheet-safe CSV.
+  - Stronger model-facing fences.
+  - Mandatory redaction on Discord egress.
+  - Scrubbed public deployment examples.
+  - Honest fixed-window Grafana dashboards.
   See [details](docs/releases/v1.23.0.md).
-- **v1.22.0** (2026-07-27) — Security remediation Phases 0–2: execution-boundary
-  KQL guards, bounded `bzrk` output, trusted binary resolution, deterministic
-  FinOps redaction, shared cross-platform private stores, hardened HTTP for
-  every outbound caller, strict primer configuration, and offline regression
-  coverage. See [details](docs/releases/v1.22.0.md).
+- **v1.22.0** (2026-07-27) — Security remediation Phases 0–2:
+  - KQL guards at the execution boundary.
+  - Bounded `bzrk` output.
+  - Trusted binary resolution.
+  - Deterministic FinOps redaction.
+  - Shared cross-platform private stores.
+  - Hardened HTTP for every outbound caller.
+  - Strict primer configuration.
+  - Offline regression coverage. See [details](docs/releases/v1.22.0.md).
 
-Older releases (v1.2.0 through v1.21.1 — enterprise Claude AI FinOps,
-schema-grounded KQL validation, distributed-trace tools, agent-log
-analytics, fleet-friendly worker tuning, the parser factory's early
-fail-safes, role profiles, and the initial release) are in
+Older releases are v1.2.0 through v1.21.1. They added enterprise Claude AI
+FinOps, schema-grounded KQL validation, distributed-trace tools, and agent-log
+analytics. They also added fleet-friendly worker tuning, the parser factory's
+early fail-safes, and role profiles. Their notes are in
 [`docs/releases/`](docs/releases/), one file per version.
 
 ## Why this exists
@@ -226,8 +248,8 @@ Berserk is a strong observability backend for humans, on its own.
 berserk-mcp does not replace any part of it. berserk-mcp sits next to
 Berserk and adds a surface built for agents.
 
-As of v1.1.0, Berserk ships its own agent too: a `Chat` tab in the web UI,
-with its own tool-calling loop, doc search, and model picker. This is a
+Since v1.1.0, Berserk also ships its own agent: a `Chat` tab in the web UI.
+It has its own tool-calling loop, doc search, and model picker. This is a
 different kind of agent from berserk-mcp, not a smaller version of it. It
 writes its own free-form queries at chat time. berserk-mcp never does
 this. Every question maps to one fixed, checked query. The model only
@@ -300,8 +322,7 @@ air-gapped environments:
   redacted excerpts. It never receives raw values. The endpoint URL must
   match an allowed scheme, and only an operator can set it.
 
-**What we have actually checked about self-hosted model use** — not just
-claimed. This corrects earlier guidance in this section. That guidance
+**What we have checked about self-hosted model use**, not only claimed. This corrects earlier guidance in this section. That guidance
 claimed "small local models route reliably." We measured this. The claim
 did not hold.
 
@@ -340,14 +361,14 @@ This table is what the claims below rest on:
   (see the now-outdated shortlist in
   [`evals/model-eval-plan.md`](evals/model-eval-plan.md)).
 - **The measured reliability floor is the ~24B parameter class.**
-  `mistral-small-3.2-24b-instruct` (Apache 2.0, on Hugging Face, about
-  55GB of GPU RAM at bf16) is the only model in this test that is both
-  open-weight and genuinely self-hostable, and it clears the baseline.
+  `mistral-small-3.2-24b-instruct` is the only model in this test that is
+  both open-weight and self-hostable. It clears the baseline. It is Apache
+  2.0, on Hugging Face, and needs about 55GB of GPU RAM at bf16.
   `mistral-saba` scores close behind it, but is proprietary and API-only —
   not a self-hosting candidate despite the similar accuracy.
 - **Run it role-scoped. The configuration matters more than the model.**
   Re-measured on 2026-09-03 against the current 51-case set, the same model
-  scores very differently depending on which role lane it runs in:
+  scores differently in each role lane:
 
   | Lane | Tools | Tool-selection accuracy |
   |---|---|---|
@@ -366,16 +387,14 @@ This table is what the claims below rest on:
 - **Still unverified: local behavior.** Every number above comes from the
   same OpenRouter-hosted test as the other candidates, not from a real
   local deployment. Speed and behavior at the intended quantization, on
-  real hardware, have not been checked. Note also that the tool schema
-  alone is roughly 8K estimated tokens at `ops` and 12K at `sre`, so the
-  8k-context local target named in the dev brief does not fit any role
-  lane — see the plan document above.
+  real hardware, have not been checked. The tool schema alone is about 8K
+  estimated tokens at `ops` and 12K at `sre`. So the 8k-context local target
+  in the dev brief does not fit any role lane (see the plan document above).
 - `mistral-nemo`, one size class down at about 12B, scored *below* the
   keyword-match baseline. Do not assume a smaller model works well
   anywhere in this range.
-- **Bottom line for a sovereign deployment today:** plan for a model of
-  24B parameters or more, on an open license, with a GPU — not a small
-  model. A fully local setup with a genuinely small (7-8B) first tier is
+- **For a sovereign deployment today,** plan for a model of 24B parameters
+  or more, on an open license, with a GPU. Do not plan for a small model. A fully local setup with a genuinely small (7-8B) first tier is
   not yet a checked, working setup for this server's tool count.
 
 #### Bridging Berserk's two use cases: AI Ops without leaving the sovereign boundary
@@ -395,8 +414,8 @@ berserk-mcp closes that gap. The model only ever picks a tool and a time
 window. It never writes KQL and never sees raw values. So a small, local,
 open-weight model can drive the whole interaction reliably. The result is
 the AI Ops experience: agents ask questions instead of humans reading
-dashboards. The whole agent loop stays inside the sovereign boundary — not
-just the telemetry store.
+dashboards. The whole agent loop stays inside the sovereign boundary, not
+only the telemetry store.
 
 This is not a hypothetical case. One real deployment uses a Discord-facing
 local agent to answer on-call questions against Berserk. The agent logs
@@ -404,7 +423,7 @@ every tool call. It logs every full prompt and reply too. It sends all of
 this back into Berserk itself, as structured, queryable records: model
 name, redacted arguments, redacted results, and session ID. Berserk's AI
 Ops page describes this same idea in its Ethira governance case study: a
-durable, checkable record of what the agent actually did. Here, it runs
+durable, checkable record of what the agent did. Here, it runs
 end-to-end against berserk-mcp, not a custom-built integration. The
 `claude_*` tool family (`claude_cost_report`, `claude_token_burn`,
 `claude_workflow_insights`, and others) gives the same token-use and BI
@@ -416,14 +435,14 @@ at the measured reliability floor (~24B class — see above) handles the
 everyday calls. The goal is 80% or more of all interactions handled this
 way. The model escalates to a larger, local open-weight model only for
 `@deep` work: parser generation, deep-dive synthesis, incident write-ups.
-"Small" here means the smaller of the two local tiers, not a 7-8B model —
-those were tested, and they are not reliable enough to anchor either tier.
+"Small" here means the smaller of the two local tiers, not a 7-8B model.
+We tested 7-8B models, and they are not reliable enough for either tier.
 We built and tested the escalation logic itself — a rule that decides when
 to route up — against a cloud-hosted small/deep pair, in
 `evals/escalation_policy.py`. We still need to pick and check the real
 local model for each tier, on real hardware. The original measurement plan
 is in [`evals/model-eval-plan.md`](evals/model-eval-plan.md) (Part 3).
-Read its Part 1 benchmark shortlist with caution — it predates the real
+Read its Part 1 benchmark shortlist with caution. It predates the real
 test above, and its picks did not hold up at this server's real tool
 count.
 
@@ -473,13 +492,12 @@ Two things worth knowing about this diagram:
 This diagram covers the core, always-on path. berserk-mcp also bridges
 optionally to CanonLoom — a separate project, reached over plain HTTP,
 purely opt-in via `CANONLOOM_SERVER_URL`. Every `canonloom_*` tool checks
-that variable at call time and returns a clear configuration error if it's
-unset; nothing in the diagram above requires it to be running.
+that variable at call time. If it is unset, the tool returns a clear
+configuration error. Nothing in the diagram above needs CanonLoom to run.
 
-This is the high-level picture. The cheap/deep model split, the
-learning-loop cache, the discovery worker, role filtering, and transport
-options are covered elsewhere in this README and in the tool descriptions
-themselves.
+This is the high-level picture. Other sections of this README, and the tool
+descriptions, cover the cheap/deep model split, the learning-loop cache, the
+discovery worker, role filtering, and transport options.
 
 ### Optional: two-lane model split, OpenRouter-backed
 
@@ -511,19 +529,21 @@ flowchart TB
   M -. "BERSERK_LLM_HERMES_URL points here instead of\nAnthropic/OpenAI directly, first in BERSERK_LLM_LADDER" .-> OR
 ```
 
-**How it actually works:** berserk-mcp's own LLM calls — used only by
-`generate_parser` and the discovery worker to author and verify KQL, never
-by the query path in the diagram above — go through a provider ladder
-(`BERSERK_LLM_LADDER`, default `hermes,openai,anthropic`) that tries each
-configured provider in order. `hermes` isn't a specific vendor; it's any
-OpenAI-compatible `/chat/completions` endpoint set via
-`BERSERK_LLM_HERMES_URL` — pointing it at
-`https://openrouter.ai/api/v1/chat/completions` with an OpenRouter API key
-routes that lane through whatever model you choose on OpenRouter instead of
-paying Anthropic or OpenAI directly. This is independent of the MCP host's
-own cheap/deep model choice, which is set by whatever client you're
-running berserk-mcp inside of (Claude Code, Claude Desktop, etc.), not by
-berserk-mcp itself.
+**How it works:** berserk-mcp makes its own LLM calls only from
+`generate_parser` and the discovery worker, to author and verify KQL. The
+query path in the diagram above makes none. These calls go through a provider
+ladder (`BERSERK_LLM_LADDER`, default `hermes,openai,anthropic`), which tries
+each configured provider in order.
+
+`hermes` is not a vendor. It is any OpenAI-compatible `/chat/completions`
+endpoint, set with `BERSERK_LLM_HERMES_URL`. To route that lane through
+OpenRouter, point it at `https://openrouter.ai/api/v1/chat/completions` with
+an OpenRouter API key. You then pay for the model you choose on OpenRouter,
+not Anthropic or OpenAI directly.
+
+This ladder is separate from the MCP host's cheap/deep model choice. The
+client that runs berserk-mcp (Claude Code, Claude Desktop, and so on) makes
+that choice, not berserk-mcp.
 
 ### Example ingestion topology (not shown in the diagram)
 
@@ -582,9 +602,9 @@ Two rules keep the tiers honest:
 
 - **A hidden tool looks like a tool that does not exist.** `tools/call` on it
   returns `unknown tool: <name>`, so neither its existence nor its schema
-  leaks. For the same reason, the text a small-tier model reads (instructions,
-  primers, tool descriptions, empty-result next steps) never names a hidden
-  tool: a model sent to one would have no way to recover.
+  leaks. For the same reason, small-tier text never names a hidden tool. This
+  covers instructions, primers, tool descriptions, and empty-result next
+  steps. A model sent to a hidden tool would have no way to recover.
   `tests/test_tier_text.py` checks every lane and tier in a fresh process.
 - **Arguments must be declared.** `tools/call` rejects an argument name the
   tool's schema does not declare and lists the valid ones, e.g.
@@ -716,7 +736,7 @@ A read-only analytics layer for the `claude` lane (v1.12.0; see
 - `claude_loop_check` groups tool calls by session. It reports the repetition ratio, the top repeated call, the error-retry count, and a verdict: `healthy`, `some-repetition`, or `likely-looping`.
 - `claude_model_fit` maps model names to a coarse tier (`frontier`, `mid`, `cheap`). It compares that tier to a complexity proxy built from tool count, errors, duration, and loop signals.
 - `claude_token_burn` uses `claude.tokens_input` and `claude.tokens_output` when present. When they are absent, it falls back per session to `body characters / 4`. It computes burn per distinct tool plus inferred file target, and highlights top-decile burn. Every result labels its source as exact or estimated.
-- `--agent-report` runs all three checks headlessly. It exits non-zero when a session is likely looping or underpowered, so cron or systemd can pipe the stdout summary to an alert transport. "high-burn" alone is a relative marker — it is always present, because it is a top-decile ranking — so it is intentionally excluded from the alert threshold:
+- `--agent-report` runs all three checks headlessly. It exits non-zero when a session is likely looping or underpowered, so cron or systemd can pipe the stdout summary to an alert transport. The alert threshold leaves out "high-burn" on its own. That marker is relative: it is a top-decile ranking, so some session always has it:
 
 ```bash
 berserk-mcp --agent-report --since "6h ago"
@@ -724,9 +744,9 @@ berserk-mcp --agent-report --agent-report-mode weekly --agent-report-json --sinc
 ```
 
 **Phase J deep analytics (v1.15.0; see [release notes](docs/releases/v1.15.0.md)):**
-`claude_cost_report`, `claude_session_deep_dive`, and `claude_workflow_insights`
-extend this layer with multi-day cost trends, per-session timeline
-drilldowns, and cross-session workflow patterns. Per-project cost
+three tools extend this layer. `claude_cost_report` adds multi-day cost
+trends. `claude_session_deep_dive` adds per-session timeline drilldowns.
+`claude_workflow_insights` adds cross-session workflow patterns. Per-project cost
 attribution infers a project name from file-target paths: it uses the
 directory before the first marker segment (`src`, `tests`, `lib`, `pkg`).
 Override this with `BERSERK_MCP_PROJECT_MARKERS`.
@@ -754,10 +774,10 @@ strictest mode, never to a weaker one.
 
 The scanner recognizes common cloud/provider credentials, private keys,
 JWTs, bearer tokens, `Authorization` headers, and generic password, secret,
-token and key assignments. Since v1.35.0 a matched key removes the whole value,
-not only its first word, in JSON, YAML, logfmt and prose alike: values with
-spaces, quoted values that span lines, YAML block scalars (`key: |`), and
-typographic or backtick quotes. Prefixed keys such as `db_password`,
+token and key assignments. Since v1.35.0, a matched key removes the whole
+value, not only its first word. This works in JSON, YAML, logfmt, and prose.
+It covers values with spaces, quoted values that span lines, YAML block
+scalars (`key: |`), and typographic or backtick quotes. Prefixed keys such as `db_password`,
 `client_secret`, `X-Api-Key` and `spring.datasource.password` also match. The
 rule is to redact too much rather than leak a tail. High-entropy
 matching is opt-in, because it is false-positive-prone. Email, IP, and
@@ -823,14 +843,14 @@ this is discovery over berserk-mcp's own *tool catalog*.
 |---|---|
 | `find_tool` | Search-by-intent over the full tool catalog. Returns the best-matching candidates with their complete `inputSchema` inline, so a model can call a tool it was never shown up front. |
 
-Set `BERSERK_MCP_DISCOVERY=1` to switch from listing the full tool catalog
-up front to exposing 8 fixed anchor tools plus `find_tool` as the entry
-point for everything else (v1.26.0, issue #14). Measured against a real
+By default, the server lists the full tool catalog up front. Set
+`BERSERK_MCP_DISCOVERY=1` to list only 8 fixed anchor tools plus
+`find_tool`, which finds every other tool (v1.26.0, issue #14). Measured against a real
 MCP handshake: the full schema costs ~17,560 tokens; discovery mode costs
 ~1,386 — a 92% reduction. A recall-gate test
-(`tests/test_tool_discovery.py`) requires every shipped tool to be
-reachable by at least one realistic phrasing before it ships; current
-measured recall is 100% across 210 phrasings covering all 70 tools. Off by
+(`tests/test_tool_discovery.py`) requires that at least one realistic
+phrasing finds each shipped tool. Measured recall is 100%, across 210
+phrasings that cover all 70 tools. Off by
 default — every tool stays directly listed unless you opt in. See
 [Choosing a model](#choosing-a-model) for why this matters most for
 smaller models.
@@ -848,10 +868,10 @@ Distributed-trace analysis (v1.14.0; see
 `<signal>_name` field convention (`metric_name` for metrics, `body` and
 `severity_text` for logs). We ported this feature from a separate
 TypeScript MCP prototype that explored the same problem space.
-These tools are verified against a real Berserk cluster whose own internal
-services are self-instrumented — `service=query`, `service=gateway`, and
-`service=ingest` spans are real trace/span data, not synthetic test
-fixtures (see [Live-verified, not just unit-tested](#live-verified-not-just-unit-tested)).
+We verified these tools against a real Berserk cluster that instruments its
+own internal services. The `service=query`, `service=gateway`, and
+`service=ingest` spans are real trace data, not synthetic test fixtures (see
+[Live-verified, not only unit-tested](#live-verified-not-only-unit-tested)).
 
 Two design points worth knowing:
 
@@ -866,14 +886,14 @@ cluster outage — see the release notes for the full story.)
 `detect_anomalies` and `forecast_capacity` (v1.18.0; see
 [release notes](docs/releases/v1.18.0.md)) use Berserk's native series
 functions, returning compact arrays instead of exporting raw event windows.
-Forecast responses include R² and slope; trends with R² below 0.6 or a
-non-positive slope are explicitly reported as not forecastable rather than
-inventing a ceiling date.
+Forecast responses include R² and slope. If R² is below 0.6 or the slope is
+not positive, the tool reports the trend as not forecastable. It does not
+invent a ceiling date.
 
 `find_similar` depends on semantic indexing and the `similarto` parser
-feature. On clusters where that feature is unavailable, the tool does not
-fail open or pretend exact matching is semantic — it explains the
-limitation and directs the caller to `search` with an exact `has` term.
+feature. On a cluster without that feature, the tool does not fail open or
+present exact matching as semantic. It explains the limitation and sends the
+caller to `search` with an exact `has` term.
 
 ### Model-behavior monitoring tools (all lanes)
 
@@ -889,13 +909,13 @@ Monitor whether a canaried model still performs as well as when it was chosen. S
 - **Frozen case set.** The canary reads `BERSERK_MCP_CANARY_CASES` (default: `evals/canary_cases.jsonl`), a separate, immutable test set. The main router cases (`evals/router_cases.jsonl`) grow over time; a frozen set prevents score drops from conflating "we added harder cases" with "the model got worse".
 - **Extended case set.** `evals/router_cases_extended.jsonl` covers the tools that `router_cases.jsonl` does not. It is for real-model runs only: the keyword mock cannot route these tools, so the file is outside the `ci_gate.py` accuracy gate. `tests/test_router_case_coverage.py` fails if a tool has no case in any `router_cases*.jsonl` file and no written exclusion reason.
 - **Near-miss case set.** `evals/router_cases_nearmiss.jsonl` pairs tools with overlapping vocabulary (error counts vs. error text, rate vs. root cause, queue vs. generate now, validate vs. run). Each prompt carries one detail that decides the answer. Use it to separate models that all score 100% on the extended set. Real-model runs only.
-- **Confusable-pair case set.** `evals/router_cases_confusable.jsonl` asks the same kind of question both ways for each pair the tool descriptions separate: per-container vs per-host CPU and memory, error counts vs error lines, error rate vs top error message, hosts vs containers, slow vs failed traces, raw log volume vs statistical anomalies, recent logs vs incident timeline, workflow hotspots vs token burn, and daily cost trend vs enterprise spend. Real-model runs only.
+- **Confusable-pair case set.** `evals/router_cases_confusable.jsonl` asks the same kind of question both ways for each pair of tools that the descriptions separate. The pairs: per-container vs per-host CPU and memory, error counts vs error lines, error rate vs top error message, and hosts vs containers. Also slow vs failed traces, raw log volume vs statistical anomalies, and recent logs vs incident timeline. Also workflow hotspots vs token burn, and daily cost trend vs enterprise spend. Real-model runs only.
 - **`since` case set.** `evals/router_cases_since.jsonl` names a time window in every prompt. `expect_since_valid` fails a case whose `since` value the server would reject (for example `1.5h ago`).
-- **Lane runs.** Set `BERSERK_MCP_ROLE` (and optionally `BERSERK_MCP_TIER`) when running `run_eval.py` to measure one lane. A case whose expected tool that lane or tier does not serve is reported as not applicable instead of scored as a routing miss, and the ledger records the count. Role `all` serves every tool and skips none. `--tier-policy` runs use the same rule.
-- **Tier-specific answers.** A case can name `expect_tool_when_hidden`, the answer for a lane or tier that hides `expect_tool` (for example a `saved__*` query where the deep tier would use `search`), and `also_accept`, other tools that also count as correct. `evals/router_cases_tiered.jsonl` uses both. Run it with `--saved-queries evals/fixtures/saved_queries.json`: the server gets a temporary copy of that store, so the `saved__*` tools exist and your real store is never touched.
+- **Lane runs.** Set `BERSERK_MCP_ROLE` (and optionally `BERSERK_MCP_TIER`) when running `run_eval.py` to measure one lane. If the lane or tier does not serve a case's expected tool, the run reports the case as not applicable, not as a routing miss. The ledger records the count. Role `all` serves every tool and skips none. `--tier-policy` runs use the same rule.
+- **Tier-specific answers.** A case can name two extra fields. `expect_tool_when_hidden` is the answer for a lane or tier that hides `expect_tool`, for example a `saved__*` query where the deep tier would use `search`. `also_accept` lists other tools that also count as correct. `evals/router_cases_tiered.jsonl` uses both. Run it with `--saved-queries evals/fixtures/saved_queries.json`: the server gets a temporary copy of that store, so the `saved__*` tools exist and your real store is never touched.
 - **Version is self-maintaining.** The case-set version is a hash of its contents. Editing the file automatically changes the version, stopping cross-version comparison. No discipline required.
-- **Behavioral fingerprints.** Two independent signals catch provider changes: a metadata fingerprint (hashes the provider's declared model entry — context length, pricing, version) and a behavioral fingerprint (hashes temperature-0 completions for a fixed prompt set). A changed fingerprint is a signal to investigate, never proof the provider swapped the model — hardware nondeterminism and batching can change output without a model change.
-- **Noise band is calibrated, not a permanent constant.** The `0.02` (2-point) noise band comes from 5 live canary runs against `deepseek-v4-flash` on 2026-09-01 (mean tool_accuracy 0.9514, stdev 0.0049, range 0.0139 — full run-by-run data in [docs/model-routing-cost-validation-2026-08-23.md](docs/model-routing-cost-validation-2026-08-23.md)). It's a starting point from one model's one calibration sweep — re-run the calibration if the case set changes size materially, or once real production history accumulates to compare against.
+- **Behavioral fingerprints.** Two independent signals catch provider changes. A metadata fingerprint hashes the provider's declared model entry: context length, pricing, and version. A behavioral fingerprint hashes temperature-0 completions for a fixed prompt set. A changed fingerprint means "investigate". It does not prove that the provider swapped the model, because hardware nondeterminism and batching can change output too.
+- **Noise band is calibrated, not a permanent constant.** The `0.02` (2-point) noise band comes from 5 live canary runs against `deepseek-v4-flash` on 2026-09-01. Mean tool_accuracy was 0.9514, stdev 0.0049, and range 0.0139. [docs/model-routing-cost-validation-2026-08-23.md](docs/model-routing-cost-validation-2026-08-23.md) has the data for each run. This band comes from one calibration sweep of one model. Re-run the calibration if the case set changes size a lot, or when there is enough production history to compare against.
 - **Failed runs are not zeros.** A failed canary run is recorded as a failure, never scored as zero. This prevents a provider outage from looking like a catastrophic quality drop.
 - **Cost reminder.** Canary runs cost real money — and more than a quick single-case check suggests. A full run over the 48-case set at the default `BERSERK_MCP_CANARY_REPEATS=3` measured ~$0.08 and 7.5–8.5 minutes per model, per run (`deepseek-v4-flash`, 2026-09-01). Set `BERSERK_MCP_CANARY_REPEATS` to tune spend, and budget wall-clock time accordingly if running several models sequentially.
 
@@ -918,20 +938,20 @@ prompts, code, or cleartext owner IDs.
 
 Full CLI reference (flags, business-data record shapes, export/dashboard
 format, privacy/permission details):
-[docs/cost-and-bi-reporting.md](docs/cost-and-bi-reporting.md). If nothing
-is showing up in the `claude_*` tools yet, start with
-[docs/otel-setup.md](docs/otel-setup.md) — it covers which features need
-OTel-ingested Claude Code data at all, the two ways to get it in, and what
-each collection path does and doesn't attribute automatically (repository
-and branch land automatically; pull-request numbers currently need a
-manual correlation step).
+[docs/cost-and-bi-reporting.md](docs/cost-and-bi-reporting.md).
+
+If the `claude_*` tools show no data yet, start with
+[docs/otel-setup.md](docs/otel-setup.md). It explains which features need
+OTel-ingested Claude Code data, and the two ways to get that data in. It also
+says what each collection path attributes on its own. Repository and branch
+arrive automatically. Pull-request numbers need a manual correlation step.
 
 ---
 
 ## Self-extending: discovery and learning
 
 The fixed tools cover known telemetry. For data with no tool yet — a log
-source you just started shipping — a two-stage loop extends berserk-mcp
+source you started sending recently — a two-stage loop extends berserk-mcp
 without hand-editing code. The cheap lane stays deterministic throughout.
 
 ### Stage 1: Discovery queue
@@ -944,8 +964,8 @@ REUSE    run_saved("sre_haproxy_service")        →  cheap model, free, forever
 ```
 
 `request_discovery` does one check before it accepts a job: it calls
-`list_services` (or `list_metrics`) to confirm the source is actually
-visible in Berserk. An unknown source is rejected with a clear error, so the
+`list_services` (or `list_metrics`) to confirm that the source is visible
+in Berserk. An unknown source is rejected with a clear error, so the
 queue never fills with phantom jobs.
 
 The **discover-worker** (`berserk-mcp --worker`, invoked from a daily cron
@@ -954,7 +974,7 @@ entry — there is no separate `discover-worker.py` file) drains the queue:
 - Chooses the right KQL template per role. `sre` gets a health summary, `soc` gets an incident timeline, `claude` gets a health rollup, and `metric` kind gets a drilldown aggregation.
 - Calls `save_query` to verify and persist the result.
 - Updates `known_sources.json` so the same source is never re-queued.
-- Posts a summary of completed and failed jobs to Discord, if `BERSERK_DISCORD_ALERT_SECRET` is configured (see below). This step is skipped when there is nothing noteworthy — no new sources found and no jobs drained — so a quiet day does not generate a daily ping.
+- Posts a summary of completed and failed jobs to Discord, if `BERSERK_DISCORD_ALERT_SECRET` is configured (see below). The worker skips this step when it found no new sources and drained no jobs, so a quiet day sends no message.
 
 ### Stage 2: @deep amendments and improvements
 
@@ -964,7 +984,7 @@ save a new query. Either way, berserk-mcp:
 
 1. Tags the entry `action=generated` (pipeline-authored), `action=updated` (a human save to an existing name), or `action=created` (a human save to a new name).
 2. Appends a timestamped entry to `amendments_log.json`, with the name, description, KQL preview, role, and action.
-3. Reads and formats a changelog on the next `--worker` run, if Discord alerting is configured (🤖 generated, ✏️ updated, ✨ created). It clears the log **only if the post is confirmed** — a transient Discord outage leaves the entries intact for the next run, instead of losing them.
+3. Reads and formats a changelog on the next `--worker` run, if Discord alerting is configured (🤖 generated, ✏️ updated, ✨ created). It clears the log **only if Discord confirms the post**. If Discord is down, the entries stay for the next run.
 
 This means **the query store is auditable**. Once Discord alerting is
 configured, every improvement made by an autonomous agent can be surfaced in
@@ -987,20 +1007,20 @@ JSON body `{"text": "..."}`, and return 2xx on success. If the bridge runs on
 a different host than berserk-mcp's `--worker` cron job, the same
 loopback-only-by-default policy applies as for the LLM endpoint. Set
 `BERSERK_LLM_ALLOW_PLAINTEXT_REMOTE=1` to allow a non-loopback `http://` URL,
-or point at an `https://` bridge instead. Prefer HTTPS for any bridge that is
-not bound to loopback; the shared secret is sent as an HTTP header and should
-not cross an unencrypted network. Alerts are sent only from the
-headless `--worker` CLI path. Interactive MCP tool calls (for example
-`run_discovery_worker`) already surface their result directly to the caller
-and never post to Discord — this avoids duplicate, noisy notifications.
+or point at an `https://` bridge instead. Use HTTPS for any bridge that is not
+bound to loopback. The shared secret travels in an HTTP header, so it must not
+cross an unencrypted network. Alerts are sent only from the
+headless `--worker` CLI path. Interactive MCP tool calls, such as
+`run_discovery_worker`, return their result to the caller and never post to
+Discord. This avoids duplicate notifications.
 
 The intended division of labour is cost-efficient:
 
-- **A capable model does the rare, hard part.** It discovers the new shape, authors and verifies the query, and calls `save_query`. Trigger it two ways: on a **schedule** (a daily job that checks the discovery queue), or **on demand** ("I just added HAProxy to Berserk — add support").
+- **A capable model does the rare, hard part.** It discovers the new shape, authors and verifies the query, and calls `save_query`. Trigger it on a **schedule**, with a daily job that checks the discovery queue. Or trigger it **on demand**: "I added HAProxy to Berserk; add support".
 - **The cheap model uses the result.** Every saved query is reusable for free, deterministically, via `run_saved`. Authoring KQL is the one thing small models handle badly, so this step is gated behind the stronger model. `save_query` verifies the query runs before persisting it, as a guardrail.
 
 This design scales because **learned queries live behind
-`list_saved`/`run_saved`**, not as first-class tools. You can learn dozens of
+`list_saved`/`run_saved`**, not as separate tools in the list. You can learn dozens of
 new sources without growing the routing surface that keeps the cheap model
 reliable.
 
@@ -1008,20 +1028,25 @@ reliable.
 
 ## Parser factory: LLM-generated query packs
 
-When a new source starts shipping to Berserk with no tool for it yet, the
-parser factory automates what a human would otherwise do by hand:
-`discover_schema`, hand-write KQL, `save_query`. Following the design of
-Microsoft's [ASIM parser AI agent](https://learn.microsoft.com/en-gb/azure/sentinel/normalization-create-parsers-ai-agent)
-for Sentinel, it samples the source, generates KQL, validates by executing
-it, refines on failure (capped at 5 cycles per provider), and persists only
-the verified survivors as a reusable **query pack** — 2-4 saved queries per
-source. Tries cheap/local providers first, has hard runaway fail-safes
-(per-run caps on both queuing and generation), and never lets a generated
-query silently overwrite a human-saved one.
+A new source can start sending to Berserk before any tool covers it. The
+parser factory then does what a human would do by hand: `discover_schema`,
+write the KQL, `save_query`. It follows the design of Microsoft's
+[ASIM parser AI agent](https://learn.microsoft.com/en-gb/azure/sentinel/normalization-create-parsers-ai-agent)
+for Sentinel:
 
-A generated query is stored as **pending**. The deep tier can see and review
-it (`review_generated` shows the status), but the small tier cannot see or run
-it until an operator approves it from a shell:
+1. It samples the source and generates KQL.
+2. It runs the KQL to check it, and refines it on failure, up to 5 cycles per
+   provider.
+3. It saves only the verified queries, as a reusable **query pack** of 2-4
+   saved queries per source.
+
+It tries cheap or local providers first. Hard per-run caps on queuing and
+generation stop a runaway. A generated query never silently overwrites a
+query that a human saved.
+
+The factory stores a generated query as **pending**. The deep tier can see
+and review it, and `review_generated` shows its status. The small tier cannot
+see or run it until an operator approves it from a shell:
 
 ```bash
 berserk-mcp --approve-generated <name>
@@ -1044,15 +1069,15 @@ headless/cron mode, and safety details:
 ## CanonLoom: knowledge-artifact lifecycle bridge
 
 The parser factory (above) turns new *telemetry sources* into verified KQL.
-CanonLoom solves the analogous problem for *knowledge sources*: turning a
-source URL into a validated, versioned skill artifact through a five-phase
-pipeline (CLP-1 through CLP-5) with a hard validation gate before anything
-is trusted. **CanonLoom is a separate project**, not part of berserk-mcp —
-it ships its own HTTP API server (`canonloom-server`) and knowledge
-repository; berserk-mcp only bridges to that API via five tools, with zero
-shared dependencies. Run berserk-mcp with no `canonloom-server` anywhere and
-everything else works exactly as documented above; only the `canonloom_*`
-tools return a clear setup error instead of a result.
+CanonLoom does the same for *knowledge sources*. It turns a source URL into a
+validated, versioned skill artifact. A five-phase pipeline (CLP-1 to CLP-5)
+does this, with a hard validation gate before anything is trusted.
+
+**CanonLoom is a separate project**, not part of berserk-mcp. It ships its own
+HTTP API server (`canonloom-server`) and knowledge repository. berserk-mcp
+only bridges to that API through five tools, with no shared dependencies.
+Without a `canonloom-server`, everything else in berserk-mcp works as this
+README describes. Only the `canonloom_*` tools return a clear setup error.
 
 Tools: `canonloom_run_pipeline`, `canonloom_list_artifacts`,
 `canonloom_get_artifact`, `canonloom_freshness_report`,
@@ -1154,7 +1179,7 @@ Write a 10-line digest, flag anything anomalous, and stop.
 
 - Python 3.11+. (Python 3.9 reached upstream end-of-life in October 2025 and 3.10 does in October 2026; both were dropped in v1.31.0.)
 - The [`bzrk`](https://docs.bzrk.dev) CLI, installed and authenticated (`bzrk -P <profile> search "..."` must work). The bearer token lives in `bzrk`'s own config. berserk-mcp never reads or stores it.
-- *(Optional)* A running `canonloom-server` instance, only if you use the `canonloom_*` tools — a separate project with its own, stricter requirements; berserk-mcp only calls its HTTP API and adds nothing to berserk-mcp's own dependency footprint. Setup: [canonloom's README](https://github.com/ssimonsen0202/canonloom#running-canonloom-server).
+- *(Optional)* A running `canonloom-server` instance, if you use the `canonloom_*` tools. It is a separate project with its own, stricter requirements. berserk-mcp only calls its HTTP API, and adds no dependencies for it. Setup: [canonloom's README](https://github.com/ssimonsen0202/canonloom#running-canonloom-server).
 
 ## Install
 
@@ -1167,10 +1192,9 @@ pip install .
 ```
 
 `pip install berserk-mcp`, `pipx install berserk-mcp`, and `uvx berserk-mcp`
-will work once this project is published under that name. Do not run them
-yet: the name `berserk-mcp` is currently unclaimed on PyPI, so those
-commands would silently succeed against whatever unrelated or malicious
-package claims it first.
+will work after this project is published under that name. Do not run them
+yet. Nobody has claimed the name `berserk-mcp` on PyPI, so those commands
+would install whatever package claims it first, which could be malicious.
 
 berserk-mcp uses only the Python standard library. It has no third-party
 runtime dependencies. Installation must include the accompanying local
@@ -1207,9 +1231,9 @@ invocation as `-P <profile>`. In `claude_desktop_config.json` this looks
 like `"env": {"BZRK_PROFILE": "prod"}` — see [Connect it to a
 client](#connect-it-to-a-client) below.
 
-**Non-default `bzrk` binary.** If `bzrk` is not on `$PATH` — for example, if
-it is Homebrew-installed or lives in a per-repo `.venv` — set `BZRK_BIN` to
-the full path. `berserk-mcp` invokes `bzrk` with an argument list, never
+**Non-default `bzrk` binary.** If `bzrk` is not on `$PATH`, set `BZRK_BIN`
+to its full path. This happens, for example, with a Homebrew install or a
+per-repo `.venv`. `berserk-mcp` invokes `bzrk` with an argument list, never
 through a shell, so quoting is not a concern. On Windows, use an absolute path
 to the trusted executable. A bare name that resolves inside the MCP client's
 current working directory is rejected to prevent executable planting.
@@ -1256,9 +1280,9 @@ evidence behind each number.
 
 ## Configure
 
-All configuration is via environment variables, all optional — covering
-query/worker tuning, KQL validation policy, redaction and pseudonymization,
-BI/report paths, OTLP export, and the optional HTTP transport. Full table
+All configuration uses environment variables, and all of them are optional.
+They cover query and worker tuning, KQL validation policy, redaction and
+pseudonymization, BI and report paths, OTLP export, and the HTTP transport. Full table
 and defaults: [Configuration reference](docs/configuration.md).
 
 Parser-factory (LLM parser generation) has its own env vars — see
@@ -1271,12 +1295,15 @@ The CanonLoom bridge has its own two env vars (`CANONLOOM_SERVER_URL`,
 ### Transport security guidance
 
 Every non-loopback endpoint that carries a token, API key, or telemetry
-payload (Hermes, Discord alerts, OTLP export, the optional HTTP MCP
-transport, and the Berserk cluster endpoint itself) needs HTTPS/TLS, and
-code enforcement already covers the endpoints berserk-mcp owns — schemes
-allowlisted, embedded credentials and control characters rejected, no
-redirect-following, bounded response bodies, and HTTPS required for remote
-OTLP. Full per-endpoint guidance:
+payload needs HTTPS/TLS. These endpoints are Hermes, Discord alerts, OTLP
+export, the optional HTTP MCP transport, and the Berserk cluster itself.
+
+The code already enforces this for the endpoints berserk-mcp owns:
+- Only allowlisted URL schemes.
+- No embedded credentials or control characters in URLs.
+- No redirect-following.
+- Bounded response bodies.
+- HTTPS for remote OTLP. Full per-endpoint guidance:
 [Transport security and TLS guidance](docs/tls-transport-security.md).
 
 ## Connect it to a client
@@ -1284,10 +1311,10 @@ OTLP. Full per-endpoint guidance:
 **Compatibility.** berserk-mcp implements MCP protocol version `2025-06-18`
 as a stdio server (newline-delimited JSON-RPC 2.0). All 63 registered tools
 appear in the `tools/list` handshake, and each can be invoked via
-`tools/call`. The stdio handshake path — including every required
-lifecycle method (`initialize`, `notifications/initialized`, `ping`,
-`tools/list`, `tools/call`) — has been externally exercised by two
-independent scanners: Cisco AI Defense `mcp-scanner` and MCP-Shield. Both
+`tools/call`. Two independent scanners exercised the stdio handshake path:
+Cisco AI Defense `mcp-scanner` and MCP-Shield. They covered every required
+lifecycle method: `initialize`, `notifications/initialized`, `ping`,
+`tools/list`, and `tools/call`. Both
 scanners enumerated the full tool surface with no protocol errors. Every
 method has adversarial regression coverage in the test suite. Any client
 that speaks the same protocol version — Claude
@@ -1352,25 +1379,24 @@ newline-delimited JSON-RPC 2.0 over stdio, MCP protocol version 2025-06-18.
 
 Some MCP hosts keep a full per-run session transcript on disk, including
 every tool call's arguments and result. One example is an agent framework
-named "Hermes." (This Hermes is unrelated to this repo's own
-`BERSERK_LLM_HERMES_URL`/`HERMES_API_KEY` provider settings, described
-above — those configure *berserk-mcp's own* upstream chat-completions
-client for generation, not an MCP host.)
+named "Hermes." This Hermes is not related to this repo's
+`BERSERK_LLM_HERMES_URL` and `HERMES_API_KEY` settings, described above.
+Those settings configure *berserk-mcp's own* chat-completions client for
+generation, not an MCP host.
 
 `scripts/hermes_tool_call_log.py` walks that transcript store. It emits one
 full-fidelity JSON line per tool call — model, arguments, result,
 untruncated — filterable by MCP server name. Use it to confirm which model
-actually drove a tool call, or pipe it into `jq` for ad-hoc auditing. MCP's
+made a tool call, or pipe it into `jq` for ad-hoc auditing. MCP's
 stdio transport does not expose the caller's model identity to the server,
 so this script fills that gap without berserk-mcp needing to know it.
 
 ## Choosing a model
 
 The fixed-query design's core idea is that **the model never writes KQL**.
-It only picks a tool and a time window. This lowers the skill the model
-needs: instead of "can author correct Kusto," it only needs "can do basic
-tool-calling." That is what makes cheap and local models viable in
-principle. But the real floor is higher than earlier guidance here
+It only picks a tool and a time window. So the model does not need to
+write correct Kusto. It only needs basic tool calling. That is why cheap and
+local models can work, in principle. But the real floor is higher than earlier guidance here
 claimed. A real-model eval sweep (2026-08-22/23; 8 models, 2 local via
 Ollama and 6 cloud via OpenRouter; full methodology and per-model table in
 [docs/model-routing-cost-validation-2026-08-23.md](docs/model-routing-cost-validation-2026-08-23.md))
@@ -1390,20 +1416,19 @@ found:
   price). Caveat: `tool_choice: "required"` silently disables that caching;
   use `"auto"` to keep it.
 
-If a small local model is a hard requirement, use [just-in-time tool
-discovery](#just-in-time-tool-discovery-find_tool-opt-in) — cutting the
-schema from 69 tools to 8 is a real, measured accuracy lever (92% token
-reduction), though it did not close the gap to zero for the 7-8B models in
-this sweep. For unattended local deployments, prefer a ≥24B model with a
+If you must use a small local model, use [just-in-time tool
+discovery](#just-in-time-tool-discovery-find_tool-opt-in). It cuts the schema
+from 69 tools to 8, a 92% token reduction, and measurably improves accuracy.
+It did not close the whole gap for the 7-8B models in this sweep. For unattended local deployments, prefer a ≥24B model with a
 GPU over a smaller one.
 
 - **Cheap API.** `deepseek-v4-flash`, `gpt-4.1-mini`, Claude **Haiku**, or
   Gemini **Flash** give strong tool use at a fraction of frontier cost.
   Good for latency-sensitive ChatOps replies.
 - **Frontier models** are rarely necessary. Save them for open-ended
-  investigations that use `search` and `save_query`, or as an
-  escalation tier for cases a cheaper model's own routing confidence flags
-  as uncertain (see `evals/escalation_policy.py`).
+  investigations that use `search` and `save_query`. Or use them as an
+  escalation tier, for cases where a cheaper model is not confident of its
+  routing (see `evals/escalation_policy.py`).
 
 The biggest reliability lever, regardless of model, is the tool
 **descriptions**. They are written to be narrow and unambiguous, so a small
@@ -1415,13 +1440,14 @@ berserk-mcp applies defense in depth across the execution boundary, KQL
 validation, secret/PII redaction, generation-pipeline resource bounds,
 concurrency-safe store writes, role-visibility enforcement, and
 outbound-HTTP hardening. Each control has a name and an adversarial
-regression test. See [Security controls](docs/security-controls.md) for
-the full list of about 30 controls, plus the audit history: a hand audit, a
+regression test. [Security controls](docs/security-controls.md) lists all
+of about 30 controls. It also gives the audit history: a hand audit, a
 differential re-review, and an external scanner pass across three tools.
-The HTTP transport's DNS-rebinding protection, the one finding from the
-2026-08-29 conformance run, is on by default since v1.32.0: a loopback bind
-accepts only loopback `Host` names, and a browser `Origin` must match an
-allowed host — see [docs/mcp-conformance.md](docs/mcp-conformance.md) and
+
+The 2026-08-29 conformance run found one issue: DNS rebinding on the HTTP
+transport. Since v1.32.0, protection against it is on by default. A loopback
+bind accepts only loopback `Host` names, and a browser `Origin` must match an
+allowed host. See [docs/mcp-conformance.md](docs/mcp-conformance.md) and
 [issue #84](https://github.com/ssimonsen0202/berserk_mcp/issues/84).
 
 The server has also been run against the official
@@ -1438,10 +1464,10 @@ A Codex Security scan of the query and process boundary, and the review in
 led to these controls:
 
 - **User KQL reads only the configured table, in every validation mode.** The
-  execution boundary (`_kql_boundary.check`, applied to `search` and to
-  `validate_kql mode=live`) refuses source operators and functions (`union`,
-  `join`, `lookup`, `evaluate`, `invoke`, `toscalar(`, `table(`, and similar)
-  anywhere outside string literals. The right operand of `in`, `has`,
+  execution boundary is `_kql_boundary.check`, applied to `search` and to
+  `validate_kql mode=live`. Outside string literals, it refuses source
+  operators and functions such as `union`, `join`, `lookup`, `evaluate`,
+  `invoke`, `toscalar(`, and `table(`. The right operand of `in`, `has`,
   `has_any` and related operators must be a literal, because a bare or
   bracket-quoted name there can be a table. String literals are delimited the
   way the Kusto lexer reads them, including verbatim, obfuscated and
@@ -1450,22 +1476,22 @@ led to these controls:
   table the `bzrk` identity can, so restrict that identity's permissions.
 - **The untrusted-data fence cannot be closed by an encoded tag.** Before
   wrapping, `_tag_guard` decodes HTML entities, JSON escapes (`\u003c`,
-  `\/`), URL escapes and full-width forms, up to 8 nested levels, then
-  neutralises any opening or closing fence tag. It covers all three fences:
+  `\/`), URL escapes, and full-width forms, up to 8 nested levels. It then
+  neutralizes any opening or closing fence tag. It covers all three fences:
   telemetry, saved-query descriptions, and parser-factory samples.
-- **Generated queries need an operator's approval.** A query the parser
-  factory writes is stored as pending; the small tier cannot see or run it
+- **Generated queries need an operator's approval.** The parser factory
+  stores each query it writes as pending. The small tier cannot see or run it
   until an operator runs `berserk-mcp --approve-generated <name>`. See
   [Parser factory](#parser-factory-llm-generated-query-packs).
-- **Unknown tool arguments are rejected.** See [Tool tiers](#tool-tiers).
-- **A late authentication error is still an error.** `bzrk` stderr is scanned
-  in full while it streams, not only the retained diagnostic prefix, and a
-  stream that was not read to the end fails the call.
+- **The server rejects unknown tool arguments.** See [Tool tiers](#tool-tiers).
+- **A late authentication error is still an error.** The server scans all of
+  `bzrk` stderr while it streams, not only the retained diagnostic prefix. A
+  stream that it did not read to the end fails the call.
 - **Optional egress policy (v1.34.0).** `BERSERK_LOCAL_ONLY=1` refuses the
-  OpenAI and Anthropic providers even when their keys are set, and with
-  `BERSERK_EGRESS_ALLOWED_HOSTS` / `_CIDRS` limits every outbound integration
-  to loopback and approved destinations, checked against the resolved
-  addresses at connect time. `--doctor` shows the effective policy.
+  OpenAI and Anthropic providers, even when their keys are set. With
+  `BERSERK_EGRESS_ALLOWED_HOSTS` or `_CIDRS`, it limits every outbound
+  integration to loopback and approved destinations. The check uses the
+  resolved addresses at connect time. `--doctor` shows the effective policy.
 - **Plaintext needs an explicit opt-in per service.** Loopback requests never
   use a proxy. The OpenRouter webhook receiver and backfill need
   `--allow-plaintext-remote` for a plaintext non-loopback endpoint; OTLP and
@@ -1476,38 +1502,40 @@ led to these controls:
 Three scanners run against this repo on every push. All are local. None
 sends code, tool definitions, or configuration to a third party.
 
-**Semgrep, on every push.** Custom rules in `.semgrep/` encode
-repo-specific invariants that generic linters do not know about — chiefly
-the untrusted-data fencing rule, backtested against real historical bugs
-in this codebase. See `.semgrep/fence-untrusted-data.yml`.
+**Semgrep, on every push.** Custom rules in `.semgrep/` encode invariants
+specific to this repo, which generic linters do not know. The main one is
+the untrusted-data fencing rule. It was backtested against real past bugs in
+this codebase. See `.semgrep/fence-untrusted-data.yml`.
 
 **Trail of Bits semgrep rules, on every push.** The `generic/` rules from
 [`trailofbits/semgrep-rules`](https://github.com/trailofbits/semgrep-rules)
-(insecure `curl`/`wget` flags, plaintext non-loopback URLs, SSH without
-host-key checks, openssl/gpg/tar flags, plaintext database transports) plus
-their standard-library `tarfile` rule scan every tracked file, including
-README, docs and configs. The other 22 Python rules target libraries this
+scan every tracked file, including README, docs, and configs. So does their
+standard-library `tarfile` rule. These rules find insecure `curl`/`wget`
+flags, plaintext non-loopback URLs, and SSH without host-key checks. They
+also find risky openssl, gpg, and tar flags, and plaintext database
+transports. The other 22 Python rules target libraries this
 project never imports. The rules are AGPL-3.0, so CI clones them at a pinned
 commit instead of vendoring them. `scripts/tob_semgrep_gate.py` fails closed:
-on a clone or checkout failure, a modified rule file, a semgrep error, any
-tracked file missing from the scan, or a planted canary the rules do not
-catch.
+- on a clone or checkout failure,
+- on a modified rule file or a semgrep error,
+- when a tracked file is missing from the scan,
+- when the rules do not catch a planted canary.
 
 **Cisco MCP Scanner ([`cisco-ai-defense/mcp-scanner`](https://github.com/cisco-ai-defense/mcp-scanner)),
-on every push.** It connects to the running server over stdio, pulls the
-real `tools/list`, and checks every tool description for prompt injection
-and tool poisoning — an attacker-authored instruction hidden in a tool
+on every push.** It connects to the running server over stdio and pulls the
+real `tools/list`. It checks every tool description for prompt injection and
+tool poisoning. Tool poisoning is an attacker's instruction hidden in a tool
 description, which a client model reads as trusted server text.
 
 That threat is real here, not theoretical. Most of the 74 tools are static
 and maintainer-authored, so their descriptions are as trustworthy as the
 repo. But `saved__*` tools are **projected into `tools/list` at runtime**
 from caller-supplied and LLM-generated text (see `_saved_query_description`).
-That is the poisoning surface, and running the scanner against a
-deliberately poisoned learned-query store on 2026-09-06 found a real gap in
-it: forged fence-tag neutralization ran only for LLM-generated
-descriptions, not caller-supplied ones, though both land in the same
-`tools/list` payload. Fixed, with a regression test.
+That is the poisoning surface. On 2026-09-06, we ran the scanner against a
+deliberately poisoned learned-query store, and it found a real gap. Forged
+fence tags were neutralized only in LLM-generated descriptions, not in
+caller-supplied ones. Both land in the same `tools/list` payload. We fixed
+it, with a regression test.
 
 #### Which analyzers, and why not the others
 
@@ -1524,11 +1552,11 @@ The gate is `scripts/mcp_scan_gate.py`, wired into CI as the `mcp-scan`
 job. Two of its design choices are worth stating, because both are
 deliberate:
 
-**It fails closed.** The scanner itself fails open in at least two places,
-observed 2026-09-06: `vulnerable-package` reported `SAFE (0 findings)`
-while its own log showed `pip-audit exited with code 2 and produced no
-JSON output`, and the LLM analyzer counted three tools as safe after they
-errored with `Empty response from LLM`. A security gate that reports a
+**It fails closed.** On 2026-09-06, we saw the scanner itself fail open in
+two places. `vulnerable-package` reported `SAFE (0 findings)`, while its own
+log showed `pip-audit exited with code 2 and produced no JSON output`. The LLM
+analyzer counted three tools as safe after they failed with `Empty response
+from LLM`. A security gate that reports a
 pass when it did not run is worse than no gate. So a non-zero exit,
 unparseable output, zero records, or any tool not reporting
 `status == "completed"` all fail the build.
@@ -1569,12 +1597,13 @@ all on restrictive language, is a rule-precision issue rather than a
 finding about any of these servers. Reported upstream as
 [cisco-ai-defense/mcp-scanner#252](https://github.com/cisco-ai-defense/mcp-scanner/issues/252).
 
-This matters for the gate's design. Requiring zero findings would create
-standing pressure to reword descriptions to satisfy a regex — including
-`top_cpu`'s "use ONLY when the user names a container … use `host_cpu`
-instead", which trips the same string and is the tool disambiguation this
-project *measured* as improving real routing accuracy (`mistral-saba`
-86.3% → 92.2%, `deepseek-v4-flash` 90.2% → 94.1%, zero regressions — see
+This matters for the gate's design. A zero-findings rule would push us to
+reword descriptions until a regex passes. One example is `top_cpu`'s "use
+ONLY when the user names a container … use `host_cpu` instead". That text
+trips the same string. It is also the disambiguation that this project
+*measured* as improving real routing accuracy, with zero regressions.
+`mistral-saba` went from 86.3% to 92.2%, and `deepseek-v4-flash` from 90.2%
+to 94.1% (see
 [docs/model-routing-cost-validation-2026-08-23.md](docs/model-routing-cost-validation-2026-08-23.md)).
 Accepted findings therefore live in `scripts/mcp_scan_baseline.json`, each
 with a written reason, and the gate fails only on findings that are
@@ -1610,24 +1639,29 @@ can run on hardware you own with no cloud egress.
 ## Wrong-answer containment
 
 berserk-mcp groups its controls against a *confident false negative* under
-one name. A confident false negative is an agent reporting a clean bill of
-health when a query silently matched zero rows, went stale, or the tool
-refused to run a broken query. Most open-source observability MCP
+one name. A confident false negative is an agent that reports "all healthy"
+when it saw no real data. The query matched zero rows, or the data was stale,
+or the tool refused to run a broken query. Most open-source observability MCP
 implementations state hallucination defenses like rate limiting, query
 timeouts, and read-only execution. These protect backend stability. Few
-address this query-result failure mode — the one that actually pages
-someone at 4am.
+address this query-result failure mode, the one that pages someone at
+4am.
 
-Nine controls make this up, each with a locking test: field-access guidance
-for nested OTLP attributes, full-text search term-boundary guidance, KQL
-validation that rejects blockers before execution, schema-drift warnings on
-saved queries, a result envelope that tells apart the bare `(no rows)`
-sentinel and carries evidence fields, untrusted-data fencing against a
-smuggled instruction in a log line, and three added in v1.30.0: rejecting
-undeclared tool arguments (a misspelled filter used to widen the answer
-silently), a log-freshness check before the error-rate tree reports "no
-errors", and small-tier text that never points a model at a tool it cannot
-call. See [docs/wrong-answer-containment.md](docs/wrong-answer-containment.md)
+Nine controls make this up, and each has a locking test:
+
+1. Field-access guidance for nested OTLP attributes.
+2. Term-boundary guidance for full-text search.
+3. KQL validation that rejects blockers before execution.
+4. Schema-drift warnings on saved queries.
+5. A result envelope that marks the bare `(no rows)` sentinel and carries
+   evidence fields.
+6. Untrusted-data fencing against an instruction smuggled into a log line.
+7. Rejection of undeclared tool arguments (v1.30.0). A misspelled filter used
+   to widen the answer silently.
+8. A log-freshness check before the error-rate tree reports "no errors"
+   (v1.30.0).
+9. Small-tier text that never points a model at a tool it cannot call
+   (v1.30.0). See [docs/wrong-answer-containment.md](docs/wrong-answer-containment.md)
 for full detail, known limits, and the regression test for each.
 
 ## Testing
@@ -1641,18 +1675,20 @@ python3 -m unittest discover -s evals -p "test_*.py"
 python3 -m unittest discover -s ingestion -p "test_*.py"
 ```
 
-CI runs all four on Ubuntu and Windows with Python 3.11, 3.12, 3.13 and 3.14 (about
-1,440 tests), plus the protocol smoke test, the router-eval gate, and the
-three scanners under [Security tooling](#security-tooling-what-runs-and-what-deliberately-does-not).
-A `lint` job runs ruff (lint rules including a complexity cap, and the format
-check) and mypy over every shipped module, with both tool versions pinned.
+CI runs all four on Ubuntu and Windows, with Python 3.11, 3.12, 3.13, and
+3.14 (about 1,440 tests). It also runs the protocol smoke test, the
+router-eval gate, and the three scanners under
+[Security tooling](#security-tooling-what-runs-and-what-deliberately-does-not).
+A `lint` job runs ruff and mypy over every shipped module, with both tool
+versions pinned. Ruff checks the lint rules, a complexity cap, and the format.
+A test also checks this README's prose style (`tests/test_readme_style.py`).
 Locally: `make lint`, `make format-check`, `make typecheck`.
 
-The tests stub the `bzrk` CLI. They verify: KQL content and lock strings,
-default time windows, role isolation (which tools appear in which lane),
-injection guards, `since` validation, tool annotations, JSON-RPC protocol,
-the learning loop, discovery-queue deduplication, and amendments-log
-behavior. The parser-factory suite additionally fakes the LLM HTTP layer, to
+The tests stub the `bzrk` CLI. They verify KQL content and lock strings,
+default time windows, and role isolation (which tools appear in which lane).
+They also verify injection guards, `since` validation, tool annotations, and
+the JSON-RPC protocol. Others cover the learning loop, discovery-queue
+deduplication, and amendments-log behavior. The parser-factory suite additionally fakes the LLM HTTP layer, to
 verify the escalation ladder, source profiling, new-source/drift detection,
 generation, validation, refinement, and headless worker mode. The
 agent-analytics suite verifies loop detection, model-fit classification, MCP
@@ -1665,7 +1701,7 @@ review (verbatim strings, bracket-quoted names, `in` operands). The fence
 tests cover every encoding the guard decodes, and they time 4 MiB of hostile
 input. New tests are checked by disabling the fix and confirming they fail.
 
-### Live-verified, not just unit-tested
+### Live-verified, not only unit-tested
 
 The stubbed suite proves berserk-mcp's logic is internally consistent. It
 does not prove the KQL executes correctly against a real cluster. So every
@@ -1687,12 +1723,14 @@ through the learning loop.
 
 Before writing KQL, read the [Berserk KQL performance guide](docs/kql-performance-guide.md).
 It covers index-friendly predicates, `tail` for recency, narrow projections,
-explicit limits, live verification, and the shared-cluster fleet rules. As of
-v1.17.0, the guide's "Verified function availability" table also confirms
-`make-series`, `series_fit_line`, `series_decompose_anomalies`, `series_fir`,
-`rate`, `deriv`, `bin_auto`, `extract_log_template`, and `fieldstats` all work
-against the live cluster — every core query builder now prefers these native
-forms over hand-rolled `bin()`/`sort`/`bag_keys` equivalents where one exists.
+explicit limits, live verification, and the shared-cluster fleet rules.
+
+Since v1.17.0, the guide's "Verified function availability" table lists
+the native functions verified on the live cluster. They are `make-series`,
+`series_fit_line`, `series_decompose_anomalies`, `series_fir`, `rate`,
+`deriv`, `bin_auto`, `extract_log_template`, and `fieldstats`. Every core
+query builder prefers them over hand-written `bin()`/`sort`/`bag_keys`
+versions, where a native form exists.
 
 **1. Find the KQL on a live instance.** Iterate with `bzrk` until the query
 returns clean rows — names, units, sort order. *Do not ship a query you have
@@ -1748,7 +1786,7 @@ mergeable.
 
 Good first contributions:
 
-- A new fixed-query tool for telemetry you actually care about
+- A new fixed-query tool for telemetry you care about
 - A worked example for your stack (Kubernetes, ECS, Nomad, and others) under [docs/](docs/)
 - Sharpening a tool description that confused your model. The descriptions are the router — a clearer one is a real correctness improvement.
 - Filing an issue when you hit something berserk-mcp should have a tool for
