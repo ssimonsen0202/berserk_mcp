@@ -42,10 +42,16 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.36.0**. This is a bullet-point overview, most recent
+Current version: **1.36.1**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.36.1** (2026-10-02) — Current Claude prices. The pricing catalog had
+  no entry for Opus 5.5, Opus 5, Sonnet 5.5, Fable 5.1 or Mythos 5.1, so
+  `claude_spend_overview` priced their usage at $0. It also charged Sonnet 5
+  at $3/$15 from 2026-09-01; that increase was cancelled, and Sonnet 5 stays
+  at $2/$10. A test now checks each current model against the public price
+  page. See [docs/releases/v1.36.1.md](docs/releases/v1.36.1.md).
 - **v1.36.0** (2026-10-02) — Bounded output. `search` and saved queries
   sent the model the whole result, up to the 10 MiB stdout cap. They now
   send at most `BERSERK_MCP_MAX_OUTPUT_CHARS` characters (default 40,000,

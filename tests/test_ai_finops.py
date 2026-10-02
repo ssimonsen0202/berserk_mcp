@@ -369,10 +369,12 @@ class NormalizationAndPricingTest(FinopsTestCase):
         self.assertEqual(result["unpriced_tokens"], 600)
 
     def test_unknown_version_does_not_match_generic_family_alias(self):
+        # claude-opus-5 was the example here until it joined the catalog;
+        # the point is that a version with no entry must stay unpriced.
         result = af.calculate_public_cost(
             {
                 "day": "2026-07-26",
-                "model": "claude-opus-5",
+                "model": "claude-opus-9",
                 "input_tokens": 500,
                 "output_tokens": 100,
             },
@@ -414,7 +416,45 @@ class NormalizationAndPricingTest(FinopsTestCase):
         july = af.resolve_model_price(catalog, "claude-sonnet-5", "2026-07-25")
         september = af.resolve_model_price(catalog, "claude-sonnet-5", "2026-09-01")
         self.assertEqual((july["input_usd_per_mtok"], july["output_usd_per_mtok"]), (2, 10))
-        self.assertEqual((september["input_usd_per_mtok"], september["output_usd_per_mtok"]), (3, 15))
+        # The $3/$15 increase scheduled for 2026-09-01 was cancelled; $2/$10 is
+        # the standard price (pricing page footnote 3, checked 2026-10-02).
+        self.assertEqual((september["input_usd_per_mtok"], september["output_usd_per_mtok"]), (2, 10))
+
+    def test_current_models_match_the_public_price_page(self):
+        # Copied from https://platform.claude.com/docs/en/about-claude/pricing.md
+        # on 2026-10-02: input, output, cache read, 5m write, 1h write ($/MTok).
+        expected = {
+            "claude-opus-5-5": (4, 20, 0.2, 5, 8),
+            "claude-opus-5": (5, 25, 0.5, 6.25, 10),
+            "claude-sonnet-5-5": (2, 10, 0.2, 2.5, 4),
+            "claude-sonnet-5": (2, 10, 0.2, 2.5, 4),
+            "claude-fable-5-1": (10, 50, 0.25, 12.5, 20),
+            "claude-mythos-5-1": (10, 50, 0.25, 12.5, 20),
+            "claude-fable-5": (10, 50, 1, 12.5, 20),
+            "claude-haiku-4-5": (1, 5, 0.1, 1.25, 2),
+        }
+        keys = (
+            "input_usd_per_mtok",
+            "output_usd_per_mtok",
+            "cache_read_usd_per_mtok",
+            "cache_write_5m_usd_per_mtok",
+            "cache_write_1h_usd_per_mtok",
+        )
+        catalog = af.load_pricing_catalog(CATALOG)
+        for model, prices in expected.items():
+            with self.subTest(model=model):
+                entry = af.resolve_model_price(catalog, model, "2026-10-02")
+                self.assertIsNotNone(entry, f"{model} is unpriced")
+                self.assertEqual(tuple(entry[k] for k in keys), prices)
+
+    def test_opus_5_x_fast_mode_rates(self):
+        # Fast mode $/MTok with the caching multipliers applied on top.
+        catalog = af.load_pricing_catalog(CATALOG)
+        keys = ("input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok")
+        for model, prices in {"claude-opus-5-5": (8, 40, 0.4), "claude-opus-5": (10, 50, 1)}.items():
+            with self.subTest(model=model):
+                fast = af.resolve_model_price(catalog, model, "2026-10-02")["fast_mode"]
+                self.assertEqual(tuple(fast[k] for k in keys), prices)
 
     def test_fast_mode_uses_separate_effective_rates(self):
         result = af.calculate_public_cost(
