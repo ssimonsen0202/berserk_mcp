@@ -126,6 +126,30 @@ class ExtractSpansTest(unittest.TestCase):
         self.assertIsNone(row["prompt_tokens"])
         self.assertIsNone(row["completion_tokens"])
 
+    def test_response_model_alias_is_preserved(self):
+        rows = extract_spans(
+            {
+                "resourceSpans": [
+                    {
+                        "resource": {"attributes": []},
+                        "scopeSpans": [
+                            {
+                                "spans": [
+                                    {
+                                        "traceId": "t",
+                                        "spanId": "s",
+                                        "name": "n",
+                                        "attributes": [_attr("gen_ai.response.model", "qwen/qwen3.8-27b:free")],
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+        self.assertEqual(rows[0]["model"], "qwen/qwen3.8-27b:free")
+
 
 def _raw_span(**attrs):
     return {
@@ -183,6 +207,24 @@ class SpanToLogRecordTest(unittest.TestCase):
             redact=lambda text: text.replace("OpenRouter", "REDACTED-VENDOR"),
         )
         self.assertIn("REDACTED-VENDOR", rec["body"]["stringValue"])
+
+    def test_model_and_experiment_metadata_survive_redaction(self):
+        rec = span_to_log_record(
+            _raw_span(
+                **{
+                    "gen_ai.request.model": "qwen/qwen3.8-27b:free",
+                    "trace.metadata.arm": "parent_only",
+                    "trace.metadata.case_id": "kql-validation-regression",
+                    "gen_ai.prompt": "sk-proj-realsecretvalue12345",
+                }
+            )
+        )
+        attrs = {item["key"]: item["value"]["stringValue"] for item in rec["attributes"]}
+        self.assertEqual(attrs["openrouter.model"], "qwen/qwen3.8-27b:free")
+        self.assertEqual(attrs["trace.metadata.arm"], "parent_only")
+        self.assertEqual(attrs["trace.metadata.case_id"], "kql-validation-regression")
+        self.assertTrue(attrs["gen_ai.prompt"].startswith("[REDACTED"))
+        self.assertIn("model=qwen/qwen3.8-27b:free", rec["body"]["stringValue"])
 
     def test_non_string_attribute_values_are_not_passed_through_redact(self):
         # Numeric/bool values must not go through redact() (which expects

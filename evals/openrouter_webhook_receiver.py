@@ -51,17 +51,53 @@ import secret_scan
 
 _KNOWN_ATTR_KEYS = {
     "gen_ai.request.model": "model",
+    "gen_ai.response.model": "model",
+    "gen_ai.model": "model",
     # OpenRouter's actual wire format uses input_tokens/output_tokens, not the
     # prompt_tokens/completion_tokens names its own docs page describes --
     # confirmed against a real captured trace on 2026-08-22.
     "gen_ai.usage.input_tokens": "prompt_tokens",
     "gen_ai.usage.output_tokens": "completion_tokens",
     "gen_ai.usage.total_cost": "cost_usd",
+    "gen_ai.usage.total_tokens": "total_tokens",
     "user.id": "user_id",
     "session.id": "session_id",
 }
 
-_TOKEN_FIELDS = {"prompt_tokens", "completion_tokens"}
+_TOKEN_FIELDS = {"prompt_tokens", "completion_tokens", "total_tokens"}
+
+_SAFE_METADATA_KEYS = {
+    "gen_ai.request.model",
+    "gen_ai.response.model",
+    "gen_ai.model",
+    "trace.metadata.arm",
+    "trace.metadata.case_id",
+    "trace.metadata.run_id",
+    "trace.metadata.handoff_id",
+    "trace.metadata.trial_id",
+    "experiment.arm",
+    "experiment.case_id",
+    "experiment.run_id",
+    "experiment.handoff_id",
+    "experiment.trial_id",
+}
+
+
+def _safe_metadata(value):
+    """Keep bounded identifiers queryable without shipping free-form text."""
+    if not isinstance(value, str) or not value or len(value) > 200:
+        return None
+    if not all(char.isalnum() or char in "._:/-" for char in value):
+        return None
+    return value
+
+
+def _model_from_attrs(attrs):
+    for key in ("gen_ai.request.model", "gen_ai.response.model", "gen_ai.model"):
+        model = _safe_metadata(attrs.get(key))
+        if model:
+            return model
+    return "unknown-model"
 
 
 def _unwrap_otlp_value(value):
@@ -146,13 +182,27 @@ def span_to_log_record(span, redact=default_redact):
     for key, value in span_attrs.items():
         if value is None:
             continue
-        text = redact(value) if isinstance(value, str) else str(value)
+        if key in _SAFE_METADATA_KEYS:
+            text = _safe_metadata(value)
+            if text is None:
+                continue
+        else:
+            text = redact(value) if isinstance(value, str) else str(value)
         log_attrs.append({"key": key, "value": {"stringValue": text[:4000]}})
 
-    model = span_attrs.get("gen_ai.request.model") or "unknown-model"
+    model = _model_from_attrs(span_attrs)
     tokens = span_attrs.get("gen_ai.usage.total_tokens")
     cost = span_attrs.get("gen_ai.usage.total_cost")
-    body = redact(f"OpenRouter generation: model={model} total_tokens={tokens} total_cost={cost}")
+    body_prefix = redact("OpenRouter generation")
+    body = f"{body_prefix}: model={model} total_tokens={tokens} total_cost={cost}"
+
+    # Canonical query fields survive provider-specific attribute naming and
+    # avoid relying on a redacted free-form body for experiment joins.
+    log_attrs.append({"key": "openrouter.model", "value": {"stringValue": model}})
+    for key in _SAFE_METADATA_KEYS - {"gen_ai.request.model", "gen_ai.response.model", "gen_ai.model"}:
+        safe_value = _safe_metadata(span_attrs.get(key))
+        if safe_value:
+            log_attrs.append({"key": key, "value": {"stringValue": safe_value}})
 
     start_ns = span.get("startTimeUnixNano")
     try:
