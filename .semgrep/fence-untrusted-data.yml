@@ -23,14 +23,22 @@ rules:
               - pattern: $OUT, $ERR = bzrk_search(...)
               - pattern: $OUT, $ERR = bzrk_search_json(...)
               - pattern: $OUT, $ERR = run_bzrk(...)
+              # The same calls through a package module (bm_runner.run_bzrk).
+              - pattern: $OUT, $ERR = $MOD.bzrk_search(...)
+              - pattern: $OUT, $ERR = $MOD.bzrk_search_json(...)
+              - pattern: $OUT, $ERR = $MOD.run_bzrk(...)
           - focus-metavariable: $OUT
     pattern-sanitizers:
       - pattern: _fence_untrusted(...)
+      - pattern: $MOD._fence_untrusted(...)
       - pattern: _envelope(..., fence_body=True)
+      - pattern: $MOD._envelope(..., fence_body=True)
       - pattern: _wrap_analytics(...)
+      - pattern: $MOD._wrap_analytics(...)
       # Cuts to MAX_OUTPUT_CHARS, then calls _fence_untrusted; the note it
       # appends after the fence holds only row/character counts.
       - pattern: _fence_limited(...)
+      - pattern: $MOD._fence_limited(...)
     pattern-sinks:
       - patterns:
           - pattern-either:
