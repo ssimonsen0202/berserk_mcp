@@ -56,7 +56,6 @@ with or endorsed by the Berserk project.
 import sys
 import hashlib
 import json
-import subprocess
 import re
 import os
 import threading
@@ -84,7 +83,6 @@ import ingestion_advisor
 import kql_validation
 import parser_factory
 import quota_status
-import schema_registry
 import secret_scan
 import tool_discovery
 
@@ -93,519 +91,10 @@ from berserk_mcp import _facade
 from berserk_mcp import config as bm_config
 from berserk_mcp import fencing as bm_fencing
 from berserk_mcp import queries as bm_queries
+from berserk_mcp import runner as bm_runner
 
 
 # ---------- configuration (env-overridable) ----------
-
-
-# ---------- bzrk invocation ----------
-# bzrk has been observed to print an authentication failure (e.g. "Refresh
-# token rejected...") to stderr while still exiting 0 -- a real 2026-07-10
-# incident on the bzrk-q bash wrapper, which already carries this same guard
-# (_bzrk_check_auth). This Python adapter never got the equivalent fix, so an
-# exit-0 auth failure was silently returned as a successful empty result
-# (confirmed by the 2026-07-18 security review, SEC-003). Match bzrk-q's
-# pattern exactly for consistency between the two wrappers.
-_AUTH_FAILURE_RE = re.compile(
-    r"refresh token rejected|run .{0,200}bzrk login|unauthorized|unauthenticated|"
-    r"login required",
-    re.IGNORECASE,
-)
-# The same pattern over raw stderr bytes, applied to the whole stream while it
-# is read, not only to the retained diagnostic prefix: a marker after
-# MAX_BZRK_DIAGNOSTIC_CHARS must still be classified (Codex Security scan
-# 77004e6e finding 3). Every alternative is bounded (at most ~220 bytes), so a
-# rolling overlap of _AUTH_SCAN_OVERLAP bytes finds a match split across reads.
-_AUTH_FAILURE_BYTES_RE = re.compile(_AUTH_FAILURE_RE.pattern.encode("ascii"), re.IGNORECASE)
-_AUTH_SCAN_OVERLAP = 512
-
-
-# F-005/SR-17: bound both diagnostics and successful output while the child
-# is still running. Row limits do not bound wide rows, and capture_output
-# buffers an entire stream before this process can inspect it.
-MAX_BZRK_DIAGNOSTIC_CHARS = 100_000
-_PROCESS_READ_CHUNK = 64 * 1024
-
-
-def _run_argv_bounded(
-    argv,
-    timeout,
-    stdout_cap=bm_config.MAX_BZRK_RESULT_BYTES,
-    stderr_cap=MAX_BZRK_DIAGNOSTIC_CHARS,
-    stderr_watch=_AUTH_FAILURE_BYTES_RE,
-):
-    """Run argv without a shell, bounding captured bytes before decoding.
-
-    Two readers drain stdout and stderr concurrently to avoid pipe deadlocks.
-    stdout overflow terminates and reaps the child; stderr is retained only up
-    to its diagnostic cap while the remainder is discarded until completion.
-    Every stderr byte, retained or not, is searched for `stderr_watch`
-    ("stderr_watch_matched"). "streams_complete" is False when a reader was
-    still running after the child exited, so its stream may be incomplete.
-    """
-    process = subprocess.Popen(
-        list(argv),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=False,
-    )
-    buffers = {"stdout": bytearray(), "stderr": bytearray()}
-    caps = {"stdout": max(1, int(stdout_cap)), "stderr": max(1, int(stderr_cap))}
-    stdout_overflow = threading.Event()
-    stderr_overflow = threading.Event()
-    stderr_watch_matched = threading.Event()
-    reader_errors = []
-
-    def drain(name, stream):
-        tail = b""
-        try:
-            with stream:
-                while True:
-                    chunk = stream.read(_PROCESS_READ_CHUNK)
-                    if not chunk:
-                        break
-                    if name == "stderr" and stderr_watch is not None and not stderr_watch_matched.is_set():
-                        window = tail + chunk
-                        if stderr_watch.search(window):
-                            stderr_watch_matched.set()
-                        tail = window[-_AUTH_SCAN_OVERLAP:]
-                    remaining = caps[name] - len(buffers[name])
-                    if remaining > 0:
-                        buffers[name].extend(chunk[:remaining])
-                    if len(chunk) > max(0, remaining):
-                        if name == "stdout":
-                            stdout_overflow.set()
-                        else:
-                            stderr_overflow.set()
-        except Exception as exc:  # pragma: no cover - defensive OS pipe failure
-            reader_errors.append(exc)
-
-    threads = [
-        threading.Thread(target=drain, args=("stdout", process.stdout), daemon=True),
-        threading.Thread(target=drain, args=("stderr", process.stderr), daemon=True),
-    ]
-    for thread in threads:
-        thread.start()
-
-    deadline = time.monotonic() + max(0.0, float(timeout))
-    timed_out = False
-    while process.poll() is None:
-        if stdout_overflow.is_set():
-            try:
-                process.kill()
-            except OSError:  # pragma: no cover - child exited between poll and kill
-                pass
-            break
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            timed_out = True
-            try:
-                process.kill()
-            except OSError:  # pragma: no cover - child exited between poll and kill
-                pass
-            break
-        stdout_overflow.wait(min(0.05, remaining))
-    process.wait()
-    for thread in threads:
-        thread.join(timeout=2)
-    if reader_errors:
-        raise reader_errors[0]
-    if timed_out:
-        raise subprocess.TimeoutExpired(list(argv), timeout)
-    return {
-        "returncode": process.returncode,
-        "stdout": bytes(buffers["stdout"]),
-        "stderr": bytes(buffers["stderr"]),
-        "stdout_overflow": stdout_overflow.is_set(),
-        "stderr_overflow": stderr_overflow.is_set(),
-        "stderr_watch_matched": stderr_watch_matched.is_set(),
-        "streams_complete": not any(thread.is_alive() for thread in threads),
-    }
-
-
-def run_bzrk(args, timeout=bm_config.DEFAULT_TIMEOUT):
-    """Run the bzrk CLI with the given argument list. Returns (text, is_error)."""
-    if bm_config._RESOLVED_BZRK_BIN is None:
-        return (
-            f"error: '{bm_config._BZRK_BIN_CONFIG}' not found on PATH. Install the Berserk CLI or set BZRK_BIN to its full path."
-        ), True
-    args = list(args)
-    # `bzrk search` auto-detects "agent mode" from the calling environment
-    # (Claude Code / Codex set env vars a spawned child process inherits
-    # unmodified) and switches to printing progressive `# Increment N`
-    # snapshots instead of one final result -- confirmed by direct repro:
-    # identical invocation, identical piped (non-TTY) stdout, produces a
-    # clean single table without Claude Code's env vars present and a
-    # streamed multi-snapshot dump with them present. Since berserk-mcp is
-    # primarily deployed as an MCP server launched BY Claude Code, every
-    # bzrk subprocess it spawns inherits that same detected context by
-    # default. Force --no-stream unconditionally so parsing always sees a
-    # single deterministic snapshot, and so a byte-cap or timeout can never
-    # silently return an early partial increment as if it were complete.
-    if "search" in args and "--no-stream" not in args:
-        args = args + ["--no-stream"]
-    try:
-        result = _run_argv_bounded([bm_config._RESOLVED_BZRK_BIN] + args, timeout)
-        out = result["stdout"].decode("utf-8", errors="replace").strip()
-        err = result["stderr"].decode("utf-8", errors="replace").strip()
-        if result.get("stderr_watch_matched") or (err and _AUTH_FAILURE_RE.search(err)):
-            return bm_config.AUTH_FAILURE_MESSAGE, True
-        if not result.get("streams_complete", True):
-            # A reader outlived the child (e.g. a grandchild kept the pipe
-            # open), so stderr was not fully scanned: fail closed.
-            return "bzrk output could not be read completely; retry the query.", True
-        if result["stdout_overflow"]:
-            return (
-                f"bzrk result exceeded BERSERK_MCP_MAX_RESULT_BYTES="
-                f"{bm_config.MAX_BZRK_RESULT_BYTES}; narrow the time window, project fewer "
-                "columns, or add a smaller take/top/tail bound."
-            ), True
-        if result["returncode"] != 0:
-            diagnostic = (out + "\n" + err).strip() or f"bzrk exited {result['returncode']}"
-            if len(diagnostic) > MAX_BZRK_DIAGNOSTIC_CHARS or result.get("stderr_overflow"):
-                diagnostic = diagnostic[:MAX_BZRK_DIAGNOSTIC_CHARS] + "\n...[truncated]"
-            return diagnostic, True
-        return (out or "(no rows)"), False
-    except FileNotFoundError:
-        return (
-            f"error: '{bm_config._BZRK_BIN_CONFIG}' not found on PATH. Install the Berserk CLI or set BZRK_BIN to its full path."
-        ), True
-    except subprocess.TimeoutExpired:
-        return f"bzrk timed out after {timeout}s", True
-    except Exception as e:  # pragma: no cover - defensive
-        return ("error running bzrk: " + str(e)), True
-
-
-def count_result_is_zero(text):
-    """True if a `summarize n=count()`-style single-row result reports zero.
-
-    `summarize count()` always emits one row even when nothing matches (n=0),
-    so it never hits run_bzrk's "(no rows)" empty-stdout sentinel. Read the
-    last whitespace-separated token of the last non-empty line — the count —
-    regardless of whether bzrk renders it as a table, CSV, or plain value.
-    """
-    if not text or text.strip() == "(no rows)":
-        return True
-    lines = [ln for ln in text.strip().splitlines() if ln.strip()]
-    if not lines:
-        return True
-    tokens = lines[-1].split()
-    if tokens and tokens[-1].lstrip("-").isdigit():
-        return int(tokens[-1]) == 0
-    return False
-
-
-# Accepts "now" or "<n> <unit> [ago]" — e.g. "15m ago", "2 hours ago", "1d".
-_SINCE_RE = re.compile(
-    r"^(now|\d+\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|"
-    r"h|hr|hrs|hour|hours|d|day|days|w|wk|week|weeks)(\s+ago)?)$",
-    re.IGNORECASE,
-)
-
-
-def valid_since(s):
-    """Lightweight validation of a time window. Not a security control (the value
-    is passed as an argv element, never a shell string) — purely a better error."""
-    return bool(_SINCE_RE.match(str(s).strip())) and len(str(s)) <= 32
-
-
-# Small models reach for these natural-language forms even when the schema
-# asks for the canonical grammar. Map them onto a form _SINCE_RE already
-# accepts, rather than rejecting a well-intentioned answer on syntax alone.
-_SINCE_QUALIFIER_RE = re.compile(r"^\s*(?:in\s+the\s+last|over\s+the\s+last|last|past)\s+", re.IGNORECASE)
-_SINCE_UNIT_ONLY_RE = re.compile(
-    r"^(s|sec|secs|second|seconds|m|min|mins|minute|minutes|"
-    r"h|hr|hrs|hour|hours|d|day|days|w|wk|week|weeks)\s*$",
-    re.IGNORECASE,
-)
-_SINCE_WORD_MAP = {"yesterday": "1d ago"}
-
-
-def _normalize_since(s):
-    """Map common natural-language time windows onto the canonical grammar
-    _SINCE_RE accepts, before validation runs. Returns the input unchanged
-    when it is already canonical or not recognized — this only widens the
-    accepted spelling, never what reaches bzrk (the normalized output must
-    still pass valid_since before it is used)."""
-    raw = str(s)
-    stripped = raw.strip()
-
-    mapped = _SINCE_WORD_MAP.get(stripped.lower())
-    if mapped is not None:
-        return mapped
-    if valid_since(raw):
-        return raw
-
-    qualified = _SINCE_QUALIFIER_RE.sub("", stripped, count=1)
-    if qualified == stripped:
-        return raw
-    qualified = re.sub(r"\s+", " ", qualified).strip()
-
-    # A bare unit noun with no leading number ("past week") implies quantity 1.
-    if _SINCE_UNIT_ONLY_RE.match(qualified):
-        qualified = "1 " + qualified
-    if not qualified.lower().endswith("ago"):
-        qualified += " ago"
-
-    return qualified if valid_since(qualified) else raw
-
-
-def _normalize_since_arg(args):
-    """Normalize args['since'] in place, once, at the request boundary.
-
-    Several consumers check `since` before ever reaching bzrk_search --
-    claude_loop_check and other analytics tools call valid_since() directly,
-    search/validate_kql/run_saved/save_query validate it via
-    _validate_user_kql, and the modern-mode expensive_query_guard preflight
-    inspects the raw argument before handle_call even runs. Normalizing only
-    inside bzrk_search left all of those paths rejecting forms it had
-    already learned to accept, and let an unbounded natural-language window
-    (e.g. 'last 100 hours') skip the preflight confirmation its canonical
-    equivalent ('100 hours ago') would have triggered. This must run before
-    any of those checks, on every path that reaches them -- call it at the
-    top of handle_call() (covers all tool branches and direct/test callers)
-    and again before the modern preflight check in dispatch() (covers the
-    JSON-RPC request path, which evaluates preflight before handle_call is
-    invoked). Idempotent: normalizing an already-canonical value is a no-op.
-    """
-    if isinstance(args, dict) and isinstance(args.get("since"), str):
-        args["since"] = _normalize_since(args["since"])
-
-
-_BZRK_TIMEOUT_TEXT_RE = re.compile(r"^bzrk timed out after ", re.IGNORECASE)
-
-
-def bzrk_search(kql, since, extra=None):
-    """Run a KQL search on the configured profile and time window. `extra` adds
-    trailing CLI flags (e.g. ['--json']) without duplicating the guards."""
-    query = str(kql)
-    boundary_error = _kql_boundary.check(query, bm_config.TABLE)
-    if boundary_error:
-        return boundary_error, True
-    since = _normalize_since(since)
-    if not valid_since(since):
-        return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
-    timeout = None
-    tool_name = None
-    if bm_config._FLEET_CONTEXT is not None:
-        timeout = bm_config._window_budget(
-            bm_config._FLEET_CONTEXT.get("budget"),
-            since,
-            bm_config._FLEET_CONTEXT.get("budget_multiplier", 1.0),
-        )
-        tool_name = bm_config._FLEET_CONTEXT.get("tool")
-    effective_timeout = timeout if timeout is not None else bm_config.DEFAULT_TIMEOUT
-    with bm_config._query_semaphore_slot(effective_timeout) as acquired:
-        if not acquired:
-            return (
-                "Local MCP query queue is full. Retry later, use a narrower 'since' "
-                "window, or raise BERSERK_MCP_MAX_CONCURRENT_QUERIES if this process "
-                "is intentionally serving more parallel callers.",
-                True,
-            )
-        if timeout is None:
-            out, is_err = run_bzrk(["-P", bm_config.PROFILE, "search", query, "--since", since] + list(extra or []))
-        else:
-            out, is_err = run_bzrk(
-                ["-P", bm_config.PROFILE, "search", query, "--since", since] + list(extra or []),
-                timeout=timeout,
-            )
-    if is_err and _BZRK_TIMEOUT_TEXT_RE.match(str(out or "")) and tool_name:
-        return (
-            f"{tool_name} exceeded its {timeout:g}s query budget for window {since!r}. "
-            "Retry with a narrower 'since' window, or raise "
-            "BERSERK_MCP_TOOL_BUDGET_SECONDS / BERSERK_MCP_BUDGET_PER_HOUR_SECONDS "
-            "if this cluster is legitimately slower.",
-            True,
-        )
-    # This is bzrk_search itself, the low-level fetch wrapper every dispatch
-    # branch calls -- fencing belongs at the dispatch layer (the caller
-    # decides whether/how to fence based on its own output shape), not
-    # here; some non-dispatch callers (e.g. schema-fetching in
-    # _schema_fetcher) legitimately need the raw value.
-    return out, is_err  # nosemgrep: unfenced-bzrk-output-reaches-return
-
-
-# bzrk builds that don't support --json reject it with an argument-parse
-# error; detect that so we can transparently fall back to the default table
-# output. Both known clap phrasings put the literal word "argument"
-# immediately next to the (usually quoted) flag it's rejecting -- "unexpected
-# argument '--json' found" / "Found argument '--json' which wasn't
-# expected" -- so anchoring on "argument '--json'" is narrower and more
-# reliable than matching on rejection-word vocabulary (a prior version
-# matched words like "invalid" appearing anywhere near "--json", which also
-# matched unrelated runtime errors merely mentioning the flag in passing).
-# "argument '--json'" alone can still coincidentally appear in an unrelated
-# message, so this additionally requires clap's own usage/help trailer,
-# which every real clap argument-parse error appends and a genuinely
-# unrelated backend/serialization error won't happen to also produce.
-_JSON_UNSUPPORTED_RE = re.compile(r"(?i)argument\s*['\"]?--json['\"]?(?=.*?(usage:|--help))", re.DOTALL)
-
-
-def bzrk_search_json(kql, since):
-    """bzrk_search variant that requests --json for robust programmatic parsing
-    (the analytics/secret modules parse rows in Python; aligned table output can
-    truncate or ambiguously split wide `body` columns). Falls back to the
-    default table output only when this bzrk build rejects the --json flag, so
-    there is no regression on builds that lack it."""
-    out, is_err = bzrk_search(kql, since, extra=["--json"])
-    if is_err and _JSON_UNSUPPORTED_RE.search(out or ""):
-        return bzrk_search(kql, since)
-    # Same as bzrk_search above: low-level wrapper, fencing belongs at dispatch.
-    return out, is_err  # nosemgrep: unfenced-bzrk-output-reaches-return
-
-
-def do_schema():
-    out1, e1 = run_bzrk(["-P", bm_config.PROFILE, "search", ".show tables"])
-    out2, e2 = run_bzrk(["-P", bm_config.PROFILE, "search", f"{bm_queries.T} | getschema", "--since", "1h ago"])
-    text = f"== tables ==\n{bm_fencing._fence_untrusted(out1)}\n== columns ==\n{bm_fencing._fence_untrusted(out2)}"
-    return text, (e1 or e2)
-
-
-def _schema_fetcher():
-    """Fetch raw schema material for schema_registry.get_schema_snapshot().
-
-    Contract (schema_registry.py): the fetcher must raise on failure so the
-    caller's except-Exception falls back to a stale cache or reports
-    "unavailable" -- it must never return error text as if it were real
-    schema data, which would get normalized and cached as source_status
-    "fresh". Any of the four run_bzrk calls failing (auth error, timeout,
-    connection refused, etc.) fails the whole fetch, matching do_schema()'s
-    existing any-fails semantics just above -- a partial result would still
-    mean feeding one call's error text into normalize_snapshot as if it
-    were real tables/columns/fields/sample data.
-    """
-    out_tables, e_tables = run_bzrk(["-P", bm_config.PROFILE, "search", ".show tables"])
-    out_schema, e_schema = run_bzrk(
-        ["-P", bm_config.PROFILE, "search", f"{bm_queries.T} | getschema", "--since", "1h ago"]
-    )
-    out_fields, e_fields = run_bzrk(
-        ["-P", bm_config.PROFILE, "search", bm_queries.q_discover_fieldstats(None), "--since", "1h ago"]
-    )
-    out_sample, e_sample = run_bzrk(
-        ["-P", bm_config.PROFILE, "search", bm_queries.q_discover_sample(None), "--since", "1h ago"]
-    )
-    failed = [
-        name
-        for name, is_err in (
-            ("tables", e_tables),
-            ("getschema", e_schema),
-            ("fieldstats", e_fields),
-            ("sample", e_sample),
-        )
-        if is_err
-    ]
-    if failed:
-        raise RuntimeError(f"schema fetch failed for: {', '.join(failed)}")
-    return {
-        "tables": out_tables,
-        "getschema": out_schema,
-        "fieldstats": out_fields,
-        "sample": out_sample,
-        "supported_idioms": [
-            "tail",
-            "take",
-            "top",
-            "summarize",
-            "make-series",
-            "fieldstats",
-            "series_decompose_anomalies",
-            "series_fit_line",
-            "similarto",
-        ],
-    }
-
-
-def _schema_snapshot(force=False, allow_refresh=True):
-    return schema_registry.get_schema_snapshot(
-        force=force,
-        table=bm_config.TABLE,
-        config_dir=Path(bm_config.LEARNED_PATH).parent,
-        fetcher=_schema_fetcher if allow_refresh else None,
-    )
-
-
-def _validation_schema(use_schema=True, allow_refresh=True):
-    if not use_schema:
-        return None, None, {"schema_status": "disabled"}
-    try:
-        snapshot = _schema_snapshot(force=False, allow_refresh=allow_refresh)
-        fields = schema_registry.schema_fields(snapshot)
-        info = {
-            "schema_hash": snapshot.get("schema_hash"),
-            "schema_status": snapshot.get("source_status", "unavailable"),
-            "table": snapshot.get("table", bm_config.TABLE),
-        }
-        return snapshot, fields, info
-    except Exception as e:
-        bm_config.log(f"schema validation unavailable: {type(e).__name__}: {e}")
-        return None, None, {"schema_status": "unavailable"}
-
-
-def _validate_user_kql(kql, since, *, use_schema=True, allow_refresh_schema=True):
-    base_report = kql_validation.validate_kql_static(
-        str(kql or ""),
-        table=bm_config.TABLE,
-        since=str(since or ""),
-        schema_fields=None,
-        max_chars=bm_config.KQL_MAX_CHARS,
-        max_rows=bm_config.KQL_MAX_ROWS,
-        schema_info={"schema_status": "not_checked"},
-    )
-    if any(f.get("severity") == "error" for f in base_report.get("findings", [])) or not use_schema:
-        return base_report
-    snapshot, fields, info = _validation_schema(use_schema=use_schema, allow_refresh=allow_refresh_schema)
-    report = kql_validation.validate_kql_static(
-        str(kql or ""),
-        table=bm_config.TABLE,
-        since=str(since or ""),
-        schema_fields=fields,
-        max_chars=bm_config.KQL_MAX_CHARS,
-        max_rows=bm_config.KQL_MAX_ROWS,
-        schema_info=info,
-        suggest=(lambda field: schema_registry.suggest_field(field, snapshot)) if snapshot else None,
-    )
-    return report
-
-
-def _blocking_validation(report, *, persistence=False):
-    if any(f.get("severity") == "error" for f in report.get("findings", [])):
-        return True
-    if bm_config.KQL_VALIDATION_MODE == "strict" and report.get("risk") == "high":
-        return True
-    return bool(persistence and report.get("risk") == "high")
-
-
-def _format_validation_rejection(report):
-    finding = next((f for f in report.get("findings", []) if f.get("severity") == "error"), None)
-    if finding is None:
-        finding = (report.get("findings") or [{"code": "HIGH_RISK", "message": "high-risk query"}])[0]
-    prefix = "invalid KQL: " if finding.get("code") == "WRONG_TABLE" else ""
-    return (
-        f"{prefix}KQL rejected ({finding.get('code')}): {finding.get('message')} Estimated risk: {report.get('risk')}."
-    )
-
-
-def _format_validation_warnings(report):
-    warnings = [f for f in report.get("findings", []) if f.get("severity") != "error"]
-    if not warnings:
-        return ""
-    return "KQL validation warnings (risk={}):\n".format(report.get("risk")) + "\n".join(
-        f"- {f.get('code')}: {f.get('message')}" for f in warnings[:8]
-    )
-
-
-def _parser_static_validation(kql, since):
-    return _validate_user_kql(kql, since, use_schema=True)
-
-
-def _parser_schema_context():
-    snapshot = _schema_snapshot(force=False)
-    return (
-        schema_registry.schema_context(snapshot, max_chars=12000),
-        snapshot.get("schema_hash", ""),
-        snapshot.get("source_status", "unavailable"),
-    )
 
 
 # ---------- learned-query store ----------
@@ -892,7 +381,7 @@ def persist_learned_query(entry, action_source):
 
 
 parser_factory.configure(
-    bzrk_search=bzrk_search,
+    bzrk_search=bm_runner.bzrk_search,
     table=bm_config.TABLE,
     # A callable, not a captured Path: tests monkeypatch bm.LEARNED_PATH
     # per-test to isolate stores into a tempdir, so this must resolve
@@ -904,8 +393,8 @@ parser_factory.configure(
     log=bm_config.log,
     persist_learned_query=persist_learned_query,
     sanitize_name=sanitize_name,
-    validate_static=_parser_static_validation,
-    schema_context_provider=_parser_schema_context,
+    validate_static=bm_runner._parser_static_validation,
+    schema_context_provider=bm_runner._parser_schema_context,
     redact=lambda text: secret_scan.redact(
         text,
         include_entropy=True,
@@ -913,7 +402,7 @@ parser_factory.configure(
     )[0],
 )
 agent_analytics.configure(
-    bzrk_search=bzrk_search_json,
+    bzrk_search=bm_runner.bzrk_search_json,
     table=bm_config.TABLE,
     redact=lambda text: secret_scan.redact(
         text,
@@ -923,7 +412,7 @@ agent_analytics.configure(
     fence=lambda text: bm_fencing._fence_untrusted(text, inline=True),
 )
 investigation.configure(
-    bzrk_search=bzrk_search_json,
+    bzrk_search=bm_runner.bzrk_search_json,
     since_hours=bm_config._since_hours,
     q_errors=bm_queries.Q_ERRORS,
     q_soc_log_spike=bm_queries.q_soc_log_spike_for_service,
@@ -935,14 +424,14 @@ investigation.configure(
 def finops_since_hours(since):
     """Window length in hours for ai_finops, after the same normalization
     bzrk_search applies; None when the value is not a valid window."""
-    since = _normalize_since(since)
-    if not valid_since(since):
+    since = bm_runner._normalize_since(since)
+    if not bm_runner.valid_since(since):
         return None
     return bm_config._since_hours(since) or None
 
 
 ai_finops.configure(
-    search=bzrk_search_json,
+    search=bm_runner.bzrk_search_json,
     table=bm_config.TABLE,
     redact=lambda text: secret_scan.redact(
         text,
@@ -964,12 +453,12 @@ ai_finops.configure(
     since_hours=finops_since_hours,
 )
 secret_scan.configure(
-    bzrk_search=bzrk_search_json,
+    bzrk_search=bm_runner.bzrk_search_json,
     table=bm_config.TABLE,
 )
 ingestion_advisor.configure(
-    list_services=lambda since: bzrk_search(bm_queries.Q_SERVICES, since),
-    list_metrics=lambda since: bzrk_search(bm_queries.Q_METRICS, since),
+    list_services=lambda since: bm_runner.bzrk_search(bm_queries.Q_SERVICES, since),
+    list_metrics=lambda since: bm_runner.bzrk_search(bm_queries.Q_METRICS, since),
 )
 
 
@@ -1469,7 +958,7 @@ def _run_saved_entry(match, since_arg):
     since = since_arg or match.get("since") or "1h ago"
     prefix = ""
     if bm_config.KQL_VALIDATION_MODE != "off":
-        report = _validate_user_kql(match["kql"], since)
+        report = bm_runner._validate_user_kql(match["kql"], since)
         stored_hash = match.get("schema_hash")
         current_hash = report.get("schema", {}).get("schema_hash")
         if stored_hash and current_hash and stored_hash != current_hash:
@@ -1477,9 +966,9 @@ def _run_saved_entry(match, since_arg):
                 f"Schema drift warning: saved query schema_hash={stored_hash}, "
                 f"current={current_hash}. Revalidated before execution.\n"
             )
-        if _blocking_validation(report):
-            return prefix + _format_validation_rejection(report), True
-    out, err = bzrk_search_json(match["kql"], since)
+        if bm_runner._blocking_validation(report):
+            return prefix + bm_runner._format_validation_rejection(report), True
+    out, err = bm_runner.bzrk_search_json(match["kql"], since)
     if err:
         return prefix + bm_fencing._fence_untrusted(out), err
     return prefix + bm_fencing._fence_limited(out), err
@@ -1528,10 +1017,10 @@ def _handle_learning_loop(name, arguments):
             ), True
         validation_report = None
         if bm_config.KQL_VALIDATION_MODE != "off":
-            validation_report = _validate_user_kql(kql, since)
-            if _blocking_validation(validation_report, persistence=True):
-                return _format_validation_rejection(validation_report), True
-        out, is_err = bzrk_search_json(kql, since)
+            validation_report = bm_runner._validate_user_kql(kql, since)
+            if bm_runner._blocking_validation(validation_report, persistence=True):
+                return bm_runner._format_validation_rejection(validation_report), True
+        out, is_err = bm_runner.bzrk_search_json(kql, since)
         if is_err:
             return "NOT saved - the query failed when verified:\n" + bm_fencing._fence_untrusted(out), True
         all_items = load_learned()
@@ -1582,10 +1071,10 @@ def _handle_discovery(name, arguments):
             check_kql = f"{bm_queries.T} | where resource['service.name'] == '{target}' | summarize n=count()"
         else:
             check_kql = f"{bm_queries.T} | where metric_name == '{target}' | summarize n=count()"
-        visible, is_err = bzrk_search(check_kql, since)
+        visible, is_err = bm_runner.bzrk_search(check_kql, since)
         if is_err:
             return "Could not verify source visibility:\n" + bm_fencing._fence_untrusted(visible), True
-        if count_result_is_zero(visible):
+        if bm_runner.count_result_is_zero(visible):
             return f"{target} is not currently visible in Berserk; verify it is ingesting before queueing.", True
         role_hint = bm_config.normalize_roles(arguments.get("role_hint"))
         job = {
@@ -1735,7 +1224,7 @@ def _handle_validate_kql(arguments):
     if mode not in {"static", "live"}:
         return "mode must be 'static' or 'live'", True
     use_schema = arguments.get("use_schema", True) is not False
-    report = _validate_user_kql(
+    report = bm_runner._validate_user_kql(
         str(kql),
         since,
         use_schema=use_schema,
@@ -1764,7 +1253,7 @@ def _handle_validate_kql(arguments):
         with bm_config._query_semaphore_slot(budget) as acquired:
             if not acquired:
                 return "Local MCP query queue is full; retry later or narrow the time window.", True
-            out, err = run_bzrk(argv, timeout=budget)
+            out, err = bm_runner.run_bzrk(argv, timeout=budget)
         duration_ms = int((time.monotonic() - start) * 1000)
         stats = kql_validation.parse_cli_stats(out if not err else "")
         runtime = {
@@ -1806,7 +1295,7 @@ def _handle_diagnostic_tools(name, arguments):
         if service and not bm_queries._valid_interpolated_name(service):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "6h ago"
-        out, err = bzrk_search(bm_queries.q_detect_anomalies(service or None), since)
+        out, err = bm_runner.bzrk_search(bm_queries.q_detect_anomalies(service or None), since)
         if err:
             return bm_fencing._fence_untrusted(out), True
         if not out or out.strip() == "(no rows)":
@@ -1864,7 +1353,7 @@ def _handle_diagnostic_tools(name, arguments):
         if host and not bm_queries._valid_interpolated_name(host):
             return "invalid host name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "7d ago"
-        out, err = bzrk_search_json(bm_queries.q_forecast_capacity(metric, host or None), since)
+        out, err = bm_runner.bzrk_search_json(bm_queries.q_forecast_capacity(metric, host or None), since)
         if err:
             return bm_fencing._fence_untrusted(out), True
         if not out or out.strip() == "(no rows)":
@@ -1907,7 +1396,7 @@ def _handle_model_drift(name, arguments):
         if model and not bm_queries._valid_model_id(model):
             return "invalid model id (allowed: letters, digits, '.', '_', '-', '/')", True
         since = arguments.get("since") or "30d ago"
-        out, err = bzrk_search_json(model_drift.series_kql(model or None), since)
+        out, err = bm_runner.bzrk_search_json(model_drift.series_kql(model or None), since)
         if err:
             return bm_fencing._fence_untrusted(out), True
         if not out or out.strip() == "(no rows)":
@@ -1937,7 +1426,7 @@ def _handle_model_drift(name, arguments):
         if not model or not bm_queries._valid_model_id(model):
             return "model is required (allowed: letters, digits, '.', '_', '-', '/')", True
         since = arguments.get("since") or "30d ago"
-        out, err = bzrk_search_json(model_drift.series_kql(model), since)
+        out, err = bm_runner.bzrk_search_json(model_drift.series_kql(model), since)
         if err:
             return bm_fencing._fence_untrusted(out), True
         if not out or out.strip() == "(no rows)":
@@ -1988,7 +1477,7 @@ def _handle_drift_and_similarity(name, arguments):
         except (TypeError, ValueError):
             return "k must be an integer between 1 and 50", True
         since = arguments.get("since") or "6h ago"
-        out, err = bzrk_search_json(bm_queries.q_find_similar(description, service or None, k), since)
+        out, err = bm_runner.bzrk_search_json(bm_queries.q_find_similar(description, service or None, k), since)
         if err:
             if "similarto" in str(out).lower() or "semantic" in str(out).lower():
                 return (
@@ -2026,15 +1515,15 @@ def _handle_query_tools(name, arguments):
         code = _doctor_exit_code(results)
         return json.dumps({"checks": results, "exit_code": code}, separators=(",", ":"), sort_keys=True), code == 2
     if name == "schema":
-        return do_schema()
+        return bm_runner.do_schema()
     if name == "discover_schema":
         svc = arguments.get("service")
         if svc and not bm_queries._valid_interpolated_name(svc):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "1h ago"
         svc_str = str(svc) if svc else None
-        out1, e1 = bzrk_search(bm_queries.q_discover_fieldstats(svc_str), since)
-        out2, e2 = bzrk_search(bm_queries.q_discover_sample(svc_str), since)
+        out1, e1 = bm_runner.bzrk_search(bm_queries.q_discover_fieldstats(svc_str), since)
+        out2, e2 = bm_runner.bzrk_search(bm_queries.q_discover_sample(svc_str), since)
         fenced1 = bm_fencing._fence_untrusted(out1)
         fenced2 = bm_fencing._fence_untrusted(out2)
         return f"== resource fieldstats ==\n{fenced1}\n\n== sample rows ==\n{fenced2}", (e1 and e2)
@@ -2045,7 +1534,7 @@ def _handle_query_tools(name, arguments):
         if not bm_queries._valid_interpolated_name(svc):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "1h ago"
-        out, err = bzrk_search_json(bm_queries.q_logs(str(svc)), since)
+        out, err = bm_runner.bzrk_search_json(bm_queries.q_logs(str(svc)), since)
         return bm_fencing._fence_untrusted(out), err
     if name == "sre_service_health":
         svc = arguments.get("service")
@@ -2054,7 +1543,7 @@ def _handle_query_tools(name, arguments):
         if not bm_queries._valid_interpolated_name(svc):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "1h ago"
-        out, err = bzrk_search(bm_queries.q_sre_service_health(str(svc)), since)
+        out, err = bm_runner.bzrk_search(bm_queries.q_sre_service_health(str(svc)), since)
         return bm_fencing._fence_untrusted(out), err
     if name == "soc_timeline":
         svc = arguments.get("service")
@@ -2063,7 +1552,7 @@ def _handle_query_tools(name, arguments):
         if not bm_queries._valid_interpolated_name(svc):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "6h ago"
-        out, err = bzrk_search_json(bm_queries.q_soc_timeline(str(svc)), since)
+        out, err = bm_runner.bzrk_search_json(bm_queries.q_soc_timeline(str(svc)), since)
         return bm_fencing._fence_untrusted(out), err
     return _handle_search_tools(name, arguments)
 
@@ -2076,8 +1565,8 @@ def _handle_search_tools(name, arguments):
             return "missing required 'trace_id'", True
         if len(str(trace_id)) > bm_queries.MAX_TRACE_ID_CHARS or not bm_queries._TRACE_ID_RE.fullmatch(str(trace_id)):
             return "invalid trace_id (allowed: letters and digits only)", True
-        out1, e1 = bzrk_search(bm_queries.q_trace_analyze(str(trace_id)), "30d ago")
-        out2, e2 = bzrk_search_json(bm_queries.q_trace_logs(str(trace_id)), "30d ago")
+        out1, e1 = bm_runner.bzrk_search(bm_queries.q_trace_analyze(str(trace_id)), "30d ago")
+        out2, e2 = bm_runner.bzrk_search_json(bm_queries.q_trace_logs(str(trace_id)), "30d ago")
         out1 = bm_fencing._fence_untrusted(out1)
         out2 = bm_fencing._fence_untrusted(out2)
         return f"== spans ==\n{out1}\n\n== correlated logs ==\n{out2}", (e1 and e2)
@@ -2088,12 +1577,12 @@ def _handle_search_tools(name, arguments):
         since = arguments.get("since") or "15m ago"
         warning = ""
         if bm_config.KQL_VALIDATION_MODE != "off":
-            report = _validate_user_kql(str(kql), since)
-            if _blocking_validation(report):
-                return _format_validation_rejection(report), True
+            report = bm_runner._validate_user_kql(str(kql), since)
+            if bm_runner._blocking_validation(report):
+                return bm_runner._format_validation_rejection(report), True
             if bm_config.KQL_VALIDATION_MODE == "warn":
-                warning = _format_validation_warnings(report)
-        out, err = bzrk_search_json(str(kql), since)
+                warning = bm_runner._format_validation_warnings(report)
+        out, err = bm_runner.bzrk_search_json(str(kql), since)
         if err:
             return bm_fencing._fence_untrusted(out), err
         out = bm_fencing._fence_limited(out)
@@ -2131,7 +1620,7 @@ def _handle_search_tools(name, arguments):
             return "term may not contain quotes, pipe, backslash, or backtick", True
         since = arguments.get("since") or "6h ago"
         agent = arguments.get("agent") or "claude-code"
-        out, err = bzrk_search_json(bm_queries.q_cc_search(str(term), agent), since)
+        out, err = bm_runner.bzrk_search_json(bm_queries.q_cc_search(str(term), agent), since)
         return bm_fencing._fence_untrusted(out), err
     return None
 
@@ -2140,42 +1629,42 @@ def _handle_analytics_tools(name, arguments):
     """Claude analytics tools (loop, model-fit, burn, quota, cost, session, workflow). Returns (text, is_error) or None."""
     if name == "claude_loop_check":
         since = arguments.get("since") or "6h ago"
-        if not valid_since(since):
+        if not bm_runner.valid_since(since):
             return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
         return bm_fencing._wrap_analytics(agent_analytics.claude_loop_check(since))
     if name == "claude_model_fit":
         since = arguments.get("since") or "6h ago"
-        if not valid_since(since):
+        if not bm_runner.valid_since(since):
             return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
         return bm_fencing._wrap_analytics(agent_analytics.claude_model_fit(since))
     if name == "claude_token_burn":
         since = arguments.get("since") or "6h ago"
-        if not valid_since(since):
+        if not bm_runner.valid_since(since):
             return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
         return bm_fencing._wrap_analytics(agent_analytics.claude_token_burn(since))
     if name == "claude_quota_status":
         since = arguments.get("since") or "5h ago"
-        if not valid_since(since):
+        if not bm_runner.valid_since(since):
             return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
         result = quota_status.get_quota_status(since=since)
         return quota_status.format_quota_status(result), False
     if name == "claude_cost_report":
         since = arguments.get("since") or "7d ago"
-        if not valid_since(since):
+        if not bm_runner.valid_since(since):
             return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
         return bm_fencing._wrap_analytics(
             agent_analytics.claude_cost_report(since, group_by=arguments.get("group_by") or "day")
         )
     if name == "claude_session_deep_dive":
         since = arguments.get("since") or "24h ago"
-        if not valid_since(since):
+        if not bm_runner.valid_since(since):
             return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
         return bm_fencing._wrap_analytics(
             agent_analytics.claude_session_deep_dive(str(arguments.get("session_id") or ""), since)
         )
     if name == "claude_workflow_insights":
         since = arguments.get("since") or "7d ago"
-        if not valid_since(since):
+        if not bm_runner.valid_since(since):
             return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
         return bm_fencing._wrap_analytics(agent_analytics.claude_workflow_insights(since))
     return None
@@ -2208,7 +1697,7 @@ def _handle_finops_tools(name, arguments):
     if name == "claude_optimization_impact":
         default_since = "30d ago"
     since = arguments.get("since") or default_since
-    if not valid_since(since):
+    if not bm_runner.valid_since(since):
         return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
     filters = {
         key: str(arguments.get(key) or "").strip()
@@ -2281,7 +1770,7 @@ def _handle_tail_core(name, arguments):
         )
     if name == "scan_secrets":
         since = arguments.get("since") or "1h ago"
-        if not valid_since(since):
+        if not bm_runner.valid_since(since):
             return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
         include_entropy = arguments.get("include_entropy", False)
         if not isinstance(include_entropy, bool):
@@ -2302,7 +1791,7 @@ def _handle_tail_core(name, arguments):
         if not isinstance(check_gap, bool):
             return "'check_gap' must be a boolean", True
         since = arguments.get("since") or "24h ago"
-        if not valid_since(since):
+        if not bm_runner.valid_since(since):
             return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
         return ingestion_advisor.suggest_ingestion(
             role_or_usecase,
@@ -2424,9 +1913,9 @@ def _handle_call_uncached(name, arguments):
             kql, default_since = SIMPLE[name]
         since = arguments.get("since") or default_since
         if name in _SIMPLE_JSON_TOOLS:
-            out, err = bzrk_search_json(kql, since)
+            out, err = bm_runner.bzrk_search_json(kql, since)
         else:
-            out, err = bzrk_search(kql, since)
+            out, err = bm_runner.bzrk_search(kql, since)
         # Fencing (issue #11) is independent of ENVELOPE_ENABLED -- an
         # operator disabling the envelope for byte-identical prior output
         # must not also silently disable untrusted-data marking on the
@@ -2466,7 +1955,7 @@ def _handle_call_uncached(name, arguments):
 
     if name == "soc_new_services":
         since = arguments.get("since") or "24h ago"
-        out, err = bzrk_search(bm_queries.Q_SOC_NEW_SERVICES, since)
+        out, err = bm_runner.bzrk_search(bm_queries.Q_SOC_NEW_SERVICES, since)
         if err:
             return bm_fencing._fence_untrusted(out), True
         baseline = parser_factory.load_json_dict(parser_factory._known_sources_path())
@@ -2530,19 +2019,19 @@ def _fleet_args_key(name, arguments):
     # when short-lived test doubles (or a hot-reloaded backend) are collected
     # and Python reuses their address.
     try:
-        hash(run_bzrk)
-        backend = run_bzrk
+        hash(bm_runner.run_bzrk)
+        backend = bm_runner.run_bzrk
     except TypeError:
-        backend = (type(run_bzrk), id(run_bzrk))
+        backend = (type(bm_runner.run_bzrk), id(bm_runner.run_bzrk))
     return (backend, str(name), encoded)
 
 
 def _fleet_backend_fingerprint():
     try:
-        hash(run_bzrk)
-        return run_bzrk
+        hash(bm_runner.run_bzrk)
+        return bm_runner.run_bzrk
     except TypeError:
-        return (type(run_bzrk), id(run_bzrk))
+        return (type(bm_runner.run_bzrk), id(bm_runner.run_bzrk))
 
 
 def _cache_marker(text, age):
@@ -2552,7 +2041,7 @@ def _cache_marker(text, age):
 def handle_call(name, arguments):
     """Dispatch one tool call with fleet-friendly budget/cache controls."""
     args = arguments if isinstance(arguments, dict) else {}
-    _normalize_since_arg(args)
+    bm_runner._normalize_since_arg(args)
     backend_id = _fleet_backend_fingerprint()
     with bm_config._FLEET_LOCK:
         bm_config._note_fleet_backend(backend_id)
@@ -3055,7 +2544,7 @@ def _modern_preflight_input_required(name, arguments):
         kql = str(arguments.get("kql") or "")
         since = arguments.get("since") or "15m ago"
         if (
-            valid_since(since)
+            bm_runner.valid_since(since)
             and bm_config._since_hours(since) > bm_config.MCP_EXPENSIVE_SEARCH_WINDOW_HOURS
             and not _looks_bounded_kql(kql)
             and arguments.get("allow_expensive") is not True
@@ -3309,7 +2798,7 @@ def _dispatch_tools_call(params, id_, mode):
     if arguments is not None and not isinstance(arguments, dict):
         return _jsonrpc_error(-32602, "Invalid params", id_)
     arguments = arguments or {}
-    _normalize_since_arg(arguments)
+    bm_runner._normalize_since_arg(arguments)
     matched_tool = next((t for t in TOOLS + MGMT_TOOLS if t["name"] == name), None)
     if matched_tool is None and name.startswith("saved__"):
         matched_tool = next((t for t in _saved_query_tools() if t["name"] == name), None)
@@ -3865,7 +3354,7 @@ def _doctor_check_bzrk_resolvable(bzrk_bin_config=None, **resolve_kwargs):
 
 
 def _doctor_check_bzrk_version():
-    out, err = run_bzrk(["--version"])
+    out, err = bm_runner.run_bzrk(["--version"])
     if err:
         return _doctor_result(
             "bzrk_version",
@@ -3888,7 +3377,9 @@ def _doctor_check_bzrk_version():
 
 
 def _doctor_check_auth():
-    out, err = run_bzrk(["-P", bm_config.PROFILE, "search", f"{bm_config.TABLE} | take 1", "--since", "15m ago"])
+    out, err = bm_runner.run_bzrk(
+        ["-P", bm_config.PROFILE, "search", f"{bm_config.TABLE} | take 1", "--since", "15m ago"]
+    )
     if err and str(out) == bm_config.AUTH_FAILURE_MESSAGE:
         return _doctor_result(
             "auth",
@@ -3904,7 +3395,9 @@ def _doctor_check_auth():
 
 
 def _doctor_check_table_reachable():
-    out, err = run_bzrk(["-P", bm_config.PROFILE, "search", f"{bm_config.TABLE} | take 1", "--since", "15m ago"])
+    out, err = bm_runner.run_bzrk(
+        ["-P", bm_config.PROFILE, "search", f"{bm_config.TABLE} | take 1", "--since", "15m ago"]
+    )
     if err:
         return _doctor_result(
             "table_reachable",
@@ -3923,7 +3416,7 @@ def _doctor_check_recent_rows():
     # comes back in the row body, so this needs --json and the real
     # Tables/schema/rows shape (confirmed live), same parser used elsewhere
     # in this file for the same reason.
-    out, err = run_bzrk(
+    out, err = bm_runner.run_bzrk(
         ["-P", bm_config.PROFILE, "search", f"{bm_config.TABLE} | count", "--since", "1h ago", "--json"]
     )
     if err:
@@ -4487,7 +3980,7 @@ def main():
     if ns.export_bi:
         if not ns.output:
             cli.error("--export-bi requires --output")
-        if not valid_since(ns.since):
+        if not bm_runner.valid_since(ns.since):
             cli.error("--export-bi received an invalid --since value")
         try:
             manifest = ai_finops.export_bi(ns.since, ns.output, fmt=ns.export_format)
@@ -4497,7 +3990,7 @@ def main():
             print(f"BI export failed: {type(e).__name__}: {e}", file=sys.stderr)
             sys.exit(2)
     if ns.generate_dashboard:
-        if not valid_since(ns.since):
+        if not bm_runner.valid_since(ns.since):
             cli.error("--generate-dashboard received an invalid --since value")
         text, is_error = ai_finops.generate_dashboard(
             dashboard=ns.generate_dashboard,
@@ -4690,7 +4183,7 @@ def run_agent_report(since="6h ago", mode="operational", output_json=False):
     model-fit checks, print the report, and return non-zero when an alertable
     condition is present.
     """
-    if not valid_since(since):
+    if not bm_runner.valid_since(since):
         print(f"invalid --since value: {since!r}", file=sys.stderr)
         return 2
     if mode not in {"operational", "daily", "weekly"}:
@@ -4748,7 +4241,7 @@ def run_drift_report(since="30d ago"):
     (found by Codex backtest, 2026-09-02)."""
     import model_drift
 
-    out, err = bzrk_search_json(model_drift.series_kql(None), since)
+    out, err = bm_runner.bzrk_search_json(model_drift.series_kql(None), since)
     if err:
         print(f"Drift report failed: {out}", file=sys.stderr)
         return 2

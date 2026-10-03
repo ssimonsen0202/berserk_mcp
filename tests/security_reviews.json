@@ -1,11 +1,11 @@
 {
-  "berserk_mcp:bzrk_search": {
+  "berserk_mcp.runner:bzrk_search": {
     "fingerprint": "8d6f9d9388b34557",
     "reviewed": "2026-09-24",
     "by": "baseline",
     "note": "runs a user query through the boundary, since-window check and query semaphore, then bzrk. The boundary checks moved unchanged to _kql_boundary.check on 2026-09-24 (differential test over ~120k queries and 6 table names: identical results). No dedicated review yet. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). PENDING re-review in the package-split Codex Security reviews."
   },
-  "berserk_mcp:_run_argv_bounded": {
+  "berserk_mcp.runner:_run_argv_bounded": {
     "fingerprint": "fd57e16962361ecb",
     "reviewed": "2026-09-25",
     "by": "claude + codex review (2 passes)",
@@ -18,7 +18,7 @@
     "note": "BZRK_BIN resolved once; Windows CWD executable planting refused. Fingerprint recorded 2026-09-23; no dedicated review yet. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). PENDING re-review in the package-split Codex Security reviews."
   },
   "berserk_mcp:_dispatch_tools_call": {
-    "fingerprint": "9117bd39608f0571",
+    "fingerprint": "c02034d13b62705d",
     "reviewed": "2026-09-26",
     "by": "claude + codex review",
     "note": "visibility first (hidden tool answers 'unknown tool'), then _unknown_argument_error rejects undeclared argument names before preflight, task creation and handle_call. Review 2026-09-26 P2 (docs/mcp-guidance-review-2026-09-26.md); reviewed by Codex, one P3 doc fix, no P1/P2. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). PENDING re-review in the package-split Codex Security reviews."
@@ -95,7 +95,7 @@
     "by": "claude + codex review (2 passes)",
     "note": "tag regex over canonical text; one gap run per position to avoid quadratic backtracking (24 s -> 0.18 s on 10 MiB of invisible characters). Fix for Codex Security scan 77004e6e (2026-09-25); fixes reviewed by Codex in two passes, second pass clean."
   },
-  "berserk_mcp:run_bzrk": {
+  "berserk_mcp.runner:run_bzrk": {
     "fingerprint": "49e2055d776c76a3",
     "reviewed": "2026-09-25",
     "by": "claude + codex review (2 passes)",
