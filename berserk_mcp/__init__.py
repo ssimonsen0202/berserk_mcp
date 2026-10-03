@@ -289,6 +289,25 @@ def _reset_fleet_state():
         _FLEET_BACKEND_ID = None
 
 
+def _note_fleet_backend(backend_id):
+    """Record the backend in use; clear the fleet tables when it changed.
+
+    The caller holds _FLEET_LOCK."""
+    global _FLEET_BACKEND_ID
+    if backend_id != _FLEET_BACKEND_ID:
+        _RESULT_CACHE.clear()
+        _FAIL_COOLDOWN.clear()
+        _FLEET_BACKEND_ID = backend_id
+
+
+def _set_fleet_context(context):
+    """Set the fleet context for the current tool call; return the previous one."""
+    global _FLEET_CONTEXT
+    previous = _FLEET_CONTEXT
+    _FLEET_CONTEXT = context
+    return previous
+
+
 def _bounded_put(store, key, value, *, ttl, now):
     """Insert into a fleet table (an insertion-ordered dict of
     key -> (text, is_err, stamp)). Expired entries used to stay until the
@@ -3905,15 +3924,11 @@ def _cache_marker(text, age):
 
 def handle_call(name, arguments):
     """Dispatch one tool call with fleet-friendly budget/cache controls."""
-    global _FLEET_CONTEXT, _FLEET_BACKEND_ID
     args = arguments if isinstance(arguments, dict) else {}
     _normalize_since_arg(args)
     backend_id = _fleet_backend_fingerprint()
     with _FLEET_LOCK:
-        if backend_id != _FLEET_BACKEND_ID:
-            _RESULT_CACHE.clear()
-            _FAIL_COOLDOWN.clear()
-            _FLEET_BACKEND_ID = backend_id
+        _note_fleet_backend(backend_id)
     key = _fleet_args_key(name, args)
     now = time.monotonic()
 
@@ -3934,16 +3949,17 @@ def handle_call(name, arguments):
             if cached:
                 _RESULT_CACHE.pop(key, None)
 
-    previous_context = _FLEET_CONTEXT
-    _FLEET_CONTEXT = {
-        "tool": str(name),
-        "budget": TOOL_BUDGET_SECONDS if TOOL_BUDGET_SECONDS > 0 else None,
-        "budget_multiplier": _tool_budget_multiplier(name),
-    }
+    previous_context = _set_fleet_context(
+        {
+            "tool": str(name),
+            "budget": TOOL_BUDGET_SECONDS if TOOL_BUDGET_SECONDS > 0 else None,
+            "budget_multiplier": _tool_budget_multiplier(name),
+        }
+    )
     try:
         text, is_err = _handle_call_uncached(name, args)
     finally:
-        _FLEET_CONTEXT = previous_context
+        _set_fleet_context(previous_context)
 
     text = str(text)
     # `in`, not startswith: the SIMPLE-dispatch error path now fences every
