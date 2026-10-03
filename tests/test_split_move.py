@@ -93,12 +93,66 @@ class SplitMoveTest(unittest.TestCase):
         with self.assertRaisesRegex(sm.SplitError, "no owner"):
             sm.plan_move("config", {"LIMIT": "config", "helper": "config"}, SOURCE)
 
+    OWN = {"LIMIT": "config", "x": "config", "g": "runner"}
+
     def test_function_shape_ignores_only_module_prefixes(self):
         bare = "def f():\n    return LIMIT + g(x)\n"
         prefixed = "def f():\n    return bm_config.LIMIT + bm_runner.g(\n        x,\n    )\n"
         changed = "def f():\n    return bm_config.LIMIT - bm_runner.g(x)\n"
-        self.assertEqual(sm._function_shape(bare, "f"), sm._function_shape(prefixed, "f"))
-        self.assertNotEqual(sm._function_shape(bare, "f"), sm._function_shape(changed, "f"))
+        shape = lambda src: sm._function_shape(src, "f", self.OWN)  # noqa: E731
+        self.assertEqual(shape(bare), shape(prefixed))
+        self.assertNotEqual(shape(bare), shape(changed))
+
+    def test_function_shape_refuses_the_wrong_owner_alias(self):
+        shape = lambda src: sm._function_shape(src, "f", self.OWN)  # noqa: E731
+        bare = "def f():\n    return LIMIT\n"
+        self.assertEqual(shape(bare), shape("def f():\n    return bm_config.LIMIT\n"))
+        self.assertNotEqual(shape(bare), shape("def f():\n    return bm_runner.LIMIT\n"))
+        self.assertNotEqual(shape(bare), shape("def f():\n    return bm_evil.LIMIT\n"))
+
+    def test_function_shape_keeps_a_locally_bound_alias(self):
+        shape = lambda src: sm._function_shape(src, "f", self.OWN)  # noqa: E731
+        param = "def f(bm_config):\n    return bm_config.x\n"
+        self.assertNotEqual(shape(param), shape("def f(bm_config):\n    return x\n"))
+        assigned = "def f():\n    bm_config = object()\n    return bm_config.x\n"
+        self.assertNotEqual(shape(assigned), shape("def f():\n    bm_config = object()\n    return x\n"))
+
+    def test_rekey_refuses_a_change_beyond_prefixes_and_keeps_the_ledger(self):
+        import json
+        import subprocess
+
+        root = Path(self._tmp.name)
+        pkg = root / "berserk_mcp"
+        init = pkg / "__init__.py"
+        ledger = root / "tests" / "security_reviews.json"
+        ledger.parent.mkdir()
+        real = Path(__file__).resolve().parent.parent / "tests" / "test_security_reviews.py"
+        fingerprint = sm.importlib.util.spec_from_file_location("_fp", real)
+        mod = sm.importlib.util.module_from_spec(fingerprint)
+        fingerprint.loader.exec_module(mod)
+        old = "def f():\n    return 1\n"
+        init.write_text(old, encoding="utf-8")
+        ledger.write_text(
+            json.dumps({"berserk_mcp:f": {"fingerprint": mod.fingerprint_source(old, "f"), "note": "n"}}),
+            encoding="utf-8",
+        )
+        git = lambda *a: subprocess.run(  # noqa: E731
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=root, check=True, capture_output=True
+        )
+        git("init", "-q")
+        git("add", "berserk_mcp/__init__.py")
+        git("commit", "-q", "-m", "x")
+        init.write_text("def f():\n    return 2\n", encoding="utf-8")
+        before = ledger.read_text(encoding="utf-8")
+        with (
+            mock.patch.object(sm, "ROOT", root),
+            mock.patch.object(sm, "INIT", init),
+            mock.patch.object(sm, "LEDGER", ledger),
+            mock.patch.object(sm, "load_ledger_fingerprint", lambda: mod.fingerprint_source),
+        ):
+            with self.assertRaisesRegex(sm.SplitError, "beyond bm_"):
+                sm.rekey_ledger({})
+        self.assertEqual(ledger.read_text(encoding="utf-8"), before)
 
 
 if __name__ == "__main__":

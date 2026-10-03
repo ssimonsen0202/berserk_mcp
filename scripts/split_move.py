@@ -449,20 +449,44 @@ def render_init(target, plan):
     )
 
 
+def _local_names(func):
+    """Names bound inside the function: parameters, assignments, imports, nested defs."""
+    bound = {a.arg for a in ast.walk(func.args) if isinstance(a, ast.arg)}
+    for node in ast.walk(func):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bound.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node is not func:
+            bound.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            bound.update((a.asname or a.name).split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+    return bound
+
+
 class _StripPrefixes(ast.NodeTransformer):
-    """bm_config.NAME -> NAME, so a moved body compares equal to the original."""
+    """bm_<owner>.NAME -> NAME, only when bm_<owner> is NAME's owner alias and not a local."""
+
+    def __init__(self, owners, local):
+        self.owners = owners
+        self.local = local
 
     def visit_Attribute(self, node):
         self.generic_visit(node)
-        if isinstance(node.value, ast.Name) and node.value.id.startswith("bm_"):
+        if (
+            isinstance(node.value, ast.Name)
+            and node.attr in self.owners
+            and node.value.id == alias(self.owners[node.attr])
+            and node.value.id not in self.local
+        ):
             return ast.copy_location(ast.Name(id=node.attr, ctx=node.ctx), node)
         return node
 
 
-def _function_shape(source, name):
+def _function_shape(source, name, owners):
     for node in ast.parse(source).body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-            return ast.dump(_StripPrefixes().visit(node), include_attributes=False)
+            return ast.dump(_StripPrefixes(owners, _local_names(node)).visit(node), include_attributes=False)
     return None
 
 
@@ -501,7 +525,7 @@ def rekey_ledger(owners, ref="HEAD"):
         old_source = _git_show(ref, old_path)
         if old_source is None or fingerprint_source(old_source, name) != entry["fingerprint"]:
             raise SplitError(f"{key}: the ledger does not match {ref}; fix that before the split")
-        if _function_shape(new_source, name) != _function_shape(old_source, name):
+        if _function_shape(new_source, name, owners) != _function_shape(old_source, name, owners):
             raise SplitError(f"{key}: the code changed beyond bm_* prefixes; this needs a real review")
         new_key = f"{new_module}:{name}"
         new_fp = fingerprint_source(new_source, name)
