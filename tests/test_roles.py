@@ -62,7 +62,7 @@ class RoleExpansionTest(unittest.TestCase):
     def test_windows_forensics_is_a_registered_stub_lane(self):
         role = "windows-forensics"
         self.assertIn(role, bm._ROLE_PREFIX)
-        primer = Path(bm.__file__).resolve().parent / "primers" / f"{role}.md"
+        primer = bm.REPO_ROOT / "primers" / f"{role}.md"
         text = primer.read_text(encoding="utf-8")
 
         self.assertIn("Windows Security", text)

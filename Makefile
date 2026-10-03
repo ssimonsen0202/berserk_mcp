@@ -29,7 +29,7 @@ coverage-ci:
 
 # Every shipped module: must equal pyproject.toml py-modules (enforced by
 # tests/test_packaging.py). mypy checks as Python 3.11, the supported floor.
-TYPED_MODULES = berserk_mcp.py parser_factory.py agent_analytics.py ai_finops.py secret_scan.py ingestion_advisor.py kql_validation.py schema_registry.py _store.py _http.py tool_discovery.py quota_status.py investigation.py tool_catalog.py model_drift.py _kql_boundary.py _tag_guard.py
+TYPED_MODULES = berserk_mcp parser_factory.py agent_analytics.py ai_finops.py secret_scan.py ingestion_advisor.py kql_validation.py schema_registry.py _store.py _http.py tool_discovery.py quota_status.py investigation.py tool_catalog.py model_drift.py _kql_boundary.py _tag_guard.py
 
 typecheck:
 	mypy --config-file pyproject.toml $(TYPED_MODULES)

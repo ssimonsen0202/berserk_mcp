@@ -638,7 +638,7 @@ class BerserkMcpTest(unittest.TestCase):
         import re as _re
 
         registered = {t["name"] for t in bm.TOOLS + bm.MGMT_TOOLS}
-        primers_dir = Path(bm.__file__).resolve().parent / "primers"
+        primers_dir = bm.REPO_ROOT / "primers"
         code_re = _re.compile(r"`([a-z][a-z0-9_]*)`")
         skip_prefixes = ("$", "-", '"')
         # Well-known non-tool identifiers that appear in backticks
@@ -2597,7 +2597,7 @@ class BerserkMcpTest(unittest.TestCase):
         # settings table lives in docs/configuration.md, not inline in
         # README.md -- README keeps a summary + link. This test now checks
         # the doc file for the per-setting names.
-        project_root = Path(bm.__file__).resolve().parent
+        project_root = bm.REPO_ROOT
         env_example = (project_root / ".env.example").read_text(encoding="utf-8")
         readme = (project_root / "README.md").read_text(encoding="utf-8")
         config_doc = (project_root / "docs" / "configuration.md").read_text(encoding="utf-8")
@@ -2631,7 +2631,7 @@ class BerserkMcpTest(unittest.TestCase):
         self.assertIn("X-Forwarded-For", proxy_doc)
 
     def test_v124_release_notes_cover_new_mcp_and_http_features(self):
-        project_root = Path(bm.__file__).resolve().parent
+        project_root = bm.REPO_ROOT
         release_notes = (project_root / "docs" / "releases" / "v1.24.0.md").read_text(encoding="utf-8")
 
         expected_terms = (
@@ -2771,7 +2771,7 @@ class BerserkMcpTest(unittest.TestCase):
     def test_module_execution_runs_main_exactly_once(self):
         """FVR-006: `python -m berserk_mcp` with closed stdin must run
         exactly one MCP-serve lifecycle, not two."""
-        project_root = str(Path(bm.__file__).resolve().parent)
+        project_root = str(bm.REPO_ROOT)
         result = subprocess.run(
             [sys.executable, "-m", "berserk_mcp"],
             input="",
@@ -2799,7 +2799,7 @@ class BerserkMcpTest(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=10,
-            cwd=str(Path(bm.__file__).resolve().parent),
+            cwd=str(bm.REPO_ROOT),
             env=env,
         )
         self.assertNotEqual(result.returncode, 0)
@@ -2813,7 +2813,7 @@ class BerserkMcpTest(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=10,
-            cwd=str(Path(bm.__file__).resolve().parent),
+            cwd=str(bm.REPO_ROOT),
             env=env,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -2833,7 +2833,7 @@ class BerserkMcpTest(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=10,
-            cwd=str(Path(bm.__file__).resolve().parent),
+            cwd=str(bm.REPO_ROOT),
             env=env,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -2875,7 +2875,7 @@ class BerserkMcpTest(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=10,
-            cwd=str(Path(bm.__file__).resolve().parent),
+            cwd=str(bm.REPO_ROOT),
             env=env,
         )
         return result
@@ -5230,7 +5230,7 @@ class EnvExampleDriftTest(unittest.TestCase):
         # guard the way _store.py did (never in the original list, and its
         # own env reads went undetected until this fix).
         found = set()
-        for path in sorted(self._REPO_ROOT.glob("*.py")):
+        for path in sorted([*self._REPO_ROOT.glob("*.py"), *self._REPO_ROOT.glob("berserk_mcp/**/*.py")]):
             text = path.read_text(encoding="utf-8")
             for m in self._ENV_READ_RE.finditer(text):
                 found.add(next(g for g in m.groups() if g))

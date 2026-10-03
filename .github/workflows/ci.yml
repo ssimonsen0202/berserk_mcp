@@ -88,7 +88,7 @@ jobs:
       - name: Install semgrep
         run: python -m pip install semgrep
       - name: Run custom fencing rules
-        run: semgrep --config .semgrep/ --error berserk_mcp.py
+        run: semgrep --config .semgrep/ --error berserk_mcp/ berserk_mcp.py
       - name: Test the custom fencing rule
         run: semgrep --test --config .semgrep/fence-untrusted-data.yml .semgrep/fence-untrusted-data.py
       # Trail of Bits generic rules (curl/wget/ssh/TLS/plaintext transport in
