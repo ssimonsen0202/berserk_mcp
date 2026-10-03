@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """berserk-mcp — a Model Context Protocol server for Berserk observability.
 
 Lets an LLM answer observability questions by *calling tools* instead of
@@ -51,33 +50,17 @@ configured is skipped:
 
 This is an unofficial, community-maintained integration. It is not affiliated
 with or endorsed by the Berserk project.
+
+Package layout (v1.37.0): the code lives in the modules of this package,
+lowest layer first in berserk_mcp/_facade.py (LAYERS). `berserk_mcp.NAME`
+still works for every name: the facade reads and writes NAME in the module
+that owns it, so tests and scripts that patch `berserk_mcp.NAME` reach
+every reader.
 """
 
 import sys
 
-
-from berserk_mcp._version import __version__ as __version__
 from berserk_mcp import _facade
-
-
-# ---------- configuration (env-overridable) ----------
-
-
-# ---------- learned-query store ----------
-
-
-# ── CanonLoom knowledge-pipeline bridge ──────────────────────────────────────
-
-
-# ---------- --doctor / self_check preflight ----------
-# Fleet/air-gapped deployments can't iterate interactively (see F-008's
-# fail-fast comment above, extended here from one env var to the whole
-# config surface): everything from a missing `bzrk` binary to a wrong
-# BZRK_PROFILE to an empty database fails late and opaquely, addressed to
-# an agent rather than an operator. These checks give one ordered,
-# pass/fail/skip readiness report usable as a fleet probe, a container
-# healthcheck, or something an agent hitting repeated errors can call
-# itself to tell "wired wrong" apart from "genuinely nothing to report".
-
+from berserk_mcp._version import __version__ as __version__
 
 _facade.install(sys.modules[__name__])

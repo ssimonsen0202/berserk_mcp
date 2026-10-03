@@ -21,9 +21,10 @@ ROOT = Path(__file__).resolve().parent.parent
 PKG = ROOT / "berserk_mcp"
 NAMES = Path(__file__).resolve().parent / "facade_names.txt"
 MAX_MODULE_LINES = 1200
+MAX_INIT_LINES = 80  # __init__.py is only the facade
 # __init__.py holds the not-yet-moved code until the last slice; the final
 # task (plan Task 15) empties this set.
-SIZE_EXEMPT = {"__init__.py"}
+SIZE_EXEMPT: set[str] = set()
 
 
 def package_modules():
@@ -152,6 +153,13 @@ class LayeringTest(unittest.TestCase):
             with self.subTest(module=str(path)):
                 self.assertIn(layer, known)
 
+    def test_every_layer_has_a_module(self):
+        # A LAYERS entry with no file would make install() skip or fail it silently.
+        for layer in _facade.LAYERS:
+            path = PKG.joinpath(*layer.split(".")).with_suffix(".py")
+            with self.subTest(layer=layer):
+                self.assertTrue(path.is_file(), f"LAYERS names {layer} but {path} is missing")
+
     def test_modules_import_only_lower_layers(self):
         rank = {layer: i for i, layer in enumerate(_facade.LAYERS)}
         for layer, path in package_modules():
@@ -229,6 +237,12 @@ class ModuleSizeTest(unittest.TestCase):
             with self.subTest(module=str(path)):
                 count = len(path.read_text(encoding="utf-8").splitlines())
                 self.assertLessEqual(count, MAX_MODULE_LINES, f"{path.name} has {count} lines")
+
+
+class FacadeOnlyInitTest(unittest.TestCase):
+    def test_init_is_only_the_facade(self):
+        lines = (PKG / "__init__.py").read_text(encoding="utf-8").splitlines()
+        self.assertLessEqual(len(lines), MAX_INIT_LINES)
 
 
 if __name__ == "__main__":

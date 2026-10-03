@@ -26,7 +26,7 @@ Homepage = "https://github.com/ssimonsen0202/berserk_mcp"
 Issues = "https://github.com/ssimonsen0202/berserk_mcp/issues"
 
 [project.scripts]
-berserk-mcp = "berserk_mcp:main"
+berserk-mcp = "berserk_mcp.cli:main"
 berserk-claude = "ai_finops:launcher_main"
 
 [tool.setuptools]
