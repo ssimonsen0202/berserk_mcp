@@ -64,10 +64,12 @@ def module_json_unfenced(kql, since):
     return out, err
 
 
-def module_wrap_analytics(kql, since):
+def module_wrap_analytics_success_is_not_a_fence(kql, since):
     out, err = bm_runner.bzrk_search_json(kql, since)
-    # ok: unfenced-bzrk-output-reaches-return
-    return bm_fencing._wrap_analytics(out), err
+    # _wrap_analytics fences only error text; success text passes through.
+    text, is_err = bm_fencing._wrap_analytics((out, err))
+    # ruleid: unfenced-bzrk-output-reaches-return
+    return text, is_err
 
 
 def bare_envelope(kql, since):
@@ -76,13 +78,33 @@ def bare_envelope(kql, since):
     return _envelope("t", since, out, fence_body=True), err
 
 
-def bare_wrap_analytics(kql, since):
+def bare_wrap_analytics_success_is_not_a_fence(kql, since):
     out, err = bzrk_search_json(kql, since)
-    # ok: unfenced-bzrk-output-reaches-return
-    return _wrap_analytics(out), err
+    text, is_err = _wrap_analytics((out, False))
+    # ruleid: unfenced-bzrk-output-reaches-return
+    return text, is_err
 
 
 def bare_fence_limited(kql, since):
     out, err = bzrk_search(kql, since)
     # ok: unfenced-bzrk-output-reaches-return
     return _fence_limited(out), err
+
+
+def lookalike_receiver_fence_untrusted(kql, since):
+    out, err = bm_runner.bzrk_search(kql, since)
+    # Only the real fencing module sanitizes; any other receiver does not.
+    # ruleid: unfenced-bzrk-output-reaches-return
+    return passthrough._fence_untrusted(out), err
+
+
+def lookalike_receiver_fence_limited(kql, since):
+    out, err = bm_runner.bzrk_search(kql, since)
+    # ruleid: unfenced-bzrk-output-reaches-return
+    return passthrough._fence_limited(out), err
+
+
+def lookalike_receiver_envelope(kql, since):
+    out, err = bm_runner.bzrk_search(kql, since)
+    # ruleid: unfenced-bzrk-output-reaches-return
+    return passthrough._envelope("t", since, out, fence_body=True), err
