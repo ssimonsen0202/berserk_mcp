@@ -141,6 +141,14 @@ class FetchUsageMemoryLimitTest(unittest.TestCase):
         self.assertIn("timestamp < datetime(2026-10-02T12:00:00Z)", query)
         self.assertNotIn("timestamp >=", af.usage_aggregate_query())
 
+    def test_context_tokens_count_one_hour_writes_once(self):
+        # cache_creation_1h_tokens is a subset of cache_creation_tokens, so
+        # the long-context size must not add it a second time.
+        query = af.usage_aggregate_query()
+        expr = re.search(r"extend context_tokens=(.*?) \| extend organization", query).group(1)
+        self.assertIn("cache_create", expr)
+        self.assertNotIn("cache_create_1h", expr)
+
 
 if __name__ == "__main__":
     unittest.main()
