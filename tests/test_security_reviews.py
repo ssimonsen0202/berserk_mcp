@@ -60,9 +60,15 @@ def fingerprint_source(source, name):
     return hashlib.sha256("\n".join(kept).encode("utf-8")).hexdigest()[:16]
 
 
+def module_file(module):
+    """`pkg.mod` -> pkg/mod.py; a package -> its __init__.py."""
+    base = ROOT.joinpath(*module.split("."))
+    return base / "__init__.py" if base.is_dir() else base.with_suffix(".py")
+
+
 def fingerprint(key):
     module, name = key.split(":")
-    return fingerprint_source((ROOT / f"{module}.py").read_text(encoding="utf-8"), name)
+    return fingerprint_source(module_file(module).read_text(encoding="utf-8"), name)
 
 
 def load_registry():

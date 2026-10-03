@@ -23,14 +23,26 @@ rules:
               - pattern: $OUT, $ERR = bzrk_search(...)
               - pattern: $OUT, $ERR = bzrk_search_json(...)
               - pattern: $OUT, $ERR = run_bzrk(...)
+              # The same calls through a package module (bm_runner.run_bzrk).
+              - pattern: $OUT, $ERR = $MOD.bzrk_search(...)
+              - pattern: $OUT, $ERR = $MOD.bzrk_search_json(...)
+              - pattern: $OUT, $ERR = $MOD.run_bzrk(...)
           - focus-metavariable: $OUT
     pattern-sanitizers:
+      # Package code calls these through the owning module's bm_ alias
+      # (from berserk_mcp import fencing as bm_fencing). Only those exact
+      # receivers sanitize; a lookalike object with the same method does not.
       - pattern: _fence_untrusted(...)
+      - pattern: bm_fencing._fence_untrusted(...)
       - pattern: _envelope(..., fence_body=True)
-      - pattern: _wrap_analytics(...)
+      - pattern: bm_tools._envelope(..., fence_body=True)
+      # _wrap_analytics is deliberately not a sanitizer: it fences only error
+      # text and passes success text through (that text must be fenced field
+      # by field before it is wrapped).
       # Cuts to MAX_OUTPUT_CHARS, then calls _fence_untrusted; the note it
       # appends after the fence holds only row/character counts.
       - pattern: _fence_limited(...)
+      - pattern: bm_fencing._fence_limited(...)
     pattern-sinks:
       - patterns:
           - pattern-either:
