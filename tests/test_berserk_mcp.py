@@ -5745,6 +5745,29 @@ class SavedQueryProjectionTest(unittest.TestCase):
             bm._TRANSPORT = orig_transport
             bm.send = orig_send
 
+    def test_notification_failure_is_logged(self):
+        import contextlib
+
+        orig_transport = bm._TRANSPORT
+        orig_send = bm.send
+
+        def raising_send(msg):
+            raise RuntimeError("stdout is closed")
+
+        bm.send = raising_send
+        try:
+            bm._TRANSPORT = "stdio"
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                bm.persist_learned_query(
+                    {"name": "notif_fail_logged", "description": "d", "kql": "default | take 1"},
+                    action_source="manual",
+                )
+            self.assertIn("failed to send tools/list_changed notification", buf.getvalue())
+        finally:
+            bm._TRANSPORT = orig_transport
+            bm.send = orig_send
+
 
 def _envelope_header(tool, window, rows):
     """Regex for the envelope header line: window and rows as before, then
