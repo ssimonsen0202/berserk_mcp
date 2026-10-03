@@ -47,8 +47,8 @@ first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
 - **v1.37.0** (2026-10-03) — The server code moved out of one 6,165-line
-  file. It now lives in the `berserk_mcp/` package: 16 layer modules and a
-  small facade, none over 1,200 lines. Behavior does not change. `python3 berserk_mcp.py` still
+  file. It now lives in the `berserk_mcp/` package: 16 modules, one per
+  layer, and a small facade, none over 1,200 lines. Behavior does not change. `python3 berserk_mcp.py` still
   starts the server; `python3 -m berserk_mcp` also works. See
   [docs/releases/v1.37.0.md](docs/releases/v1.37.0.md).
 - **v1.36.3** (2026-10-03) — Multi-day cost totals are now complete. Over

@@ -136,7 +136,7 @@ def classify(series, noise_band=DEFAULT_NOISE_BAND, fingerprint_changed=None):
     gets correct behavior automatically. Explicit True/False (as this
     module's own tests use) always overrides the derivation -- this keeps
     the function testable in isolation while making the common, real call
-    path (the two dispatcher branches in berserk_mcp/handlers/diagnostics.py, both of which called
+    path (the two callers, in berserk_mcp/handlers/diagnostics.py and berserk_mcp/cli.py, both of which called
     classify(series) with nothing else) correct without every caller
     having to remember to compute it. Found by Codex review (2026-09-02):
     neither caller passed it, so fingerprint_changed was always False in

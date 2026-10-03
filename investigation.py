@@ -345,7 +345,7 @@ def run_error_rate_node(node, since, service):
     (text, is_error, next_node, next_service).
 
     text carries only telemetry-derived findings for this hop -- never the
-    fixed continuation directive. The caller (berserk_mcp/server.py's dispatch)
+    fixed continuation directive. The caller (berserk_mcp/handlers/diagnostics.py)
     is responsible for presenting `next_node`/`next_service` as the "call
     this next" instruction *outside* whatever untrusted-data fence it
     applies to `text` (Codex review finding, 2026-08-28: this module used

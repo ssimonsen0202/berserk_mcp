@@ -80,12 +80,28 @@ on a human remembering to ask. Once the repo passes the star threshold,
 CodeRabbit's own automatic review takes over and this workflow becomes a
 no-op (it always checks for an unreviewed commit first).
 
+Locally:
+
+```bash
+python tests/test_berserk_mcp.py     # fast focused run, must stay green
+python -m unittest discover -s tests # full suite (all test_*.py files) -- run this before opening a PR
+```
+
+New tools should add a locked-string KQL test and a callable test (see the existing
+`test_*` methods for templates).
+
+Security regressions must be offline and fail before the fix. Loopback
+`HTTPServer` instances are allowed for redirect and credential-forwarding tests.
+Private-file tests are platform split: POSIX checks modes and Windows checks the
+current-user-only DACL. Keep `tests/test_security_invariants.py` green; it enforces
+the no-shell/no-eval process contract across tracked Python files.
+
 ## Module map
 
 The server code lives in the `berserk_mcp/` package. `berserk_mcp.py` in the
 repository root is only a launcher. Edit the module that owns the code. The
 list below runs from the lowest layer to the highest. A module may import
-only modules above it in the list.
+only lower layers (earlier in the list).
 
 - `_version`: berserk-mcp version.
 - `config`: settings read from the environment, shared state, and small helpers.
@@ -121,22 +137,6 @@ bm_config.TABLE  # right: read at call time
 
 Never import a name by value (`from berserk_mcp.config import TABLE`). A copy
 of the name does not see later changes, and a test patch would miss it.
-
-Locally:
-
-```bash
-python tests/test_berserk_mcp.py     # fast focused run, must stay green
-python -m unittest discover -s tests # full suite (all test_*.py files) -- run this before opening a PR
-```
-
-New tools should add a locked-string KQL test and a callable test (see the existing
-`test_*` methods for templates).
-
-Security regressions must be offline and fail before the fix. Loopback
-`HTTPServer` instances are allowed for redirect and credential-forwarding tests.
-Private-file tests are platform split: POSIX checks modes and Windows checks the
-current-user-only DACL. Keep `tests/test_security_invariants.py` green; it enforces
-the no-shell/no-eval process contract across tracked Python files.
 
 ## Security
 
