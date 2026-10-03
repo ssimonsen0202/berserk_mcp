@@ -18,7 +18,7 @@
     "note": "BZRK_BIN resolved once; Windows CWD executable planting refused. Fingerprint recorded 2026-09-23; no dedicated review yet. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). PENDING re-review in the package-split Codex Security reviews."
   },
   "berserk_mcp:_dispatch_tools_call": {
-    "fingerprint": "811f9aa7126ee08f",
+    "fingerprint": "c9fe501cd93248dd",
     "reviewed": "2026-09-26",
     "by": "claude + codex review",
     "note": "visibility first (hidden tool answers 'unknown tool'), then _unknown_argument_error rejects undeclared argument names before preflight, task creation and handle_call. Review 2026-09-26 P2 (docs/mcp-guidance-review-2026-09-26.md); reviewed by Codex, one P3 doc fix, no P1/P2. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). PENDING re-review in the package-split Codex Security reviews."
