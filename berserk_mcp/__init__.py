@@ -91,155 +91,10 @@ import tool_discovery
 from berserk_mcp._version import __version__ as __version__
 from berserk_mcp import _facade
 from berserk_mcp import config as bm_config
+from berserk_mcp import fencing as bm_fencing
 
 
 # ---------- configuration (env-overridable) ----------
-
-
-def _fence_untrusted(text, inline=False):
-    """Wrap real telemetry content in an explicit untrusted-data marker.
-
-    Skips fencing for known-safe sentinels -- the empty-result marker, the
-    fixed auth-failure message, and the overflow message -- rather than
-    real bzrk output, checked by exact content so this never depends on
-    the caller correctly tracking an err flag (round 2 finding 4: err=True
-    does not always mean "no real content", so callers should fence
-    unconditionally and let this function make the actual decision).
-
-    inline=True omits the surrounding newlines, for content embedded
-    inside a single report line rather than standing alone (agent_analytics
-    snippet embedding, issue #11 round 2 finding 1).
-    """
-    stripped = str(text).strip()
-    if (
-        stripped == "(no rows)"
-        or stripped == bm_config.AUTH_FAILURE_MESSAGE
-        or bool(bm_config._OVERFLOW_SENTINEL_RE.fullmatch(stripped))
-    ):
-        return text
-    body = _tag_guard.neutralize(text, bm_config._UNTRUSTED_DATA_TAG_RE, "untrusted_log_data")
-    sep = "" if inline else "\n"
-    return f"{bm_config._UNTRUSTED_DATA_OPEN}{sep}{body}{sep}{bm_config._UNTRUSTED_DATA_CLOSE}"
-
-
-def _compact(value):
-    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
-
-
-def _cut_rows(doc, rows, budget):
-    """Trim `rows` (a list inside `doc`) in place to the leading rows whose
-    compact JSON fits in `budget` characters. Sizes each row once instead of
-    re-serializing the whole document per row, since the input can be up to
-    MAX_BZRK_RESULT_BYTES. Returns (kept, total), or None with `rows` left
-    unchanged when even the document without rows doesn't fit."""
-    source = list(rows)
-    rows[:] = []
-    size = len(_compact(doc))
-    if size > budget:
-        rows[:] = source
-        return None
-    kept = 0
-    for row in source:
-        size += len(_compact(row)) + (1 if kept else 0)
-        if size > budget:
-            break
-        kept += 1
-    rows[:] = source[:kept]
-    return kept, len(source)
-
-
-def _cut_text(text, budget, reason=""):
-    """Leading characters of `text` within `budget`, ending at the last line
-    break that fits. Uses rfind on the budget window only, never splitlines
-    on the whole text (Codex Security finding 2: ~71 MB for 10 MB of short
-    lines)."""
-    end = text.rfind("\n", 0, budget + 1)
-    cut = text[:end].rstrip("\r") if end > 0 else text[:budget]
-    note = (
-        f"[berserk-mcp: result truncated{reason}, showing the first {len(cut)} of {len(text)} characters "
-        f"(BERSERK_MCP_MAX_OUTPUT_CHARS). {bm_config._TRUNCATION_HINT}]"
-    )
-    return cut, note
-
-
-def _limit_model_output(out, budget, parse_json=True):
-    """Cut a user-KQL result (search, saved queries) to `budget` characters
-    before it is fenced, so the fence stays intact and the returned note is
-    server text the caller appends outside it. Returns (out, note); output
-    within budget comes back untouched with an empty note.
-
-    bzrk --json results ({"Tables": [{"schema": ..., "rows": [[...]]}]}) and
-    bare JSON arrays up to _MAX_JSON_PARSE_CHARS are cut by whole rows and
-    stay valid JSON. Larger JSON, table text from a bzrk without --json, and
-    unknown shapes are cut as text at a line boundary. parse_json=False
-    forces the text cut (used when no query slot is free)."""
-    text = str(out)
-    if not budget or len(text) <= budget:
-        return out, ""
-    if len(text) > bm_config._MAX_JSON_PARSE_CHARS and text.lstrip()[:1] in ("{", "["):
-        return _cut_text(text, budget, reason=" (too large to cut by rows)")
-    doc = None
-    if parse_json:
-        try:
-            doc = json.loads(text)
-        except (json.JSONDecodeError, TypeError, RecursionError):
-            doc = None
-    rows = None
-    if isinstance(doc, list):
-        rows = doc
-    elif isinstance(doc, dict):
-        tables = doc.get("Tables")
-        if (
-            isinstance(tables, list)
-            and tables
-            and isinstance(tables[0], dict)
-            and isinstance(tables[0].get("rows"), list)
-        ):
-            rows = tables[0]["rows"]
-    if rows is not None:
-        cut = _cut_rows(doc, rows, budget)
-        if cut is not None:
-            kept, total = cut
-            note = (
-                f"[berserk-mcp: result truncated, showing {kept} of {total} rows to stay within "
-                f"{budget} characters (BERSERK_MCP_MAX_OUTPUT_CHARS). {bm_config._TRUNCATION_HINT}]"
-            )
-            return _compact(doc), note
-    return _cut_text(text, budget)
-
-
-def _fence_limited(out):
-    """Fence a user-KQL result after cutting it to MAX_OUTPUT_CHARS. The
-    truncation note is server text built only from counts, so it goes after
-    the closing fence tag. Listed as a sanitizer in
-    .semgrep/fence-untrusted-data.yml because it always calls
-    _fence_untrusted on the content.
-
-    The query slot is released when bzrk exits, so it does not bound this
-    step on its own (Codex Security finding 1). An over-budget result is cut
-    while holding a slot again; if none frees up in time, the cut falls back
-    to the text path, which needs no decoding."""
-    limited, note = out, ""
-    if bm_config.MAX_OUTPUT_CHARS and len(str(out)) > bm_config.MAX_OUTPUT_CHARS:
-        acquired = bm_config._query_semaphore_acquire(bm_config._POST_PROCESS_SLOT_WAIT_SECONDS)
-        try:
-            limited, note = _limit_model_output(out, bm_config.MAX_OUTPUT_CHARS, parse_json=acquired)
-        finally:
-            bm_config._query_semaphore_release(acquired)
-    fenced = _fence_untrusted(limited)
-    return f"{fenced}\n{note}" if note else fenced
-
-
-def _wrap_analytics(result):
-    """Fence the text of an analytics error result.
-
-    Analytics functions return raw bzrk_search output on the error path,
-    which can include partial stdout rows interleaved with the error message.
-    SUCCESS output is already fenced via the fence= dependency injection;
-    this covers only the error path.
-    """
-    text, is_err = result
-    return (_fence_untrusted(text) if is_err else text), is_err
 
 
 # ---------- verified queries (do not edit field names; they are confirmed
@@ -1081,7 +936,7 @@ def bzrk_search_json(kql, since):
 def do_schema():
     out1, e1 = run_bzrk(["-P", bm_config.PROFILE, "search", ".show tables"])
     out2, e2 = run_bzrk(["-P", bm_config.PROFILE, "search", f"{T} | getschema", "--since", "1h ago"])
-    text = f"== tables ==\n{_fence_untrusted(out1)}\n== columns ==\n{_fence_untrusted(out2)}"
+    text = f"== tables ==\n{bm_fencing._fence_untrusted(out1)}\n== columns ==\n{bm_fencing._fence_untrusted(out2)}"
     return text, (e1 or e2)
 
 
@@ -1539,7 +1394,7 @@ agent_analytics.configure(
         include_entropy=True,
         pii_types=secret_scan.ALL_PII_TYPES,
     )[0],
-    fence=lambda text: _fence_untrusted(text, inline=True),
+    fence=lambda text: bm_fencing._fence_untrusted(text, inline=True),
 )
 investigation.configure(
     bzrk_search=bzrk_search_json,
@@ -1832,7 +1687,7 @@ def _envelope(tool, since, out, fence_body=False):
         )
         digest = hashlib.sha256(f"{tool}\n{since}\n{delivered}".encode("utf-8", "replace")).hexdigest()[:12]
         header = f"{header}  source=fixed:{tool}  redaction={bm_config.REDACT_MODE}  at={bm_config.now_iso()}  ref={tool}#{digest}"
-        body = _fence_untrusted(out) if fence_body else out
+        body = bm_fencing._fence_untrusted(out) if fence_body else out
         return f"{header}\n\n{body}"
     except Exception:
         return out
@@ -2100,8 +1955,8 @@ def _run_saved_entry(match, since_arg):
             return prefix + _format_validation_rejection(report), True
     out, err = bzrk_search_json(match["kql"], since)
     if err:
-        return prefix + _fence_untrusted(out), err
-    return prefix + _fence_limited(out), err
+        return prefix + bm_fencing._fence_untrusted(out), err
+    return prefix + bm_fencing._fence_limited(out), err
 
 
 def _handle_learning_loop(name, arguments):
@@ -2152,7 +2007,7 @@ def _handle_learning_loop(name, arguments):
                 return _format_validation_rejection(validation_report), True
         out, is_err = bzrk_search_json(kql, since)
         if is_err:
-            return "NOT saved - the query failed when verified:\n" + _fence_untrusted(out), True
+            return "NOT saved - the query failed when verified:\n" + bm_fencing._fence_untrusted(out), True
         all_items = load_learned()
         is_amendment = any(it["name"] == nm for it in all_items)
         # Require a real JSON boolean true — a string like "false" is truthy
@@ -2203,7 +2058,7 @@ def _handle_discovery(name, arguments):
             check_kql = f"{T} | where metric_name == '{target}' | summarize n=count()"
         visible, is_err = bzrk_search(check_kql, since)
         if is_err:
-            return "Could not verify source visibility:\n" + _fence_untrusted(visible), True
+            return "Could not verify source visibility:\n" + bm_fencing._fence_untrusted(visible), True
         if count_result_is_zero(visible):
             return f"{target} is not currently visible in Berserk; verify it is ingesting before queueing.", True
         role_hint = bm_config.normalize_roles(arguments.get("role_hint"))
@@ -2409,7 +2264,7 @@ def _handle_validate_kql(arguments):
                 }
             )
         if err:
-            report["runtime_error"] = _fence_untrusted(out)
+            report["runtime_error"] = bm_fencing._fence_untrusted(out)
         # `out` is already fenced above before being assigned into
         # report; the taint tracker can't follow it through the
         # dict-field write and json.dumps, but the fencing genuinely
@@ -2427,11 +2282,11 @@ def _handle_diagnostic_tools(name, arguments):
         since = arguments.get("since") or "6h ago"
         out, err = bzrk_search(q_detect_anomalies(service or None), since)
         if err:
-            return _fence_untrusted(out), True
+            return bm_fencing._fence_untrusted(out), True
         if not out or out.strip() == "(no rows)":
             return f"No anomalies detected (window {since}).", False
         return (
-            f"Anomaly decomposition for window {since}; non-zero anomaly markers indicate spikes:\n{_fence_untrusted(out)}",
+            f"Anomaly decomposition for window {since}; non-zero anomaly markers indicate spikes:\n{bm_fencing._fence_untrusted(out)}",
             False,
         )
 
@@ -2443,7 +2298,7 @@ def _handle_diagnostic_tools(name, arguments):
         service = service or None
         since = arguments.get("since") or "1h ago"
         text, is_err, next_node, next_service = investigation.run_error_rate_node(node, since, service)
-        result = _fence_untrusted(text)
+        result = bm_fencing._fence_untrusted(text)
         if next_node:
             # Deliberately built from trusted server code, outside the
             # fence above -- never baked into the fenced text itself
@@ -2485,7 +2340,7 @@ def _handle_diagnostic_tools(name, arguments):
         since = arguments.get("since") or "7d ago"
         out, err = bzrk_search_json(q_forecast_capacity(metric, host or None), since)
         if err:
-            return _fence_untrusted(out), True
+            return bm_fencing._fence_untrusted(out), True
         if not out or out.strip() == "(no rows)":
             return f"No {metric} data found for forecast window {since}.", False
         fits = _forecast_fit_rows(out)
@@ -2495,7 +2350,7 @@ def _handle_diagnostic_tools(name, arguments):
                 # host=tostring(resource['host.name']) is a real string
                 # field, not numeric fit data -- attacker-influenceable via
                 # container/host naming (round 2 finding 3).
-                fenced_host = _fence_untrusted(fit["host"], inline=True)
+                fenced_host = bm_fencing._fence_untrusted(fit["host"], inline=True)
                 if fit["r2"] < 0.6 or fit["slope"] <= 0:
                     lines.append(
                         f"{fenced_host}: no reliable trend — not forecastable "
@@ -2511,7 +2366,7 @@ def _handle_diagnostic_tools(name, arguments):
         return (
             f"Capacity trend for {metric} (window {since}). Native fit arrays include "
             "R² and slope; unable to parse coefficients from this renderer, so no "
-            "forecast date is inferred:\n" + _fence_untrusted(out)
+            "forecast date is inferred:\n" + bm_fencing._fence_untrusted(out)
         ), False
 
     return _handle_drift_and_similarity(name, arguments)
@@ -2528,7 +2383,7 @@ def _handle_model_drift(name, arguments):
         since = arguments.get("since") or "30d ago"
         out, err = bzrk_search_json(model_drift.series_kql(model or None), since)
         if err:
-            return _fence_untrusted(out), True
+            return bm_fencing._fence_untrusted(out), True
         if not out or out.strip() == "(no rows)":
             return (
                 f"No canary results in {since}. Is --canary-run scheduled and BERSERK_MCP_CANARY_MODELS set?"
@@ -2536,15 +2391,15 @@ def _handle_model_drift(name, arguments):
         try:
             grouped = model_drift.group_by_model(out)
         except model_drift.BzrkResultParseError as exc:
-            return _fence_untrusted(f"could not read canary results: {exc}"), True
+            return bm_fencing._fence_untrusted(f"could not read canary results: {exc}"), True
         lines = []
         for model_name, series in grouped.items():
             verdict = model_drift.classify(series)
-            fenced = _fence_untrusted(model_name, inline=True)
+            fenced = bm_fencing._fence_untrusted(model_name, inline=True)
             line = f"{fenced}: {verdict['verdict']} ({verdict['confidence']}) — {verdict['reason']}"
             if verdict["fingerprint_values"]:
                 fp_text = ", ".join(
-                    f"{k}={_fence_untrusted(v[-1], inline=True)}"
+                    f"{k}={bm_fencing._fence_untrusted(v[-1], inline=True)}"
                     for k, v in sorted(verdict["fingerprint_values"].items())
                 )
                 line += f" [fingerprint: {fp_text}]"
@@ -2558,28 +2413,28 @@ def _handle_model_drift(name, arguments):
         since = arguments.get("since") or "30d ago"
         out, err = bzrk_search_json(model_drift.series_kql(model), since)
         if err:
-            return _fence_untrusted(out), True
+            return bm_fencing._fence_untrusted(out), True
         if not out or out.strip() == "(no rows)":
             return f"No canary results for {model} in {since}.", False
         try:
             grouped = model_drift.group_by_model(out)
         except model_drift.BzrkResultParseError as exc:
-            return _fence_untrusted(f"could not read canary results: {exc}"), True
+            return bm_fencing._fence_untrusted(f"could not read canary results: {exc}"), True
         series_data = grouped.get(model, [])
         if not series_data:
             return f"No data for model {model}.", False
         lines = [
-            f"Model quality history for {_fence_untrusted(model, inline=True)} (tool-routing only, window {since}):"
+            f"Model quality history for {bm_fencing._fence_untrusted(model, inline=True)} (tool-routing only, window {since}):"
         ]
         for row in series_data:
             ts = row.get("timestamp", "?")
             acc = row.get("tool_accuracy", "?")
-            status = _fence_untrusted(row.get("status", "?"), inline=True)
+            status = bm_fencing._fence_untrusted(row.get("status", "?"), inline=True)
             line = f"  {ts}: accuracy={acc}, status={status}"
             for key in ("behavioral_fingerprint", "provider_metadata_fingerprint"):
                 val = row.get(key)
                 if val:
-                    line += f", {key}={_fence_untrusted(val, inline=True)}"
+                    line += f", {key}={bm_fencing._fence_untrusted(val, inline=True)}"
             lines.append(line)
         return "\n".join(lines), False
 
@@ -2616,7 +2471,7 @@ def _handle_drift_and_similarity(name, arguments):
                     "search with has '<term>' for exact terms.",
                     False,
                 )
-            return _fence_untrusted(out), True
+            return bm_fencing._fence_untrusted(out), True
         if "_score" in out and not _find_similar_has_real_score(out):
             return (
                 "Semantic indexing is not enabled on this Berserk cluster — falling "
@@ -2624,7 +2479,7 @@ def _handle_drift_and_similarity(name, arguments):
                 "has '<term>' for exact terms.",
                 False,
             )
-        return _fence_untrusted(out), False
+        return bm_fencing._fence_untrusted(out), False
     return None
 
 
@@ -2654,8 +2509,8 @@ def _handle_query_tools(name, arguments):
         svc_str = str(svc) if svc else None
         out1, e1 = bzrk_search(q_discover_fieldstats(svc_str), since)
         out2, e2 = bzrk_search(q_discover_sample(svc_str), since)
-        fenced1 = _fence_untrusted(out1)
-        fenced2 = _fence_untrusted(out2)
+        fenced1 = bm_fencing._fence_untrusted(out1)
+        fenced2 = bm_fencing._fence_untrusted(out2)
         return f"== resource fieldstats ==\n{fenced1}\n\n== sample rows ==\n{fenced2}", (e1 and e2)
     if name == "logs_for_service":
         svc = arguments.get("service")
@@ -2665,7 +2520,7 @@ def _handle_query_tools(name, arguments):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "1h ago"
         out, err = bzrk_search_json(q_logs(str(svc)), since)
-        return _fence_untrusted(out), err
+        return bm_fencing._fence_untrusted(out), err
     if name == "sre_service_health":
         svc = arguments.get("service")
         if not svc:
@@ -2674,7 +2529,7 @@ def _handle_query_tools(name, arguments):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "1h ago"
         out, err = bzrk_search(q_sre_service_health(str(svc)), since)
-        return _fence_untrusted(out), err
+        return bm_fencing._fence_untrusted(out), err
     if name == "soc_timeline":
         svc = arguments.get("service")
         if not svc:
@@ -2683,7 +2538,7 @@ def _handle_query_tools(name, arguments):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "6h ago"
         out, err = bzrk_search_json(q_soc_timeline(str(svc)), since)
-        return _fence_untrusted(out), err
+        return bm_fencing._fence_untrusted(out), err
     return _handle_search_tools(name, arguments)
 
 
@@ -2697,8 +2552,8 @@ def _handle_search_tools(name, arguments):
             return "invalid trace_id (allowed: letters and digits only)", True
         out1, e1 = bzrk_search(q_trace_analyze(str(trace_id)), "30d ago")
         out2, e2 = bzrk_search_json(q_trace_logs(str(trace_id)), "30d ago")
-        out1 = _fence_untrusted(out1)
-        out2 = _fence_untrusted(out2)
+        out1 = bm_fencing._fence_untrusted(out1)
+        out2 = bm_fencing._fence_untrusted(out2)
         return f"== spans ==\n{out1}\n\n== correlated logs ==\n{out2}", (e1 and e2)
     if name == "search":
         kql = arguments.get("kql")
@@ -2714,8 +2569,8 @@ def _handle_search_tools(name, arguments):
                 warning = _format_validation_warnings(report)
         out, err = bzrk_search_json(str(kql), since)
         if err:
-            return _fence_untrusted(out), err
-        out = _fence_limited(out)
+            return bm_fencing._fence_untrusted(out), err
+        out = bm_fencing._fence_limited(out)
         if warning:
             return warning + "\n\n" + out, False
         return out, False
@@ -2751,7 +2606,7 @@ def _handle_search_tools(name, arguments):
         since = arguments.get("since") or "6h ago"
         agent = arguments.get("agent") or "claude-code"
         out, err = bzrk_search_json(q_cc_search(str(term), agent), since)
-        return _fence_untrusted(out), err
+        return bm_fencing._fence_untrusted(out), err
     return None
 
 
@@ -2761,17 +2616,17 @@ def _handle_analytics_tools(name, arguments):
         since = arguments.get("since") or "6h ago"
         if not valid_since(since):
             return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
-        return _wrap_analytics(agent_analytics.claude_loop_check(since))
+        return bm_fencing._wrap_analytics(agent_analytics.claude_loop_check(since))
     if name == "claude_model_fit":
         since = arguments.get("since") or "6h ago"
         if not valid_since(since):
             return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
-        return _wrap_analytics(agent_analytics.claude_model_fit(since))
+        return bm_fencing._wrap_analytics(agent_analytics.claude_model_fit(since))
     if name == "claude_token_burn":
         since = arguments.get("since") or "6h ago"
         if not valid_since(since):
             return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
-        return _wrap_analytics(agent_analytics.claude_token_burn(since))
+        return bm_fencing._wrap_analytics(agent_analytics.claude_token_burn(since))
     if name == "claude_quota_status":
         since = arguments.get("since") or "5h ago"
         if not valid_since(since):
@@ -2782,17 +2637,21 @@ def _handle_analytics_tools(name, arguments):
         since = arguments.get("since") or "7d ago"
         if not valid_since(since):
             return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
-        return _wrap_analytics(agent_analytics.claude_cost_report(since, group_by=arguments.get("group_by") or "day"))
+        return bm_fencing._wrap_analytics(
+            agent_analytics.claude_cost_report(since, group_by=arguments.get("group_by") or "day")
+        )
     if name == "claude_session_deep_dive":
         since = arguments.get("since") or "24h ago"
         if not valid_since(since):
             return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
-        return _wrap_analytics(agent_analytics.claude_session_deep_dive(str(arguments.get("session_id") or ""), since))
+        return bm_fencing._wrap_analytics(
+            agent_analytics.claude_session_deep_dive(str(arguments.get("session_id") or ""), since)
+        )
     if name == "claude_workflow_insights":
         since = arguments.get("since") or "7d ago"
         if not valid_since(since):
             return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
-        return _wrap_analytics(agent_analytics.claude_workflow_insights(since))
+        return bm_fencing._wrap_analytics(agent_analytics.claude_workflow_insights(since))
     return None
 
 
@@ -3062,7 +2921,7 @@ def _handle_call_uncached(name, arguments):
             out = _envelope(name, since, out, fence_body=True)
         elif not err:
             # Success output for all SIMPLE tools is fenced -- same reason.
-            out = _fence_untrusted(out)
+            out = bm_fencing._fence_untrusted(out)
         else:
             # Error output for every SIMPLE tool -- JSON or not -- can carry
             # partial real rows (run_bzrk concatenates raw stdout with
@@ -3076,20 +2935,20 @@ def _handle_call_uncached(name, arguments):
             # ~line 3148) was changed to look for its marker as a substring
             # rather than requiring an unfenced exact prefix, so fencing
             # here doesn't break it.
-            out = _fence_untrusted(out)
+            out = bm_fencing._fence_untrusted(out)
         return out, err
 
     if name == "soc_new_services":
         since = arguments.get("since") or "24h ago"
         out, err = bzrk_search(Q_SOC_NEW_SERVICES, since)
         if err:
-            return _fence_untrusted(out), True
+            return bm_fencing._fence_untrusted(out), True
         baseline = parser_factory.load_json_dict(parser_factory._known_sources_path())
         known = set(baseline.get("services", {}).keys())
         if not known:
             return (
                 "(no baseline — run detect_new_sources first to establish "
-                "known services; showing all active services)\n" + _fence_untrusted(out)
+                "known services; showing all active services)\n" + bm_fencing._fence_untrusted(out)
             ), False
         lines = out.strip().splitlines()
         header = lines[0] if lines else ""
@@ -3100,7 +2959,7 @@ def _handle_call_uncached(name, arguments):
                 filtered.append(line)
         if len(filtered) <= 1:
             return "No genuinely new services (all active services are in the baseline).", False
-        return _fence_untrusted("\n".join(filtered)), False
+        return bm_fencing._fence_untrusted("\n".join(filtered)), False
 
     result = _handle_validated(name, arguments)
     if result is not None:
@@ -5386,7 +5245,7 @@ def run_drift_report(since="30d ago"):
     if degraded_models:
         lines = ["Models with degraded or changed behavior:"]
         for model_name, verdict in degraded_models:
-            fenced = _fence_untrusted(model_name, inline=True)
+            fenced = bm_fencing._fence_untrusted(model_name, inline=True)
             lines.append(f"  {fenced}: {verdict['verdict']} ({verdict['confidence']}) — {verdict['reason']}")
         text = "\n".join(lines)
         print(text, file=sys.stderr)

@@ -23,7 +23,7 @@
     "by": "claude + codex review",
     "note": "visibility first (hidden tool answers 'unknown tool'), then _unknown_argument_error rejects undeclared argument names before preflight, task creation and handle_call. Review 2026-09-26 P2 (docs/mcp-guidance-review-2026-09-26.md); reviewed by Codex, one P3 doc fix, no P1/P2. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). PENDING re-review in the package-split Codex Security reviews."
   },
-  "berserk_mcp:_fence_untrusted": {
+  "berserk_mcp.fencing:_fence_untrusted": {
     "fingerprint": "8e3b24a6f6cac18a",
     "reviewed": "2026-09-25",
     "by": "claude + codex review (2 passes)",
@@ -167,7 +167,7 @@
     "by": "codex",
     "note": "YAML block scalar / indented continuation: lines blank or deeper than the key line; past MAX_MULTILINE_VALUE_CHARS fails closed. v1.35.0."
   },
-  "berserk_mcp:_fence_limited": {
+  "berserk_mcp.fencing:_fence_limited": {
     "fingerprint": "cb0db1948ac48f43",
     "reviewed": "2026-10-02",
     "by": "codex-security scan 5053dc0c (sanitizer judged sound) + claude-code fix; fix not re-scanned",
