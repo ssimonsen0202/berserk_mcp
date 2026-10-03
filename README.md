@@ -42,10 +42,17 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.36.2**. This is a bullet-point overview, most recent
+Current version: **1.36.3**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.36.3** (2026-10-03) — Multi-day cost totals are now complete. Over
+  more than about a day, the spend query hit Berserk's 10 MB summarize memory
+  limit. Berserk then dropped groups and reported this only in a warning,
+  which the code did not read. For 2026-09-28, a 5-day window counted 142 of
+  302 API calls. The query now halves any window that hits the limit. If a
+  one-hour slice still hits it, the report fails instead of showing a short
+  total. See [docs/releases/v1.36.3.md](docs/releases/v1.36.3.md).
 - **v1.36.2** (2026-10-02) — Usage corrections. `claude_spend_overview` now
   also reads records with `service.name` `claude-code-usage-correction`. A
   correction carries the full token usage of an older API call that reached
@@ -1653,7 +1660,7 @@ timeouts, and read-only execution. These protect backend stability. Few
 address this query-result failure mode, the one that pages someone at
 4am.
 
-Nine controls make this up, and each has a locking test:
+Ten controls make this up, and each has a locking test:
 
 1. Field-access guidance for nested OTLP attributes.
 2. Term-boundary guidance for full-text search.
@@ -1667,7 +1674,12 @@ Nine controls make this up, and each has a locking test:
 8. A log-freshness check before the error-rate tree reports "no errors"
    (v1.30.0).
 9. Small-tier text that never points a model at a tool it cannot call
-   (v1.30.0). See [docs/wrong-answer-containment.md](docs/wrong-answer-containment.md)
+   (v1.30.0).
+10. Cost reports that refuse a partial result (v1.36.3). When Berserk drops
+    groups at a memory limit, the report splits the window or fails. It never
+    shows a short total as complete.
+
+See [docs/wrong-answer-containment.md](docs/wrong-answer-containment.md)
 for full detail, known limits, and the regression test for each.
 
 ## Testing

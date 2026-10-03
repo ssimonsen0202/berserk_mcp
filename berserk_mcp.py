@@ -90,7 +90,7 @@ import schema_registry
 import secret_scan
 import tool_discovery
 
-__version__ = "1.36.2"
+__version__ = "1.36.3"
 
 
 def log(msg):
@@ -2289,6 +2289,17 @@ investigation.configure(
     q_trace_find_errors=q_trace_find_errors_for_service,
     q_services=Q_SERVICES,
 )
+
+
+def finops_since_hours(since):
+    """Window length in hours for ai_finops, after the same normalization
+    bzrk_search applies; None when the value is not a valid window."""
+    since = _normalize_since(since)
+    if not valid_since(since):
+        return None
+    return _since_hours(since) or None
+
+
 ai_finops.configure(
     search=bzrk_search_json,
     table=TABLE,
@@ -2309,6 +2320,7 @@ ai_finops.configure(
     report_dir=FINOPS_REPORT_DIR,
     otlp_endpoint=FINOPS_OTLP_ENDPOINT,
     otlp_headers=FINOPS_OTLP_HEADERS,
+    since_hours=finops_since_hours,
 )
 secret_scan.configure(
     bzrk_search=bzrk_search_json,

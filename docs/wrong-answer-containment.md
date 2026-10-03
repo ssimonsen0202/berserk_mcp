@@ -100,6 +100,12 @@ can be reviewed, tested, and cited as one thing.
   empty-result next steps drop anything naming a tool hidden in the lane and
   tier. Locking test: `tests/test_tier_text.py`, which checks every lane and
   tier in a fresh process.
+- **A cost report never shows a partial total as complete (v1.36.3).** Berserk
+  reports dropped groups (for example `SummarizeMemoryLimit`) only in the
+  response's `warnings`, with a normal status. `ai_finops._fetch_usage` reads
+  the warnings. On a limit warning, it halves the window and queries each
+  half. If a one-hour slice still hits the limit, the report fails with a
+  clear message. Locking test: `tests/test_finops_memory_limit.py`.
 - **Returned telemetry is fenced as untrusted data.** Not a containment
   control in the same sense as the others — it defends against an agent
   *acting on an instruction smuggled into a log line*, not against a query

@@ -6,7 +6,7 @@ functions remain independently testable without a live cluster.
 """
 
 from collections import defaultdict
-from datetime import datetime, UTC
+from datetime import UTC, datetime, timedelta
 import argparse
 import csv
 import hashlib
@@ -52,6 +52,7 @@ _pseudonym_key_source = None
 _report_dir = None
 _otlp_endpoint = ""
 _otlp_headers = ""
+_since_hours = None  # since string -> window length in hours, or None
 _store_lock = threading.RLock()
 
 
@@ -67,12 +68,18 @@ def configure(
     report_dir=None,
     otlp_endpoint="",
     otlp_headers="",
+    since_hours=None,
 ):
-    """Inject runtime dependencies without importing ``berserk_mcp``."""
+    """Inject runtime dependencies without importing ``berserk_mcp``.
+
+    since_hours turns a ``since`` value into a window length in hours (or
+    None when it cannot). _fetch_usage needs it to split a window that hits
+    Berserk's summarize memory limit; without it, such a window fails closed."""
     global _search, _table, _redact, _redact_aggressive, _catalog_path, _business_store_path
     global _decision_store_path, _pseudonym_key_path, _pseudonym_key_cache
-    global _pseudonym_key_source, _report_dir, _otlp_endpoint, _otlp_headers
+    global _pseudonym_key_source, _report_dir, _otlp_endpoint, _otlp_headers, _since_hours
     _search = search
+    _since_hours = since_hours
     t = str(table or "default")
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", t):
         raise ValueError(f"invalid table name: {t!r}")
@@ -88,6 +95,10 @@ def configure(
     _report_dir = Path(report_dir) if report_dir else None
     _otlp_endpoint = str(otlp_endpoint or "").strip()
     _otlp_headers = str(otlp_headers or "").strip()
+
+
+def _utcnow():
+    return datetime.now(UTC)
 
 
 def _now_iso():
@@ -732,10 +743,23 @@ def _max_agg_clause(fields):
 USAGE_CORRECTION_SERVICE = "claude-code-usage-correction"
 
 
-def usage_aggregate_query():
-    """Bounded, aggregate-first query for enterprise reporting."""
+def _kql_datetime(value):
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def usage_aggregate_query(start=None, end=None):
+    """Bounded, aggregate-first query for enterprise reporting.
+
+    start/end (aware datetimes) limit the query to one slice of the window;
+    _fetch_usage uses them to split a window that hits the memory limit."""
+    window = ""
+    if start is not None:
+        window = f"| where timestamp >= datetime({_kql_datetime(start)}) "
+        if end is not None:
+            window = window.rstrip() + f" and timestamp < datetime({_kql_datetime(end)}) "
     return (
         f"{_table} | where resource['service.name'] in ('claude-code', '{USAGE_CORRECTION_SERVICE}') "
+        f"{window}"
         "| extend raw_attributes=$raw['attributes'], raw_resource=$raw['resource'] "
         "| extend event_name=tostring(raw_attributes['event.name']), "
         "legacy_type=tostring(raw_attributes['claude.type']) "
@@ -1755,13 +1779,72 @@ def _fenced_json_lines(payload):
     return [fence + "json", serialized, fence]
 
 
+# Smallest slice _fetch_usage splits a window into. A slice this small that
+# still hits the memory limit fails closed.
+_MIN_USAGE_SLICE = timedelta(hours=1)
+
+
+def _limit_warnings(text):
+    """Kinds of the Berserk warnings that mean the result is incomplete.
+
+    Berserk reports a dropped-groups or truncated result only in the
+    response's ``warnings``, with a 200 status (e.g. SummarizeMemoryLimit:
+    "additional groups were not collected")."""
+    try:
+        doc = json.loads(str(text or ""))
+    except (json.JSONDecodeError, TypeError):
+        return []
+    warnings = doc.get("warnings") if isinstance(doc, dict) else None
+    kinds = [str(w.get("kind") or "") for w in warnings or [] if isinstance(w, dict)]
+    return [k for k in kinds if "Limit" in k or "Truncat" in k]
+
+
+def _limit_error(kinds, start, end):
+    window = f"{_kql_datetime(start)} to {_kql_datetime(end)}" if start else "the window"
+    return (
+        f"Berserk hit a query memory limit ({', '.join(sorted(set(kinds)))}) for {window}, "
+        "so the result would be partial. Nothing was reported. Narrow the 'since' window."
+    )
+
+
+def _fetch_window(start, end):
+    """Rows for [start, end); end None means up to now. Halves the window
+    while Berserk reports a limit warning, down to _MIN_USAGE_SLICE."""
+    since = f"{max(1, math.ceil((_utcnow() - start).total_seconds() / 3600) + 1)}h ago"
+    text, error = _search(usage_aggregate_query(start, end), since)
+    if error:
+        return text, True
+    kinds = _limit_warnings(text)
+    if not kinds:
+        return parse_records(text), False
+    stop = end or _utcnow()
+    if stop - start <= _MIN_USAGE_SLICE:
+        return _limit_error(kinds, start, stop), True
+    middle = start + (stop - start) / 2
+    rows = []
+    for part_start, part_end in ((start, middle), (middle, end)):
+        part, error = _fetch_window(part_start, part_end)
+        if error:
+            return part, True
+        rows.extend(part)
+    return rows, False
+
+
 def _fetch_usage(since):
     if _search is None:
         return "AI FinOps search backend is not configured.", True
-    text, error = _search(usage_aggregate_query(), since)
-    if error:
-        return text, True
-    return parse_records(text), False
+    hours = _since_hours(since) if _since_hours else None
+    if not hours:
+        # No window to split: one query, and fail closed on a limit warning
+        # rather than report a total with groups missing.
+        text, error = _search(usage_aggregate_query(), since)
+        if error:
+            return text, True
+        kinds = _limit_warnings(text)
+        if kinds:
+            return _limit_error(kinds, None, None), True
+        return parse_records(text), False
+    return _fetch_window(_utcnow() - timedelta(hours=float(hours)), None)
 
 
 def spend_overview(since="7d ago", group_by="day", filters=None, limit=20):
