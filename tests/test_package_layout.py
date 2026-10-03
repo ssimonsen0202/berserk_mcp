@@ -22,8 +22,7 @@ PKG = ROOT / "berserk_mcp"
 NAMES = Path(__file__).resolve().parent / "facade_names.txt"
 MAX_MODULE_LINES = 1200
 MAX_INIT_LINES = 80  # __init__.py is only the facade
-# __init__.py holds the not-yet-moved code until the last slice; the final
-# task (plan Task 15) empties this set.
+# No module is exempt; a missing LAYERS file fails package import first.
 SIZE_EXEMPT: set[str] = set()
 
 

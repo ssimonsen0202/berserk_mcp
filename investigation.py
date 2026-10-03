@@ -2,7 +2,7 @@
 
 Fixed, hardcoded per-intent trees -- no agent-authored composition, same
 reproducibility posture as every other tool in this project. This module
-is stdlib-only and configured by berserk_mcp.py at import time. It does
+is stdlib-only and configured by berserk_mcp/learned.py at import time. It does
 not import berserk_mcp directly, which keeps tests simple and avoids
 cycles (same convention as agent_analytics.py and parser_factory.py).
 
@@ -39,10 +39,10 @@ _MAX_SINCE_CHARS = 32
 
 def configure(bzrk_search, since_hours, q_errors, q_soc_log_spike, q_trace_find_errors, q_services=None):
     """bzrk_search: callable(kql, since) -> (json_text, is_error), the same
-    bzrk_search_json berserk_mcp.py wires into agent_analytics. since_hours:
-    callable(since_str) -> float hours, berserk_mcp.py's own _since_hours
+    bzrk_search_json (berserk_mcp/runner.py) that berserk_mcp/learned.py wires into agent_analytics. since_hours:
+    callable(since_str) -> float hours, berserk_mcp/config.py's own _since_hours
     (passed in rather than imported, to avoid the cycle). q_errors: the
-    exact KQL constant berserk_mcp.py already defines for errors_by_service
+    exact KQL constant berserk_mcp/queries.py already defines for errors_by_service
     (fixed string -- the start node has no service to scope by yet; it's
     the one finding it). q_soc_log_spike, q_trace_find_errors: callables
     service -> kql, scoped to the one service this hop cares about (Codex
@@ -87,7 +87,7 @@ def _run_json(kql, since):
     if str(out or "").strip()[:1] not in "[{":
         # Codex review finding, 2026-08-28: bzrk_search_json deliberately
         # falls back to plain aligned-table text on older bzrk builds that
-        # reject --json (see its own docstring in berserk_mcp.py). That
+        # reject --json (see its own docstring in berserk_mcp/runner.py). That
         # fallback is not a corrupted response -- it's a real, documented
         # compatibility path -- but this module can't safely reconstruct
         # array-valued columns (soc_log_spike's make-series `hits` series)
@@ -345,7 +345,7 @@ def run_error_rate_node(node, since, service):
     (text, is_error, next_node, next_service).
 
     text carries only telemetry-derived findings for this hop -- never the
-    fixed continuation directive. The caller (berserk_mcp.py's dispatch)
+    fixed continuation directive. The caller (berserk_mcp/server.py's dispatch)
     is responsible for presenting `next_node`/`next_service` as the "call
     this next" instruction *outside* whatever untrusted-data fence it
     applies to `text` (Codex review finding, 2026-08-28: this module used

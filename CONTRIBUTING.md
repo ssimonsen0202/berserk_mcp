@@ -44,7 +44,7 @@ the [`bzrk`](https://docs.bzrk.dev) CLI and log in to a profile — see the
 - **Shell-strings and `eval`.** All `bzrk` invocations use `subprocess` with an argv
   list. No `shell=True`, no `eval`, no `os.system`. Free-text inputs need allow-lists
   (see `logs_for_service` for the pattern).
-- **New dependencies.** The single-file, stdlib-only build is the whole story —
+- **New dependencies.** The stdlib-only build is the whole story —
   trivially auditable, trivially vendored. If you genuinely need a library, open
   an issue and let's talk it through first.
 
@@ -79,6 +79,48 @@ that hasn't been reviewed at its current commit yet, so this doesn't depend
 on a human remembering to ask. Once the repo passes the star threshold,
 CodeRabbit's own automatic review takes over and this workflow becomes a
 no-op (it always checks for an unreviewed commit first).
+
+## Module map
+
+The server code lives in the `berserk_mcp/` package. `berserk_mcp.py` in the
+repository root is only a launcher. Edit the module that owns the code. The
+list below runs from the lowest layer to the highest. A module may import
+only modules above it in the list.
+
+- `_version`: berserk-mcp version.
+- `config`: settings read from the environment, shared state, and small helpers.
+- `fencing`: wrap real telemetry as untrusted data and cap what reaches the model.
+- `queries`: verified KQL queries and the builders that fill them in.
+- `runner`: run bzrk: bounded subprocesses, search, schema and KQL validation.
+- `tools`: tool definitions, metadata and the text the model reads about them.
+- `learned`: the learned and saved query store, and wiring for sibling modules.
+- `httpconfig`: parse and check the HTTP transport settings.
+- `doctor`: the --doctor and self_check preflight, and admin commands.
+- `handlers.tail`: handlers for the tail and CanonLoom tools.
+- `handlers.learning`: handlers for the learning loop, jobs and discovery.
+- `handlers.diagnostics`: handlers for diagnostics, model drift and the parser tools.
+- `handlers.search`: handlers for query, search, analytics and FinOps tools.
+- `handlers.dispatch`: tool-call dispatch with fleet budget, cache and cooldown.
+- `server`: JSON-RPC plumbing and the stdio and HTTP transports.
+- `cli`: command-line entry point and the scheduled passes.
+
+`berserk_mcp/__init__.py` is a facade. `berserk_mcp.NAME` reads and writes
+`NAME` in the module that owns it. Tests use this form. The facade is why
+`mock.patch.object(berserk_mcp, "NAME", ...)` changes the value that the
+owning module reads.
+
+### Import rule
+
+Inside the package, import a module, not a name:
+
+```python
+from berserk_mcp import config as bm_config
+
+bm_config.TABLE  # right: read at call time
+```
+
+Never import a name by value (`from berserk_mcp.config import TABLE`). A copy
+of the name does not see later changes, and a test patch would miss it.
 
 Locally:
 

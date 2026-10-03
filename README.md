@@ -42,10 +42,15 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.36.3**. This is a bullet-point overview, most recent
+Current version: **1.37.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.37.0** (2026-10-03) — The server code moved out of one 6,165-line
+  file. It now lives in the `berserk_mcp/` package: 16 layer modules and a
+  small facade, none over 1,200 lines. Behavior does not change. `python3 berserk_mcp.py` still
+  starts the server; `python3 -m berserk_mcp` also works. See
+  [docs/releases/v1.37.0.md](docs/releases/v1.37.0.md).
 - **v1.36.3** (2026-10-03) — Multi-day cost totals are now complete. Over
   more than about a day, the spend query hit Berserk's 10 MB summarize memory
   limit. Berserk then dropped groups and reported this only in a warning,
@@ -1213,7 +1218,7 @@ berserk-mcp uses only the Python standard library. It has no third-party
 runtime dependencies. Installation must include the accompanying local
 modules declared in `pyproject.toml` plus packaged data (`primers/`,
 `ingestion_catalog.json`). Use `pip install .` or a built wheel. Do not copy
-`berserk_mcp.py` alone.
+the launcher `berserk_mcp.py` alone: it needs the `berserk_mcp/` package.
 
 ## Authenticate to `bzrk`
 
