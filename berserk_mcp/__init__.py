@@ -97,6 +97,19 @@ from berserk_mcp import tools as bm_tools
 
 
 # ---------- learned-query store ----------
+
+# persist_learned_query tells MCP clients that the tool list changed. The
+# sender lives in the transport layer, which sits above this store, so the
+# transport registers it with set_tools_changed_notifier when it loads.
+_tools_changed_notifier = None
+
+
+def set_tools_changed_notifier(notify):
+    """Register the callable that sends notifications/tools/list_changed."""
+    global _tools_changed_notifier
+    _tools_changed_notifier = notify
+
+
 def load_learned():
     return _store.load_json_list(bm_config.LEARNED_PATH, logger=bm_config.log)
 
@@ -373,7 +386,8 @@ def persist_learned_query(entry, action_source):
     # effort: a notification failure must never undo or fail a save that
     # already landed on disk.
     try:
-        _notify_tools_list_changed()
+        if _tools_changed_notifier is not None:
+            _tools_changed_notifier()
     except Exception as exc:
         bm_config.log(f"failed to send tools/list_changed notification: {type(exc).__name__}: {exc}")
     return log_entry
@@ -1867,6 +1881,15 @@ def _notify_tools_list_changed():
                         "params": {"_meta": {bm_config.MCP_META_SUBSCRIPTION_ID: sub_id}},
                     }
                 )
+
+
+def _notify_tools_list_changed_hook():
+    # Looks the sender up at call time, so a test that replaces
+    # _notify_tools_list_changed is still the one that runs.
+    _notify_tools_list_changed()
+
+
+set_tools_changed_notifier(_notify_tools_list_changed_hook)
 
 
 def _discover_result():
