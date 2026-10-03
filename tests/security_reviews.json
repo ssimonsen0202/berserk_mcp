@@ -3,19 +3,19 @@
     "fingerprint": "8d6f9d9388b34557",
     "reviewed": "2026-09-24",
     "by": "baseline",
-    "note": "runs a user query through the boundary, since-window check and query semaphore, then bzrk. The boundary checks moved unchanged to _kql_boundary.check on 2026-09-24 (differential test over ~120k queries and 6 table names: identical results). No dedicated review yet. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). PENDING re-review in the package-split Codex Security reviews."
+    "note": "runs a user query through the boundary, since-window check and query semaphore, then bzrk. The boundary checks moved unchanged to _kql_boundary.check on 2026-09-24 (differential test over ~120k queries and 6 table names: identical results). No dedicated review yet. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). Re-reviewed by Codex Security scan 20261003T195944Z-81942 on 2026-10-03: the package move introduced no issue here. Its pre-existing findings (direct run_bzrk callers outside the query semaphore, the process-global fleet context, unfenced telemetry in scan_secrets/detect_new_sources/self_check) are tracked for a follow-up PR."
   },
   "berserk_mcp.runner:_run_argv_bounded": {
     "fingerprint": "fd57e16962361ecb",
     "reviewed": "2026-09-25",
     "by": "claude + codex review (2 passes)",
-    "note": "scans all of stderr for the auth marker while streaming (512-byte overlap, bounded patterns), reports streams_complete (finding 3: a marker past the retained cap was discarded). Fix for Codex Security scan 77004e6e (2026-09-25); fixes reviewed by Codex in two passes, second pass clean. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). PENDING re-review in the package-split Codex Security reviews."
+    "note": "scans all of stderr for the auth marker while streaming (512-byte overlap, bounded patterns), reports streams_complete (finding 3: a marker past the retained cap was discarded). Fix for Codex Security scan 77004e6e (2026-09-25); fixes reviewed by Codex in two passes, second pass clean. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). Re-reviewed by Codex Security scan 20261003T195944Z-81942 on 2026-10-03: the package move introduced no issue here. Its pre-existing findings (direct run_bzrk callers outside the query semaphore, the process-global fleet context, unfenced telemetry in scan_secrets/detect_new_sources/self_check) are tracked for a follow-up PR."
   },
   "berserk_mcp.config:_resolve_bzrk_binary": {
     "fingerprint": "dd0b7e36b9e6e73c",
     "reviewed": "2026-09-23",
     "by": "baseline",
-    "note": "BZRK_BIN resolved once; Windows CWD executable planting refused. Fingerprint recorded 2026-09-23; no dedicated review yet. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). PENDING re-review in the package-split Codex Security reviews."
+    "note": "BZRK_BIN resolved once; Windows CWD executable planting refused. Fingerprint recorded 2026-09-23; no dedicated review yet. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). Re-reviewed by Codex Security scan 20261003T195944Z-81942 on 2026-10-03: the package move introduced no issue here. Its pre-existing findings (direct run_bzrk callers outside the query semaphore, the process-global fleet context, unfenced telemetry in scan_secrets/detect_new_sources/self_check) are tracked for a follow-up PR."
   },
   "berserk_mcp:_dispatch_tools_call": {
     "fingerprint": "1faa4db641ac73c3",
@@ -27,7 +27,7 @@
     "fingerprint": "8e3b24a6f6cac18a",
     "reviewed": "2026-09-25",
     "by": "claude + codex review (2 passes)",
-    "note": "delegates tag neutralisation to _tag_guard (open and close tags). Fix for Codex Security scan 77004e6e (2026-09-25); fixes reviewed by Codex in two passes, second pass clean. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). PENDING re-review in the package-split Codex Security reviews."
+    "note": "delegates tag neutralisation to _tag_guard (open and close tags). Fix for Codex Security scan 77004e6e (2026-09-25); fixes reviewed by Codex in two passes, second pass clean. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). Re-reviewed by Codex Security scan 20261003T195944Z-81942 on 2026-10-03: the package move introduced no issue here. Its pre-existing findings (direct run_bzrk callers outside the query semaphore, the process-global fleet context, unfenced telemetry in scan_secrets/detect_new_sources/self_check) are tracked for a follow-up PR."
   },
   "secret_scan:redact": {
     "fingerprint": "7c39c9cd1a925643",
@@ -99,7 +99,7 @@
     "fingerprint": "49e2055d776c76a3",
     "reviewed": "2026-09-25",
     "by": "claude + codex review (2 passes)",
-    "note": "constant auth message when the marker is anywhere in stderr; fails closed when a stream was not fully read. Fix for Codex Security scan 77004e6e (2026-09-25); fixes reviewed by Codex in two passes, second pass clean. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). PENDING re-review in the package-split Codex Security reviews."
+    "note": "constant auth message when the marker is anywhere in stderr; fails closed when a stream was not fully read. Fix for Codex Security scan 77004e6e (2026-09-25); fixes reviewed by Codex in two passes, second pass clean. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). Re-reviewed by Codex Security scan 20261003T195944Z-81942 on 2026-10-03: the package move introduced no issue here. Its pre-existing findings (direct run_bzrk callers outside the query semaphore, the process-global fleet context, unfenced telemetry in scan_secrets/detect_new_sources/self_check) are tracked for a follow-up PR."
   },
   "berserk_mcp:_unknown_argument_error": {
     "fingerprint": "ebbc443283d47be0",
@@ -171,6 +171,6 @@
     "fingerprint": "cb0db1948ac48f43",
     "reviewed": "2026-10-02",
     "by": "codex-security scan 5053dc0c (sanitizer judged sound) + claude-code fix; fix not re-scanned",
-    "note": "sanitizer for the fencing semgrep rule (v1.36.0); always calls _fence_untrusted on the content and appends a count-only note after the closing tag. After Codex Security findings 1-2 (low): holds a query slot while cutting (falls back to the no-decode text cut if none frees within _POST_PROCESS_SLOT_WAIT_SECONDS); _limit_model_output decodes JSON only up to _MAX_JSON_PARSE_CHARS (1,000,000) and cuts text with rfind instead of splitlines. Measured peak extra memory: 8 MB tiny-row JSON 209 MB -> 0.04 MB; 10 MB short lines 44 MB -> 0.04 MB; worst case under the ceiling ~26 MB. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). PENDING re-review in the package-split Codex Security reviews."
+    "note": "sanitizer for the fencing semgrep rule (v1.36.0); always calls _fence_untrusted on the content and appends a count-only note after the closing tag. After Codex Security findings 1-2 (low): holds a query slot while cutting (falls back to the no-decode text cut if none frees within _POST_PROCESS_SLOT_WAIT_SECONDS); _limit_model_output decodes JSON only up to _MAX_JSON_PARSE_CHARS (1,000,000) and cuts text with rfind instead of splitlines. Measured peak extra memory: 8 MB tiny-row JSON 209 MB -> 0.04 MB; 10 MB short lines 44 MB -> 0.04 MB; worst case under the ceiling ~26 MB. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). Re-reviewed by Codex Security scan 20261003T195944Z-81942 on 2026-10-03: the package move introduced no issue here. Its pre-existing findings (direct run_bzrk callers outside the query semaphore, the process-global fleet context, unfenced telemetry in scan_secrets/detect_new_sources/self_check) are tracked for a follow-up PR."
   }
 }
