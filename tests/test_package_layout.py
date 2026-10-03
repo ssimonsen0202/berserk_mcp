@@ -6,7 +6,9 @@ scripts and evals read and patch names on `berserk_mcp`; the facade
 """
 
 import ast
+import importlib
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -42,6 +44,12 @@ def package_imports(path):
             for alias in node.names:
                 out.append((node.lineno, node.module, alias.name))
     return out
+
+
+def relative_imports(path):
+    """Line numbers of relative imports (`from . import x`, `from .m import x`)."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return [node.lineno for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.level > 0]
 
 
 class FacadeSurfaceTest(unittest.TestCase):
@@ -104,6 +112,39 @@ class FacadeRoutingTest(unittest.TestCase):
         self.assertEqual(self.pkg.__dict__["FRESH"], 1)
 
 
+class FacadeInstallTest(unittest.TestCase):
+    """install() skips a layer whose parent package is absent, and nothing else."""
+
+    PKG_NAME = "fakeinstallpkg"
+
+    def make_package(self, handlers_init=None):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (root / self.PKG_NAME).mkdir()
+        (root / self.PKG_NAME / "__init__.py").write_text("", encoding="utf-8")
+        if handlers_init is not None:
+            (root / self.PKG_NAME / "handlers").mkdir()
+            (root / self.PKG_NAME / "handlers" / "__init__.py").write_text(handlers_init, encoding="utf-8")
+        sys.path.insert(0, str(root))
+        self.addCleanup(sys.path.remove, str(root))
+        self.addCleanup(self.forget_package)
+        return importlib.import_module(self.PKG_NAME)
+
+    def forget_package(self):
+        for name in [n for n in sys.modules if n == self.PKG_NAME or n.startswith(self.PKG_NAME + ".")]:
+            del sys.modules[name]
+
+    def test_broken_handlers_package_raises(self):
+        package = self.make_package(handlers_init="import nonexistent_dependency_for_test\n")
+        with self.assertRaises(ModuleNotFoundError) as caught:
+            _facade.install(package)
+        self.assertEqual(caught.exception.name, "nonexistent_dependency_for_test")
+
+    def test_absent_handlers_package_is_skipped(self):
+        package = self.make_package()
+        _facade.install(package)
+        self.assertIsInstance(package, _facade.Facade)
+
+
 class LayeringTest(unittest.TestCase):
     def test_every_module_is_a_known_layer(self):
         known = set(_facade.LAYERS) | {"", "_facade", "__main__", "handlers"}
@@ -149,6 +190,22 @@ class LayeringTest(unittest.TestCase):
                                 (alias.asname or "").startswith("bm_"),
                                 f"{path.name}:{node.lineno}: import a package module as bm_<name>",
                             )
+
+    def test_no_relative_imports(self):
+        # `from .config import LIMIT` escapes both tests above, which only
+        # see absolute `berserk_mcp` imports.
+        for _, path in package_modules():
+            with self.subTest(module=str(path)):
+                self.assertEqual(
+                    relative_imports(path), [], f"{path.name}: use `from berserk_mcp import <m> as bm_<m>`"
+                )
+
+    def test_relative_import_check_detects_relative_imports(self):
+        # Fail closed: the check above must see a relative import when there is one.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "probe.py"
+            path.write_text("from .config import LIMIT\nfrom . import config\n", encoding="utf-8")
+            self.assertEqual(relative_imports(path), [1, 2])
 
 
 class CiCoverageTest(unittest.TestCase):

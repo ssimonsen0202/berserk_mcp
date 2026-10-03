@@ -80,7 +80,11 @@ def install(package):
         name = f"{package.__name__}.{layer}"
         try:
             spec = importlib.util.find_spec(name)
-        except ModuleNotFoundError:  # its parent package (handlers/) does not exist yet
+        except ModuleNotFoundError as exc:
+            # Skip only when the parent package (handlers/) does not exist yet;
+            # an import error inside it must not hide every layer under it.
+            if exc.name != name.rpartition(".")[0]:
+                raise
             spec = None
         if spec is not None:
             importlib.import_module(name)

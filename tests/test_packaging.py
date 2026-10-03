@@ -112,8 +112,22 @@ class PackagingTest(unittest.TestCase):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         match = re.search(r"^TYPED_MODULES\s*=\s*(.+)$", makefile, re.MULTILINE)
         self.assertIsNotNone(match, "TYPED_MODULES not found in Makefile")
-        typed = {name.removesuffix(".py") for name in match.group(1).split()}
-        self.assertEqual(typed, listed_top_level())
+        entries = match.group(1).split()
+        typed_modules = {name.removesuffix(".py") for name in entries if name.endswith(".py")}
+        typed_packages = {name.rstrip("/") for name in entries if not name.endswith(".py")}
+        # A .py entry checks a single file; a bare entry checks a package
+        # directory. `berserk_mcp.py` (the launcher) must not stand in for
+        # the berserk_mcp/ package.
+        self.assertEqual(typed_modules, listed_py_modules())
+        self.assertEqual(typed_packages, {p for p in listed_packages() if "." not in p})
+
+    def test_listed_packages_exist(self):
+        packages = listed_packages()
+        self.assertTrue(packages, "[tool.setuptools] packages is empty")
+        for package in packages:
+            with self.subTest(package=package):
+                init = ROOT.joinpath(*package.split(".")) / "__init__.py"
+                self.assertTrue(init.is_file(), f"packages lists {package}, but {init} is missing")
 
 
 if __name__ == "__main__":
