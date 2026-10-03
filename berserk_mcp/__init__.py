@@ -92,488 +92,10 @@ from berserk_mcp._version import __version__ as __version__
 from berserk_mcp import _facade
 from berserk_mcp import config as bm_config
 from berserk_mcp import fencing as bm_fencing
+from berserk_mcp import queries as bm_queries
 
 
 # ---------- configuration (env-overridable) ----------
-
-
-# ---------- verified queries (do not edit field names; they are confirmed
-# against the live `default` schema — see docs/claude-code.md) ----------
-T = bm_config.TABLE
-
-# Issue #42: the claude_* lane's OTLP records are tagged by ingesting agent
-# via resource['service.name']. "claude-code" stays the default for zero
-# behavior change on existing callers; other agents register here as their
-# ingestion adapter ships (see ingestion/codex_adapter.py for the first one).
-_AGENT_SERVICE_NAMES = {
-    "claude-code": "claude-code",
-    "codex": "codex-cli",
-}
-
-
-def _service_filter(agent):
-    """KQL filter clause for one ingesting agent's OTLP records. Unknown
-    agent names fall back to 'claude-code' rather than erroring, matching
-    every other tool's default-since-style leniency on optional args."""
-    service = _AGENT_SERVICE_NAMES.get(agent, _AGENT_SERVICE_NAMES["claude-code"])
-    return f"{T} | where resource['service.name'] == '{service}'"
-
-
-CC = _service_filter("claude-code")
-
-Q_CONTAINERS = (
-    f"{T} | where isnotnull(metric_name) | where isnotempty(resource['container.name']) "
-    f"| summarize samples=count() by container=tostring(resource['container.name']) "
-    f"| sort by container asc"
-)
-Q_CPU = (
-    f"{T} | where metric_name == 'container.cpu.utilization' "
-    f"| summarize cpu_pct=avg(value) by container=tostring(resource['container.name']) "
-    f"| sort by cpu_pct desc"
-)
-Q_MEM = (
-    f"{T} | where metric_name == 'container.memory.usage.total' "
-    f"| summarize mb=avg(value)/1048576 by container=tostring(resource['container.name']) "
-    f"| sort by mb desc"
-)
-Q_ERRORS = (
-    f"{T} | where isnotnull(body) | where severity_text == 'ERROR' "
-    f"| summarize errors=count() by service=tostring(resource['service.name']) "
-    f"| sort by errors desc"
-)
-Q_SERVICES = (
-    f"{T} | where isnotnull(body) or isnotnull(metric_name) "
-    f"| summarize total=count(), logs=countif(isnotnull(body)), "
-    f"metrics=countif(isnotnull(metric_name)) by service=tostring(resource['service.name']) "
-    f"| sort by total desc"
-)
-Q_HOSTS = f"{T} | summarize total=count() by host=tostring(resource['host.name']) | sort by total desc"
-Q_HOST_CPU = (
-    f"{T} | where metric_name == 'system.cpu.load_average.1m' "
-    f"| summarize load_1m=avg(value) by host=tostring(resource['host.name']) "
-    f"| sort by load_1m desc"
-)
-Q_HOST_MEM = (
-    f"{T} | where metric_name == 'system.memory.usage' "
-    f"| where attributes['state'] == 'used' "
-    f"| summarize used_gb=avg(value)/1073741824 by host=tostring(resource['host.name']) "
-    f"| sort by used_gb desc"
-)
-Q_CONTAINER_HOSTS = (
-    f"{T} | where isnotempty(resource['container.name']) "
-    f"| summarize last_seen=max(timestamp) by "
-    f"container=tostring(resource['container.name']), host=tostring(resource['host.name']) "
-    f"| sort by host asc, container asc"
-)
-Q_METRICS = (
-    f"{T} | where isnotnull(metric_name) "
-    f"| summarize samples=count(), last_seen=max(timestamp) by metric_name "
-    f"| sort by samples desc"
-)
-# bzrk.query.execution_duration is a cumulative OTel histogram — value is null.
-# otel_histogram_percentile($raw, N) is a native Berserk aggregate that reads the
-# internal histogram representation directly; subscript access ($raw['count'] etc.)
-# still works for count/sum/max if needed.
-Q_QUERY_PERF = (
-    f"{T} | where metric_name == 'bzrk.query.execution_duration' "
-    f"| summarize p50=otel_histogram_percentile($raw, 50), "
-    f"p95=otel_histogram_percentile($raw, 95), "
-    f"p99=otel_histogram_percentile($raw, 99)"
-)
-
-# --- SRE Tier-A queries (verified aggregates: countif/avg/max/min all confirmed in Berserk) ---
-Q_SRE_ERROR_RATE = (
-    f"{T} | where isnotnull(body) | where severity_text == 'ERROR' "
-    f"| make-series errors=count() default=0 on timestamp step 1m "
-    f"by service=tostring(resource['service.name']) | take 120"
-)
-Q_SRE_HOST_HEADROOM = (
-    f"{T} | where metric_name in ('system.cpu.load_average.1m', 'system.memory.usage') "
-    f"| extend val = iff(metric_name == 'system.memory.usage', value / 1073741824.0, value), "
-    f"unit = iff(metric_name == 'system.memory.usage', 'GB', 'load_avg') "
-    f"| where metric_name == 'system.cpu.load_average.1m' or attributes['state'] == 'used' "
-    f"| summarize samples=count(), avg_value=avg(val) "
-    f"by host=tostring(resource['host.name']), metric=tostring(metric_name), unit "
-    f"| sort by host asc, metric asc"
-)
-Q_SRE_INGEST_HEALTH = (
-    f"{T} | where metric_name in ('bzrk.nursery.ingest_lag_seconds', 'bzrk.ingest.data_dropped') "
-    f"| summarize samples=count(), avg_value=avg(value), max_value=max(value), last_seen=max(timestamp) "
-    f"by host=tostring(resource['host.name']), metric=tostring(metric_name) "
-    f"| sort by host asc, metric asc"
-)
-Q_SRE_TOP_ERRORS = (
-    f"{T} | where isnotnull(body) | where severity_text == 'ERROR' "
-    f"| summarize hits=count(), last_seen=max(timestamp), "
-    f"example=substring(min(tostring(body)), 0, 240) "
-    f"by service=tostring(resource['service.name']), template=extract_log_template(tostring(body)) "
-    f"| sort by hits desc | take 40"
-)
-
-# --- SOC Tier-A queries ---
-Q_SOC_HIGH_SEV = (
-    f"{T} | where isnotnull(body) | where severity_text in ('CRITICAL', 'FATAL', 'ERROR') "
-    f"| project timestamp, severity_text, service=tostring(resource['service.name']), "
-    f"body=substring(tostring(body), 0, 240) "
-    f"| tail 60"
-)
-Q_SOC_LOG_SPIKE = (
-    f"{T} | where isnotnull(body) "
-    f"| make-series hits=count() default=0 on timestamp step 1m "
-    f"by service=tostring(resource['service.name']) | take 60"
-)
-
-
-def q_soc_log_spike_for_service(service):
-    """investigate_error_rate-only variant of Q_SOC_LOG_SPIKE, scoped to one
-    service before make-series groups by service (issue #24 Codex review,
-    P2, 2026-08-28): the unscoped query's `take 60` is an unsorted cap on
-    the grouped series, so past 60 distinct services the target service's
-    own series can be dropped before investigation.py's Python-side lookup
-    ever sees it, producing a false "no log-volume data" halt. `service`
-    must already be validated by _valid_interpolated_name at the call
-    site."""
-    return (
-        f"{T} | where isnotnull(body) "
-        f"| where resource['service.name'] == '{service}' "
-        f"| make-series hits=count() default=0 on timestamp step 1m "
-        f"by service=tostring(resource['service.name']) | take 60"
-    )
-
-
-Q_SOC_NEW_SERVICES = (
-    f"{T} | summarize first_seen=min(timestamp), last_seen=max(timestamp), events=count() "
-    f"by service=tostring(resource['service.name']) "
-    f"| sort by first_seen desc | take 40"
-)
-Q_SOC_REPEATED_ERRORS = (
-    f"{T} | where isnotnull(body) | where severity_text == 'ERROR' "
-    f"| summarize hits=count(), last_seen=max(timestamp), "
-    f"example=substring(min(tostring(body)), 0, 240) "
-    f"by template=extract_log_template(tostring(body)) "
-    f"| where hits > 5 | sort by hits desc | take 40"
-)
-
-# --- Trace tools (span-level latency and error triage) ---
-# Live-verified 2026-07-17 against a real Berserk deployment (see the "Trace
-# tools" section in README.md). The field names guessed when this was first
-# written -- trace_id/span_id/
-# parent_span_id/span_name/duration/status_code -- were all confirmed correct
-# by analogy with this table's `<signal>_name` convention. Two real bugs were
-# caught by that live run and are fixed below:
-#   1. `duration` is a *dynamic*-typed column -- Berserk's KQL rejects sorting
-#      a dynamic value directly ("Cannot sort by a dynamic value"). Needs an
-#      explicit toint(duration) cast first.
-#   2. A trace_id's rows aren't all spans -- other correlated telemetry (seen
-#      live: a log row) shares the same trace_id/span_id but has a null
-#      span_name. Sorting by `timestamp` (an ingest-adjacent field) also gave
-#      child-before-parent ordering on a real 2-span trace; `start_time` sorts
-#      correctly. q_trace_analyze now filters to isnotnull(span_name) and
-#      sorts by start_time.
-#   3. (BUG-006, 2026-07-18 security review) Q_TRACE_FIND_SLOW had the same
-#      correlated-non-span-row exposure as (2) above but never got the same
-#      isnotnull(span_name) guard -- a log row sharing a trace_id can have an
-#      empty parent_span_id too (isempty() matches null), so it could surface
-#      as a fake "root span" candidate. Added the same guard here.
-Q_TRACE_FIND_SLOW = (
-    f"{T} | where isnotnull(trace_id) | where isnotnull(span_name) "
-    f"| where isempty(parent_span_id) "
-    f"| extend dur=toint(duration) "
-    f"| where isnotnull(dur) and dur >= 0 "
-    f"| project trace_id, span_name, dur, timestamp, "
-    f"service=tostring(resource['service.name']) "
-    f"| sort by dur desc | take 10"
-)
-Q_TRACE_FIND_ERRORS = (
-    f"{T} | where isnotnull(trace_id) | where status_code == 'ERROR' "
-    f"| project trace_id, span_name, timestamp, "
-    f"service=tostring(resource['service.name']) "
-    f"| tail 20"
-)
-
-
-def q_trace_find_errors_for_service(service):
-    """investigate_error_rate-only variant of Q_TRACE_FIND_ERRORS, scoped to
-    one service and collapsed to one row per trace_id before the `take`
-    cap runs. `service` must already be validated by
-    _valid_interpolated_name at the call site.
-
-    Three Codex review fixes are folded into this query (2026-08-28):
-    round 1 (P1) -- the original unscoped query's `tail 20` is global
-    across every service, so a service whose failing spans aren't among
-    the latest 20 error spans overall gets silently dropped before
-    investigation.py's Python-side filter ever sees them, producing a
-    false "no failing traces" verdict. Scoping by service here fixes
-    that. Round 2 (P2) -- capping *raw spans* (even service-scoped) before
-    grouping by trace_id still undercounts: if one trace_id contributes
-    most of the 20 rows (e.g. several retried spans), older distinct
-    traces are pushed out of the window and never counted, even though
-    investigation.py's own dedup only sees what's left after the cap.
-    Grouping by trace_id in KQL, before `take`, makes the cap apply to
-    distinct traces instead of raw spans. Round 3 (P2) -- `summarize`
-    doesn't preserve input row order, so the round-2 fix's unsorted
-    `take 20` after grouping returned an arbitrary subset of traces
-    instead of the most recent ones, regressing the recency behavior the
-    original `tail 20` gave for free. Sorting by the aggregated
-    `timestamp` descending before the cap restores that."""
-    return (
-        f"{T} | where isnotnull(trace_id) | where status_code == 'ERROR' "
-        f"| where resource['service.name'] == '{service}' "
-        f"| summarize span_name=take_any(span_name), timestamp=max(timestamp) "
-        f"by trace_id, service=tostring(resource['service.name']) "
-        f"| sort by timestamp desc | take 20"
-    )
-
-
-def q_trace_analyze(trace_id: str) -> str:
-    return (
-        f"{T} | where trace_id == '{trace_id}' | where isnotnull(span_name) "
-        f"| project span_name, start_time, dur=toint(duration), span_id, parent_span_id, "
-        f"service=tostring(resource['service.name']), status_code "
-        f"| sort by start_time asc"
-    )
-
-
-def q_trace_logs(trace_id: str) -> str:
-    return (
-        f"{T} | where trace_id == '{trace_id}' | where isnotnull(body) "
-        f"| project timestamp, severity_text, "
-        f"service=tostring(resource['service.name']), "
-        f"body=substring(tostring(body), 0, 200) "
-        f"| sort by timestamp asc"
-    )
-
-
-def q_sre_service_health(svc: str) -> str:
-    return (
-        f"{T} | where resource['service.name'] == '{svc}' "
-        f"| summarize total=count(), logs=countif(isnotnull(body)), "
-        f"metrics=countif(isnotnull(metric_name)), errors=countif(severity_text == 'ERROR'), "
-        f"last_seen=max(timestamp)"
-    )
-
-
-def q_soc_timeline(svc: str) -> str:
-    return (
-        f"{T} | where resource['service.name'] == '{svc}' "
-        f"| project timestamp, severity_text, metric_name, body=substring(tostring(body), 0, 200) "
-        f"| tail 100"
-    )
-
-
-def q_discover_sample(service=None):
-    """Sample structural fields without exporting raw telemetry values."""
-    filt = f"| where resource['service.name'] == '{service}' " if service else ""
-    return (
-        f"{T} {filt}| take 3 "
-        f"| project resource_keys=bag_keys(resource), "
-        f"attribute_keys=bag_keys(attributes), metric_name, "
-        f"has_body=isnotempty(tostring(body)), "
-        f"has_metric=isnotnull(metric_name), has_severity=isnotnull(severity_text)"
-    )
-
-
-def q_discover_fieldstats(service=None):
-    """Bounded dynamic-field inventory for schema discovery.
-
-    ``fieldstats`` reports field type, cardinality, and representative values
-    without exporting the raw resource bag. Global discovery uses depth 1 to
-    limit scan cost; a selective service filter permits depth 2. Keep the row
-    sample separate so callers can inspect value shape without widening the
-    inventory result.
-    """
-    filt = f"| where resource['service.name'] == '{service}' " if service else ""
-    depth = 2 if service else 1
-    return f"{T} {filt}| fieldstats resource with limit=50 depth={depth}"
-
-
-def q_cc_recent(agent="claude-code"):
-    cc = _service_filter(agent)
-    return (
-        f"{cc} | tail 60 | project ts=timestamp, typ=tostring(attributes['claude.type']), "
-        f"role=tostring(attributes['claude.message_role']), "
-        f"model=tostring(attributes['claude.message_model']), "
-        f"tools=tostring(attributes['claude.tool_names']), "
-        f"err=tostring(attributes['claude.error'])"
-    )
-
-
-def q_cc_sessions(agent="claude-code"):
-    cc = _service_filter(agent)
-    return (
-        f"{cc} | summarize events=count(), first=min(timestamp), last=max(timestamp), "
-        f"assistant_turns=countif(tostring(attributes['claude.type'])=='assistant'), "
-        f"tool_turns=countif(isnotempty(tostring(attributes['claude.tool_names']))), "
-        f"errors=countif(tostring(attributes['claude.error'])=='true') "
-        f"by session=tostring(attributes['claude.session_id']) | sort by last desc | take 40"
-    )
-
-
-def q_cc_tools(agent="claude-code"):
-    cc = _service_filter(agent)
-    return (
-        f"{cc} | where isnotempty(tostring(attributes['claude.tool_names'])) "
-        f"| mv-expand t=split(tostring(attributes['claude.tool_names']), ',') "
-        f"| summarize uses=count() by tool=tostring(t) | sort by uses desc | take 40"
-    )
-
-
-def q_cc_errors(agent="claude-code"):
-    cc = _service_filter(agent)
-    return (
-        f"{cc} | where tostring(attributes['claude.error'])=='true' "
-        f"| tail 40 | project ts=timestamp, typ=tostring(attributes['claude.type']), "
-        f"tools=tostring(attributes['claude.tool_names']), "
-        f"body=substring(tostring(body),0,2000)"
-    )
-
-
-def q_logs(svc: str) -> str:
-    return (
-        f"{T} | where isnotnull(body) | where resource['service.name'] == '{svc}' "
-        f"| project timestamp, severity_text, body=substring(tostring(body), 0, 500) "
-        f"| tail 50"
-    )
-
-
-def q_cc_search(term: str, agent="claude-code") -> str:
-    cc = _service_filter(agent)
-    return (
-        f"{cc} | where tostring(body) contains '{term}' "
-        f"| tail 40 | project ts=timestamp, typ=tostring(attributes['claude.type']), "
-        f"model=tostring(attributes['claude.message_model']), "
-        f"tools=tostring(attributes['claude.tool_names']), "
-        f"body=substring(tostring(body),0,2000)"
-    )
-
-
-MAX_INTERPOLATED_NAME_CHARS = 128
-MAX_TRACE_ID_CHARS = 64
-MAX_SEARCH_TERM_CHARS = 500
-_SERVICE_RE = re.compile(r"[A-Za-z0-9._-]+")
-_MODEL_ID_RE = re.compile(r"[A-Za-z0-9._/-]+")
-_TRACE_ID_RE = re.compile(r"[A-Za-z0-9]+")
-_TEXT_GUARD_RE = re.compile(r"['\"|\\`\x00-\x1f\x7f]")
-_FORECAST_METRICS = frozenset(
-    {
-        "system.memory.usage",
-        "system.filesystem.usage",
-        "system.disk.io",
-    }
-)
-
-
-def _valid_interpolated_name(value, max_chars=MAX_INTERPOLATED_NAME_CHARS):
-    text = str(value or "")
-    return len(text) <= max_chars and bool(_SERVICE_RE.fullmatch(text))
-
-
-def _valid_model_id(value, max_chars=MAX_INTERPOLATED_NAME_CHARS):
-    """Model IDs are vendor/model (deepseek/deepseek-v4-flash), so they need
-    the slash that _SERVICE_RE deliberately excludes. Everything else stays
-    as strict: no quotes, spaces, backslashes, or KQL metacharacters, so the
-    value remains safe to interpolate into a query string."""
-    text = str(value or "")
-    return len(text) <= max_chars and bool(_MODEL_ID_RE.fullmatch(text))
-
-
-def q_detect_anomalies(service=None):
-    filt = ""
-    if service:
-        filt = f"| where resource['service.name'] == '{service}' "
-    return (
-        f"{T} {filt}| make-series events=count() default=0 on timestamp step 5m "
-        f"by service=tostring(resource['service.name']) "
-        f"| extend (anomalies, score, baseline)=series_decompose_anomalies(events) "
-        f"| take 20"
-    )
-
-
-def q_forecast_capacity(metric, host=None):
-    filt = f"| where resource['host.name'] == '{host}' " if host else ""
-    state = "| where attributes['state'] == 'used' " if metric == "system.memory.usage" else ""
-    return (
-        f"{T} | where metric_name == '{metric}' {state}{filt}"
-        f"| make-series value=avg(value) default=0 on timestamp step 1h "
-        f"by host=tostring(resource['host.name']) "
-        f"| extend fit=series_fit_line(value) | take 20"
-    )
-
-
-def q_find_similar(description, service=None, k=10):
-    filt = f"| where resource['service.name'] == '{service}' " if service else ""
-    return f'{T} {filt}| where isnotnull(body) | top {k} by body similarto "{description}"'
-
-
-# Legacy fallback only: pre-existing bzrk builds that reject --json return
-# plain table text from bzrk_search_json's fallback, where a `_score` column
-# renders as a single line ("_score   0.83") immediately adjacent to its
-# value -- unlike --json's Tables/schema/rows shape, where the column name
-# and its value are never textually adjacent (see _find_similar_has_real_score).
-_FIND_SIMILAR_SCORE_TABLE_RE = re.compile(r"_score\s+(-?[1-9]\d*(?:\.\d+)?|0?\.\d*[1-9]\d*)")
-
-
-def _find_similar_has_real_score(out):
-    """True if a genuinely non-zero `_score` value is present. bzrk's real
-    --json output is the Kusto-style {"Tables": [{"schema": {"columns":
-    [...]}, "rows": [[...]]}]} shape (confirmed live 2026-07-17, see
-    agent_analytics._json_records) -- rows are positional arrays zipped
-    against column order, so the column name "_score" and its value are
-    never textually adjacent and can't be found by pattern-matching the raw
-    text. Reuses the same column/row-zip helper agent_analytics already
-    validates against real output, rather than re-parsing it here. Falls
-    back to the table-adjacency regex only when `out` isn't parseable JSON
-    at all, i.e. bzrk_search_json degraded to its legacy table fallback."""
-    whole = str(out or "").strip()
-    if not whole or whole[0] not in "[{":
-        return bool(_FIND_SIMILAR_SCORE_TABLE_RE.search(out))
-    try:
-        records = agent_analytics._json_records(json.loads(whole))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return bool(_FIND_SIMILAR_SCORE_TABLE_RE.search(out))
-    if records is None:
-        return bool(_FIND_SIMILAR_SCORE_TABLE_RE.search(out))
-    for row in records:
-        if not isinstance(row, dict) or "_score" not in row:
-            continue
-        try:
-            if float(row["_score"]) != 0:
-                return True
-        except (TypeError, ValueError):
-            continue
-    return False
-
-
-def _forecast_fit_rows(text):
-    """Extract native ``series_fit_line`` coefficients from bzrk JSON.
-
-    Berserk returns the fit as a dynamic array whose first two values are
-    R² and slope (the same shape consumed by :mod:`agent_analytics`).  Keep
-    this parser deliberately conservative: an unrecognised renderer is not
-    treated as a reliable forecast.
-    """
-    whole = str(text or "").strip()
-    if not whole or whole == "(no rows)" or whole[0] not in "[{":
-        return []
-    try:
-        records = agent_analytics._json_records(json.loads(whole))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return []
-    if not records:
-        return []
-    parsed = []
-    for row in records:
-        if not isinstance(row, dict):
-            continue
-        fit = row.get("fit")
-        if not isinstance(fit, list) or len(fit) < 2:
-            continue
-        try:
-            r2, slope = float(fit[0]), float(fit[1])
-        except (TypeError, ValueError):
-            continue
-        parsed.append({"host": str(row.get("host") or "(all hosts)"), "r2": r2, "slope": slope})
-    return parsed
 
 
 # ---------- bzrk invocation ----------
@@ -935,7 +457,7 @@ def bzrk_search_json(kql, since):
 
 def do_schema():
     out1, e1 = run_bzrk(["-P", bm_config.PROFILE, "search", ".show tables"])
-    out2, e2 = run_bzrk(["-P", bm_config.PROFILE, "search", f"{T} | getschema", "--since", "1h ago"])
+    out2, e2 = run_bzrk(["-P", bm_config.PROFILE, "search", f"{bm_queries.T} | getschema", "--since", "1h ago"])
     text = f"== tables ==\n{bm_fencing._fence_untrusted(out1)}\n== columns ==\n{bm_fencing._fence_untrusted(out2)}"
     return text, (e1 or e2)
 
@@ -954,11 +476,15 @@ def _schema_fetcher():
     were real tables/columns/fields/sample data.
     """
     out_tables, e_tables = run_bzrk(["-P", bm_config.PROFILE, "search", ".show tables"])
-    out_schema, e_schema = run_bzrk(["-P", bm_config.PROFILE, "search", f"{T} | getschema", "--since", "1h ago"])
-    out_fields, e_fields = run_bzrk(
-        ["-P", bm_config.PROFILE, "search", q_discover_fieldstats(None), "--since", "1h ago"]
+    out_schema, e_schema = run_bzrk(
+        ["-P", bm_config.PROFILE, "search", f"{bm_queries.T} | getschema", "--since", "1h ago"]
     )
-    out_sample, e_sample = run_bzrk(["-P", bm_config.PROFILE, "search", q_discover_sample(None), "--since", "1h ago"])
+    out_fields, e_fields = run_bzrk(
+        ["-P", bm_config.PROFILE, "search", bm_queries.q_discover_fieldstats(None), "--since", "1h ago"]
+    )
+    out_sample, e_sample = run_bzrk(
+        ["-P", bm_config.PROFILE, "search", bm_queries.q_discover_sample(None), "--since", "1h ago"]
+    )
     failed = [
         name
         for name, is_err in (
@@ -1399,10 +925,10 @@ agent_analytics.configure(
 investigation.configure(
     bzrk_search=bzrk_search_json,
     since_hours=bm_config._since_hours,
-    q_errors=Q_ERRORS,
-    q_soc_log_spike=q_soc_log_spike_for_service,
-    q_trace_find_errors=q_trace_find_errors_for_service,
-    q_services=Q_SERVICES,
+    q_errors=bm_queries.Q_ERRORS,
+    q_soc_log_spike=bm_queries.q_soc_log_spike_for_service,
+    q_trace_find_errors=bm_queries.q_trace_find_errors_for_service,
+    q_services=bm_queries.Q_SERVICES,
 )
 
 
@@ -1442,8 +968,8 @@ secret_scan.configure(
     table=bm_config.TABLE,
 )
 ingestion_advisor.configure(
-    list_services=lambda since: bzrk_search(Q_SERVICES, since),
-    list_metrics=lambda since: bzrk_search(Q_METRICS, since),
+    list_services=lambda since: bzrk_search(bm_queries.Q_SERVICES, since),
+    list_metrics=lambda since: bzrk_search(bm_queries.Q_METRICS, since),
 )
 
 
@@ -1478,7 +1004,7 @@ def _agent_prop():
         "agent": {
             "type": "string",
             "description": "Which ingesting agent's activity to query. Defaults to Claude Code.",
-            "enum": sorted(_AGENT_SERVICE_NAMES.keys()),
+            "enum": sorted(bm_queries._AGENT_SERVICE_NAMES.keys()),
             "default": "claude-code",
         }
     }
@@ -1568,26 +1094,26 @@ def _canonloom_call(path: str, method: str = "GET", body=None):
 # Each entry: name -> (kql, default_since). Tools requiring user input or extra
 # calls (logs, search, cc_search, schema) are handled explicitly in handle_call.
 SIMPLE = {
-    "list_containers": (Q_CONTAINERS, "15m ago"),
-    "top_cpu": (Q_CPU, "15m ago"),
-    "top_memory": (Q_MEM, "15m ago"),
-    "errors_by_service": (Q_ERRORS, "1h ago"),
-    "list_services": (Q_SERVICES, "1h ago"),
-    "list_hosts": (Q_HOSTS, "1h ago"),
-    "host_cpu": (Q_HOST_CPU, "30m ago"),
-    "host_memory": (Q_HOST_MEM, "30m ago"),
-    "container_hosts": (Q_CONTAINER_HOSTS, "1h ago"),
-    "list_metrics": (Q_METRICS, "1h ago"),
-    "bzrk_query_perf": (Q_QUERY_PERF, "1h ago"),
-    "sre_error_rate": (Q_SRE_ERROR_RATE, "1h ago"),
-    "sre_host_headroom": (Q_SRE_HOST_HEADROOM, "30m ago"),
-    "sre_ingest_health": (Q_SRE_INGEST_HEALTH, "1h ago"),
-    "sre_top_error_messages": (Q_SRE_TOP_ERRORS, "1h ago"),
-    "soc_high_severity_logs": (Q_SOC_HIGH_SEV, "1h ago"),
-    "soc_log_spike": (Q_SOC_LOG_SPIKE, "1h ago"),
-    "soc_repeated_errors": (Q_SOC_REPEATED_ERRORS, "6h ago"),
-    "trace_find_slow": (Q_TRACE_FIND_SLOW, "1h ago"),
-    "trace_find_errors": (Q_TRACE_FIND_ERRORS, "1h ago"),
+    "list_containers": (bm_queries.Q_CONTAINERS, "15m ago"),
+    "top_cpu": (bm_queries.Q_CPU, "15m ago"),
+    "top_memory": (bm_queries.Q_MEM, "15m ago"),
+    "errors_by_service": (bm_queries.Q_ERRORS, "1h ago"),
+    "list_services": (bm_queries.Q_SERVICES, "1h ago"),
+    "list_hosts": (bm_queries.Q_HOSTS, "1h ago"),
+    "host_cpu": (bm_queries.Q_HOST_CPU, "30m ago"),
+    "host_memory": (bm_queries.Q_HOST_MEM, "30m ago"),
+    "container_hosts": (bm_queries.Q_CONTAINER_HOSTS, "1h ago"),
+    "list_metrics": (bm_queries.Q_METRICS, "1h ago"),
+    "bzrk_query_perf": (bm_queries.Q_QUERY_PERF, "1h ago"),
+    "sre_error_rate": (bm_queries.Q_SRE_ERROR_RATE, "1h ago"),
+    "sre_host_headroom": (bm_queries.Q_SRE_HOST_HEADROOM, "30m ago"),
+    "sre_ingest_health": (bm_queries.Q_SRE_INGEST_HEALTH, "1h ago"),
+    "sre_top_error_messages": (bm_queries.Q_SRE_TOP_ERRORS, "1h ago"),
+    "soc_high_severity_logs": (bm_queries.Q_SOC_HIGH_SEV, "1h ago"),
+    "soc_log_spike": (bm_queries.Q_SOC_LOG_SPIKE, "1h ago"),
+    "soc_repeated_errors": (bm_queries.Q_SOC_REPEATED_ERRORS, "6h ago"),
+    "trace_find_slow": (bm_queries.Q_TRACE_FIND_SLOW, "1h ago"),
+    "trace_find_errors": (bm_queries.Q_TRACE_FIND_ERRORS, "1h ago"),
 }
 
 # SIMPLE tools whose fixed query derives output from `body`, even though
@@ -1611,10 +1137,10 @@ _SIMPLE_JSON_TOOLS = {
 # "claude-code"), so their query is resolved lazily via a callable rather
 # than the fixed string every other SIMPLE tool uses.
 _AGENT_AWARE_SIMPLE = {
-    "claude_recent": (q_cc_recent, "1h ago"),
-    "claude_sessions": (q_cc_sessions, "6h ago"),
-    "claude_tools": (q_cc_tools, "6h ago"),
-    "claude_errors": (q_cc_errors, "6h ago"),
+    "claude_recent": (bm_queries.q_cc_recent, "1h ago"),
+    "claude_sessions": (bm_queries.q_cc_sessions, "6h ago"),
+    "claude_tools": (bm_queries.q_cc_tools, "6h ago"),
+    "claude_errors": (bm_queries.q_cc_errors, "6h ago"),
 }
 
 _DEFAULT_EMPTY_NEXT_STEP = "Try a wider window with since='24h ago'."
@@ -1704,7 +1230,7 @@ def _derive_tool_budget_multipliers(simple_queries=None, include_discovery=True)
     """Derive per-tool budgets from the same static validator used by the gate."""
     queries = dict(SIMPLE if simple_queries is None else simple_queries)
     if include_discovery:
-        queries["discover_schema"] = (q_discover_fieldstats(), "1h ago")
+        queries["discover_schema"] = (bm_queries.q_discover_fieldstats(), "1h ago")
     multipliers = {}
     for tool_name, (kql, since) in queries.items():
         report = kql_validation.validate_kql_static(
@@ -1729,18 +1255,18 @@ def _tool_budget_multiplier(tool_name):
 
 TOOLS = tool_catalog.build_tools(
     TABLE=bm_config.TABLE,
-    MAX_INTERPOLATED_NAME_CHARS=MAX_INTERPOLATED_NAME_CHARS,
-    MAX_SEARCH_TERM_CHARS=MAX_SEARCH_TERM_CHARS,
-    MAX_TRACE_ID_CHARS=MAX_TRACE_ID_CHARS,
-    _FORECAST_METRICS=_FORECAST_METRICS,
+    MAX_INTERPOLATED_NAME_CHARS=bm_queries.MAX_INTERPOLATED_NAME_CHARS,
+    MAX_SEARCH_TERM_CHARS=bm_queries.MAX_SEARCH_TERM_CHARS,
+    MAX_TRACE_ID_CHARS=bm_queries.MAX_TRACE_ID_CHARS,
+    _FORECAST_METRICS=bm_queries._FORECAST_METRICS,
     _agent_prop=_agent_prop,
     _since=_since,
 )
 
 MGMT_TOOLS = tool_catalog.build_mgmt_tools(
     TABLE=bm_config.TABLE,
-    MAX_INTERPOLATED_NAME_CHARS=MAX_INTERPOLATED_NAME_CHARS,
-    MAX_SEARCH_TERM_CHARS=MAX_SEARCH_TERM_CHARS,
+    MAX_INTERPOLATED_NAME_CHARS=bm_queries.MAX_INTERPOLATED_NAME_CHARS,
+    MAX_SEARCH_TERM_CHARS=bm_queries.MAX_SEARCH_TERM_CHARS,
     _since=_since,
 )
 
@@ -2044,7 +1570,7 @@ def _handle_discovery(name, arguments):
         if bool(service) == bool(metric):
             return "request_discovery needs exactly one of 'service' or 'metric'.", True
         target = service or metric
-        if not _valid_interpolated_name(target):
+        if not bm_queries._valid_interpolated_name(target):
             return "invalid source name (allowed: letters, digits, '.', '_', '-')", True
         kind = "service" if service else "metric"
         since = arguments.get("since") or "1h ago"
@@ -2053,9 +1579,9 @@ def _handle_discovery(name, arguments):
         # service name. `target` is allowlist-validated above, so it is safe
         # to interpolate into the single-quoted KQL literal.
         if kind == "service":
-            check_kql = f"{T} | where resource['service.name'] == '{target}' | summarize n=count()"
+            check_kql = f"{bm_queries.T} | where resource['service.name'] == '{target}' | summarize n=count()"
         else:
-            check_kql = f"{T} | where metric_name == '{target}' | summarize n=count()"
+            check_kql = f"{bm_queries.T} | where metric_name == '{target}' | summarize n=count()"
         visible, is_err = bzrk_search(check_kql, since)
         if is_err:
             return "Could not verify source visibility:\n" + bm_fencing._fence_untrusted(visible), True
@@ -2147,7 +1673,7 @@ def _handle_parser_core(name, arguments):
         if bool(service) == bool(metric):
             return "generate_parser needs exactly one of 'service' or 'metric'.", True
         target = service or metric
-        if not _valid_interpolated_name(target):
+        if not bm_queries._valid_interpolated_name(target):
             return "invalid source name (allowed: letters, digits, '.', '_', '-')", True
         kind = "service" if service else "metric"
         role_hint = bm_config.normalize_roles(arguments.get("role_hint"))
@@ -2277,10 +1803,10 @@ def _handle_diagnostic_tools(name, arguments):
     """Diagnostic tools: anomalies, investigation, forecast, drift, similarity. Returns (text, is_error) or None."""
     if name == "detect_anomalies":
         service = str(arguments.get("service") or "").strip()
-        if service and not _valid_interpolated_name(service):
+        if service and not bm_queries._valid_interpolated_name(service):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "6h ago"
-        out, err = bzrk_search(q_detect_anomalies(service or None), since)
+        out, err = bzrk_search(bm_queries.q_detect_anomalies(service or None), since)
         if err:
             return bm_fencing._fence_untrusted(out), True
         if not out or out.strip() == "(no rows)":
@@ -2293,7 +1819,7 @@ def _handle_diagnostic_tools(name, arguments):
     if name == "investigate_error_rate":
         node = str(arguments.get("node") or "start").strip()
         service = str(arguments.get("service") or "").strip()
-        if service and not _valid_interpolated_name(service):
+        if service and not bm_queries._valid_interpolated_name(service):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         service = service or None
         since = arguments.get("since") or "1h ago"
@@ -2329,21 +1855,21 @@ def _handle_diagnostic_tools(name, arguments):
 
     if name == "forecast_capacity":
         metric = str(arguments.get("metric") or "").strip()
-        if metric not in _FORECAST_METRICS:
+        if metric not in bm_queries._FORECAST_METRICS:
             return (
                 "metric is not allowlisted; use system.memory.usage, system.filesystem.usage, or system.disk.io",
                 True,
             )
         host = str(arguments.get("host") or "").strip()
-        if host and not _valid_interpolated_name(host):
+        if host and not bm_queries._valid_interpolated_name(host):
             return "invalid host name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "7d ago"
-        out, err = bzrk_search_json(q_forecast_capacity(metric, host or None), since)
+        out, err = bzrk_search_json(bm_queries.q_forecast_capacity(metric, host or None), since)
         if err:
             return bm_fencing._fence_untrusted(out), True
         if not out or out.strip() == "(no rows)":
             return f"No {metric} data found for forecast window {since}.", False
-        fits = _forecast_fit_rows(out)
+        fits = bm_queries._forecast_fit_rows(out)
         if fits:
             lines = []
             for fit in fits:
@@ -2378,7 +1904,7 @@ def _handle_model_drift(name, arguments):
 
     if name == "model_drift_check":
         model = str(arguments.get("model") or "").strip()
-        if model and not _valid_model_id(model):
+        if model and not bm_queries._valid_model_id(model):
             return "invalid model id (allowed: letters, digits, '.', '_', '-', '/')", True
         since = arguments.get("since") or "30d ago"
         out, err = bzrk_search_json(model_drift.series_kql(model or None), since)
@@ -2408,7 +1934,7 @@ def _handle_model_drift(name, arguments):
 
     if name == "model_drift_history":
         model = str(arguments.get("model") or "").strip()
-        if not model or not _valid_model_id(model):
+        if not model or not bm_queries._valid_model_id(model):
             return "model is required (allowed: letters, digits, '.', '_', '-', '/')", True
         since = arguments.get("since") or "30d ago"
         out, err = bzrk_search_json(model_drift.series_kql(model), since)
@@ -2452,17 +1978,17 @@ def _handle_drift_and_similarity(name, arguments):
             return "missing required 'description'", True
         if len(description) > 500:
             return "description is too long (maximum 500 characters)", True
-        if _TEXT_GUARD_RE.search(description):
+        if bm_queries._TEXT_GUARD_RE.search(description):
             return "description may not contain quotes, pipe, backslash, or backtick", True
         service = str(arguments.get("service") or "").strip()
-        if service and not _valid_interpolated_name(service):
+        if service and not bm_queries._valid_interpolated_name(service):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         try:
             k = max(1, min(50, int(arguments.get("k", 10))))
         except (TypeError, ValueError):
             return "k must be an integer between 1 and 50", True
         since = arguments.get("since") or "6h ago"
-        out, err = bzrk_search_json(q_find_similar(description, service or None, k), since)
+        out, err = bzrk_search_json(bm_queries.q_find_similar(description, service or None, k), since)
         if err:
             if "similarto" in str(out).lower() or "semantic" in str(out).lower():
                 return (
@@ -2472,7 +1998,7 @@ def _handle_drift_and_similarity(name, arguments):
                     False,
                 )
             return bm_fencing._fence_untrusted(out), True
-        if "_score" in out and not _find_similar_has_real_score(out):
+        if "_score" in out and not bm_queries._find_similar_has_real_score(out):
             return (
                 "Semantic indexing is not enabled on this Berserk cluster — falling "
                 "back is not possible for meaning-based search; use search with "
@@ -2503,12 +2029,12 @@ def _handle_query_tools(name, arguments):
         return do_schema()
     if name == "discover_schema":
         svc = arguments.get("service")
-        if svc and not _valid_interpolated_name(svc):
+        if svc and not bm_queries._valid_interpolated_name(svc):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "1h ago"
         svc_str = str(svc) if svc else None
-        out1, e1 = bzrk_search(q_discover_fieldstats(svc_str), since)
-        out2, e2 = bzrk_search(q_discover_sample(svc_str), since)
+        out1, e1 = bzrk_search(bm_queries.q_discover_fieldstats(svc_str), since)
+        out2, e2 = bzrk_search(bm_queries.q_discover_sample(svc_str), since)
         fenced1 = bm_fencing._fence_untrusted(out1)
         fenced2 = bm_fencing._fence_untrusted(out2)
         return f"== resource fieldstats ==\n{fenced1}\n\n== sample rows ==\n{fenced2}", (e1 and e2)
@@ -2516,28 +2042,28 @@ def _handle_query_tools(name, arguments):
         svc = arguments.get("service")
         if not svc:
             return "missing required 'service'", True
-        if not _valid_interpolated_name(svc):
+        if not bm_queries._valid_interpolated_name(svc):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "1h ago"
-        out, err = bzrk_search_json(q_logs(str(svc)), since)
+        out, err = bzrk_search_json(bm_queries.q_logs(str(svc)), since)
         return bm_fencing._fence_untrusted(out), err
     if name == "sre_service_health":
         svc = arguments.get("service")
         if not svc:
             return "missing required 'service'", True
-        if not _valid_interpolated_name(svc):
+        if not bm_queries._valid_interpolated_name(svc):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "1h ago"
-        out, err = bzrk_search(q_sre_service_health(str(svc)), since)
+        out, err = bzrk_search(bm_queries.q_sre_service_health(str(svc)), since)
         return bm_fencing._fence_untrusted(out), err
     if name == "soc_timeline":
         svc = arguments.get("service")
         if not svc:
             return "missing required 'service'", True
-        if not _valid_interpolated_name(svc):
+        if not bm_queries._valid_interpolated_name(svc):
             return "invalid service name (allowed: letters, digits, '.', '_', '-')", True
         since = arguments.get("since") or "6h ago"
-        out, err = bzrk_search_json(q_soc_timeline(str(svc)), since)
+        out, err = bzrk_search_json(bm_queries.q_soc_timeline(str(svc)), since)
         return bm_fencing._fence_untrusted(out), err
     return _handle_search_tools(name, arguments)
 
@@ -2548,10 +2074,10 @@ def _handle_search_tools(name, arguments):
         trace_id = arguments.get("trace_id")
         if not trace_id:
             return "missing required 'trace_id'", True
-        if len(str(trace_id)) > MAX_TRACE_ID_CHARS or not _TRACE_ID_RE.fullmatch(str(trace_id)):
+        if len(str(trace_id)) > bm_queries.MAX_TRACE_ID_CHARS or not bm_queries._TRACE_ID_RE.fullmatch(str(trace_id)):
             return "invalid trace_id (allowed: letters and digits only)", True
-        out1, e1 = bzrk_search(q_trace_analyze(str(trace_id)), "30d ago")
-        out2, e2 = bzrk_search_json(q_trace_logs(str(trace_id)), "30d ago")
+        out1, e1 = bzrk_search(bm_queries.q_trace_analyze(str(trace_id)), "30d ago")
+        out2, e2 = bzrk_search_json(bm_queries.q_trace_logs(str(trace_id)), "30d ago")
         out1 = bm_fencing._fence_untrusted(out1)
         out2 = bm_fencing._fence_untrusted(out2)
         return f"== spans ==\n{out1}\n\n== correlated logs ==\n{out2}", (e1 and e2)
@@ -2578,8 +2104,8 @@ def _handle_search_tools(name, arguments):
         intent = arguments.get("intent")
         if not intent:
             return "missing required 'intent'", True
-        if len(str(intent)) > MAX_SEARCH_TERM_CHARS:
-            return f"intent is too long (maximum {MAX_SEARCH_TERM_CHARS} characters)", True
+        if len(str(intent)) > bm_queries.MAX_SEARCH_TERM_CHARS:
+            return f"intent is too long (maximum {bm_queries.MAX_SEARCH_TERM_CHARS} characters)", True
         visible = {t["name"]: t for t in TOOLS + MGMT_TOOLS if bm_config.tool_visible(t)}
         ranked = tool_discovery.search(_DISCOVERY_INDEX, str(intent), top_k=5)
         candidates = [visible[n] for n, _ in ranked if n in visible]
@@ -2599,13 +2125,13 @@ def _handle_search_tools(name, arguments):
         term = arguments.get("term")
         if not term:
             return "missing required 'term'", True
-        if len(str(term)) > MAX_SEARCH_TERM_CHARS:
-            return f"term is too long (maximum {MAX_SEARCH_TERM_CHARS} characters)", True
-        if _TEXT_GUARD_RE.search(str(term)):
+        if len(str(term)) > bm_queries.MAX_SEARCH_TERM_CHARS:
+            return f"term is too long (maximum {bm_queries.MAX_SEARCH_TERM_CHARS} characters)", True
+        if bm_queries._TEXT_GUARD_RE.search(str(term)):
             return "term may not contain quotes, pipe, backslash, or backtick", True
         since = arguments.get("since") or "6h ago"
         agent = arguments.get("agent") or "claude-code"
-        out, err = bzrk_search_json(q_cc_search(str(term), agent), since)
+        out, err = bzrk_search_json(bm_queries.q_cc_search(str(term), agent), since)
         return bm_fencing._fence_untrusted(out), err
     return None
 
@@ -2940,7 +2466,7 @@ def _handle_call_uncached(name, arguments):
 
     if name == "soc_new_services":
         since = arguments.get("since") or "24h ago"
-        out, err = bzrk_search(Q_SOC_NEW_SERVICES, since)
+        out, err = bzrk_search(bm_queries.Q_SOC_NEW_SERVICES, since)
         if err:
             return bm_fencing._fence_untrusted(out), True
         baseline = parser_factory.load_json_dict(parser_factory._known_sources_path())
