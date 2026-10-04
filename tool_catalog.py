@@ -1,10 +1,10 @@
 """The MCP tool catalog: static tool definitions, management tools and titles.
 
-Moved out of berserk_mcp.py unchanged. The definitions depend on a few runtime
-values (the configured table, input limits, schema helpers) that berserk_mcp
-owns, so they are built by functions that take those values as keyword
-arguments named as in berserk_mcp. This module imports nothing from berserk_mcp,
-so there is no import cycle.
+Moved out of the old berserk_mcp.py unchanged. The definitions depend on a few
+runtime values (the configured table, input limits, schema helpers) that the
+berserk_mcp package owns, so they are built by functions that take those values
+as keyword arguments. berserk_mcp/tools.py calls the builders. This module
+imports nothing from berserk_mcp, so there is no import cycle.
 """
 
 import agent_analytics  # noqa: F401  (referenced inside the TOOLS definitions)

@@ -46,6 +46,23 @@ def package_imports(path):
     return out
 
 
+def misaliased_imports(path):
+    """Line numbers of package imports not aliased exactly `bm_<module>`.
+
+    The semgrep sanitizer patterns trust the exact aliases `bm_fencing` and
+    `bm_tools`, so a near miss such as `bm_other` must be reported.
+    """
+    out = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and (node.module or "").startswith("berserk_mcp"):
+            for alias in node.names:
+                if alias.name in ("__version__", "_facade"):
+                    continue
+                if alias.asname != "bm_" + alias.name:
+                    out.append(node.lineno)
+    return out
+
+
 def relative_imports(path):
     """Line numbers of relative imports (`from . import x`, `from .m import x`)."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -186,17 +203,22 @@ class LayeringTest(unittest.TestCase):
         for layer, path in package_modules():
             if layer == "__main__":  # the entry point imports main itself
                 continue
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("berserk_mcp"):
-                    for alias in node.names:
-                        if alias.name in ("__version__", "_facade"):
-                            continue
-                        with self.subTest(module=str(path), line=node.lineno):
-                            self.assertTrue(
-                                (alias.asname or "").startswith("bm_"),
-                                f"{path.name}:{node.lineno}: import a package module as bm_<name>",
-                            )
+            with self.subTest(module=str(path)):
+                self.assertEqual(misaliased_imports(path), [], f"{path.name}: import a package module as bm_<name>")
+
+    def test_alias_check_requires_the_exact_bm_alias(self):
+        # Fail closed: `bm_other` for `fencing` must be reported, `bm_fencing` must not.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "probe.py"
+            path.write_text(
+                "from berserk_mcp import fencing as bm_other\n"
+                "from berserk_mcp import fencing as bm_fencing\n"
+                "from berserk_mcp import tools\n"
+                "from berserk_mcp.handlers import learning as bm_learning\n"
+                "from berserk_mcp.handlers import learning as bm_fencing\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(misaliased_imports(path), [1, 3, 5])
 
     def test_no_relative_imports(self):
         # `from .config import LIMIT` escapes both tests above, which only
