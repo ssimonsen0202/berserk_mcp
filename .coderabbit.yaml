@@ -19,7 +19,7 @@ reviews:
     - "!**/*.lock"
     - "!docs/releases/**"
   path_instructions:
-    - path: "berserk_mcp.py"
+    - path: "berserk_mcp/**/*.py"
       instructions: >
         This is the MCP server dispatch table and query layer. Flag: any
         f-string that interpolates a caller-controlled value into KQL

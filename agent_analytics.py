@@ -1,6 +1,6 @@
 """Agent-log analytics for Claude Code telemetry in Berserk.
 
-This module is stdlib-only and configured by berserk_mcp.py at import time.
+This module is stdlib-only and configured by berserk_mcp/learned.py at import time.
 It does not import berserk_mcp directly, which keeps tests simple and avoids
 cycles. The public functions return text suitable for MCP tool output.
 """

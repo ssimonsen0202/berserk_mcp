@@ -49,13 +49,13 @@ import os
 
 MIN_HISTORY = 4  # runs at one case-set/role/discovery combination before any verdict
 CONSECUTIVE_REQUIRED = 2  # degraded runs in a row before firing
-MIN_TREND_R2 = 0.6  # matches berserk_mcp.py:2913's forecastability floor
+MIN_TREND_R2 = 0.6  # matches the forecastability floor in berserk_mcp/handlers/diagnostics.py
 DEFAULT_NOISE_BAND = 0.02  # measured 2026-09-01, see module docstring
 MIN_RELIABLE_REPEATS = 3  # the calibration's own repeats value, see module docstring
 
 CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 
-# Matches berserk_mcp.py:142's TABLE constant. model_drift.py cannot import
+# Matches the TABLE constant in berserk_mcp/config.py. model_drift.py cannot import
 # berserk_mcp (berserk_mcp imports model_drift -- that would be circular),
 # so it reads the same environment variable directly instead of hardcoding
 # "default", which broke on any deployment that configures a different
@@ -136,7 +136,7 @@ def classify(series, noise_band=DEFAULT_NOISE_BAND, fingerprint_changed=None):
     gets correct behavior automatically. Explicit True/False (as this
     module's own tests use) always overrides the derivation -- this keeps
     the function testable in isolation while making the common, real call
-    path (berserk_mcp.py's two dispatcher branches, both of which called
+    path (the two callers, in berserk_mcp/handlers/diagnostics.py and berserk_mcp/cli.py, both of which called
     classify(series) with nothing else) correct without every caller
     having to remember to compute it. Found by Codex review (2026-09-02):
     neither caller passed it, so fingerprint_changed was always False in
@@ -245,7 +245,7 @@ class BzrkResultParseError(Exception):
     """bzrk_search_json returned output group_by_model could not parse as
     JSON -- most likely an older bzrk build without --json support,
     returning bzrk_search_json's documented plain aligned-table text
-    fallback instead (berserk_mcp.py:1536-1546).
+    fallback instead (berserk_mcp/runner.py).
 
     This must never be silently treated the same as a genuinely empty
     result. An earlier version of group_by_model caught the parse failure
@@ -266,7 +266,7 @@ def group_by_model(bzrk_json_text):
     this grouping is possible from one query covering every model.
 
     Reuses agent_analytics._json_records -- NOT a function of this name in
-    berserk_mcp.py, which has none; three other modules each carry their own
+    berserk_mcp, which has none; three other modules each carry their own
     copy (agent_analytics.py, ai_finops.py, secret_scan.py). Import from
     agent_analytics.py specifically, since model_drift.py already follows
     its precedent as a runtime analytics module. That function takes

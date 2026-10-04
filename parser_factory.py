@@ -4,13 +4,13 @@ Given a newly-detected Berserk source (a service or metric with no existing
 saved queries), this module profiles it, asks an LLM to author a small set
 of verified KQL queries for it, validates each by executing it against
 Berserk, and persists the survivors through the same learned-query store
-`berserk_mcp.py` already uses. Modeled on Microsoft's ASIM parser AI agent
+`berserk_mcp/learned.py` already uses. Modeled on Microsoft's ASIM parser AI agent
 for Sentinel (sample -> generate -> validate -> refine, capped at 5 cycles).
 
-Pure stdlib, matching berserk_mcp.py's zero-dependency constraint. LLM calls
+Pure stdlib, matching the berserk_mcp package's zero-dependency constraint. LLM calls
 use urllib.request directly (no `requests`).
 
-berserk_mcp.py calls `configure(...)` once at import time to hand over its
+berserk_mcp/learned.py calls `configure(...)` once at import time to hand over its
 callables (run_bzrk-backed `bzrk_search`, store helpers, TABLE, etc.) rather
 than this module importing berserk_mcp, which would create a cycle.
 """
