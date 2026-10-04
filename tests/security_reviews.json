@@ -21,7 +21,7 @@
     "fingerprint": "1faa4db641ac73c3",
     "reviewed": "2026-09-26",
     "by": "claude + codex review",
-    "note": "visibility first (hidden tool answers 'unknown tool'), then _unknown_argument_error rejects undeclared argument names before preflight, task creation and handle_call. Review 2026-09-26 P2 (docs/mcp-guidance-review-2026-09-26.md); reviewed by Codex, one P3 doc fix, no P1/P2. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). PENDING re-review in the package-split Codex Security reviews."
+    "note": "visibility first (hidden tool answers 'unknown tool'), then _unknown_argument_error rejects undeclared argument names before preflight, task creation and handle_call. Review 2026-09-26 P2 (docs/mcp-guidance-review-2026-09-26.md); reviewed by Codex, one P3 doc fix, no P1/P2. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). No Codex Security re-review of the move (usage limit). Checked by the AST pure-move comparison and a whole-branch Opus review on 2026-10-04."
   },
   "berserk_mcp.fencing:_fence_untrusted": {
     "fingerprint": "8e3b24a6f6cac18a",
@@ -105,7 +105,7 @@
     "fingerprint": "ebbc443283d47be0",
     "reviewed": "2026-09-26",
     "by": "claude + codex review",
-    "note": "rejects argument names the schema does not declare (protocol keys as_task/allow_expensive allowed); echoed names bounded to 5 x 64 chars. Review 2026-09-26 P2 (docs/mcp-guidance-review-2026-09-26.md); reviewed by Codex, one P3 doc fix, no P1/P2. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). PENDING re-review in the package-split Codex Security reviews."
+    "note": "rejects argument names the schema does not declare (protocol keys as_task/allow_expensive allowed); echoed names bounded to 5 x 64 chars. Review 2026-09-26 P2 (docs/mcp-guidance-review-2026-09-26.md); reviewed by Codex, one P3 doc fix, no P1/P2. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). No Codex Security re-review of the move (usage limit). Checked by the AST pure-move comparison and a whole-branch Opus review on 2026-10-04."
   },
   "_store:_open_dir_nofollow": {
     "fingerprint": "39e372604cf7bafa",
@@ -147,7 +147,7 @@
     "fingerprint": "72caf4c1b3f97cce",
     "reviewed": "2026-09-26",
     "by": "codex",
-    "note": "drains a refused, not-yet-authorised request body (Content-Length <= max_request_bytes) so Windows clients get the status, not a TCP reset. Absolute wall-clock deadline (_REFUSED_BODY_DRAIN_TIMEOUT), not an idle timeout, so a trickling client cannot hold the handler thread; previous socket timeout restored. v1.34.1, two Codex review passes. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). PENDING re-review in the package-split Codex Security reviews."
+    "note": "drains a refused, not-yet-authorised request body (Content-Length <= max_request_bytes) so Windows clients get the status, not a TCP reset. Absolute wall-clock deadline (_REFUSED_BODY_DRAIN_TIMEOUT), not an idle timeout, so a trickling client cannot hold the handler thread; previous socket timeout restored. v1.34.1, two Codex review passes. Package split (v1.37.0): moved or re-prefixed by scripts/split_move.py; the AST is unchanged apart from bm_* module prefixes (checked by the tool). No Codex Security re-review of the move (usage limit). Checked by the AST pure-move comparison and a whole-branch Opus review on 2026-10-04."
   },
   "secret_scan:_credential_matches": {
     "fingerprint": "01f98367adfe4e7a",
