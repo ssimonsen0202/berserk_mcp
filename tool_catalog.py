@@ -151,7 +151,7 @@ def build_tools(
                     {
                         "kql": {
                             "type": "string",
-                            "description": f"KQL starting with '{TABLE} | ...'. OTLP resource/log attributes (service name, host name, etc.) need resource['key'] / attributes['key'] access, not a bare column name; some other fields (trace_id, span_id, timestamp, metric_name, ...) are genuinely top-level. Use discover_schema if unsure which a given field is.",
+                            "description": f"KQL starting with '{TABLE} | ...'. OTLP resource/log attributes (service name, host name, etc.) need resource['key'] / attributes['key'] access, not a bare column name; some other fields (trace_id, span_id, timestamp, metric_name, ...) are genuinely top-level. Use discover_schema if unsure which a given field is. KQL not() uses Kleene logic: `where not(x > 5)` silently drops rows where x is null — add `or isnull(x)` to include them.",
                         }
                     },
                     **_since(),
