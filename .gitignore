@@ -85,3 +85,18 @@ docs/dk-paywall*
 scratchpad_out/
 fix-review-primer.md
 static_analysis_semgrep_1/
+
+# Working notes stay private (tests/test_no_working_notes.py enforces this
+# for tracked files; these patterns stop `git add -A` from picking them up).
+docs/*handoff*
+docs/*brief*
+docs/*raw-evidence*
+docs/*live-test-results*
+docs/*implementation-plan*
+docs/superpowers/
+evals/results-*.md
+evals/results/mock_*.json
+evals/*-plan.md
+SESSION-HANDOFF-*
+progress.md
+docs/*-20[0-9][0-9]-[0-9][0-9]-[0-9][0-9].md
