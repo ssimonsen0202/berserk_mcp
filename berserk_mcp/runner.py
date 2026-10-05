@@ -8,6 +8,7 @@ from berserk_mcp import fencing as bm_fencing
 from berserk_mcp import queries as bm_queries
 from pathlib import Path
 import _kql_boundary
+import contextlib
 import kql_validation
 import re
 import schema_registry
@@ -168,6 +169,20 @@ def run_bzrk(args, timeout=bm_config.DEFAULT_TIMEOUT):
     # silently return an early partial increment as if it were complete.
     if "search" in args and "--no-stream" not in args:
         args = args + ["--no-stream"]
+    with contextlib.ExitStack() as stack:
+        # Every query launch holds a query slot, so BERSERK_MCP_MAX_CONCURRENT_QUERIES
+        # bounds all of them (schema, schema refresh and doctor queries call this
+        # directly). A caller that already holds a slot (bzrk_search, the
+        # diagnostics path) does not take a second one. Non-query commands such
+        # as --version are not limited.
+        needs_slot = "search" in args and not bm_config._query_slot_held()
+        if needs_slot and not stack.enter_context(bm_config._query_semaphore_slot(timeout)):
+            return bm_config.QUERY_QUEUE_FULL_MESSAGE, True
+        return _run_bzrk_launch(args, timeout)
+
+
+def _run_bzrk_launch(args, timeout):
+    """Launch one bzrk process for run_bzrk and classify its output."""
     try:
         result = _run_argv_bounded([bm_config._RESOLVED_BZRK_BIN] + args, timeout)
         out = result["stdout"].decode("utf-8", errors="replace").strip()
@@ -325,12 +340,7 @@ def bzrk_search(kql, since, extra=None):
     effective_timeout = timeout if timeout is not None else bm_config.DEFAULT_TIMEOUT
     with bm_config._query_semaphore_slot(effective_timeout) as acquired:
         if not acquired:
-            return (
-                "Local MCP query queue is full. Retry later, use a narrower 'since' "
-                "window, or raise BERSERK_MCP_MAX_CONCURRENT_QUERIES if this process "
-                "is intentionally serving more parallel callers.",
-                True,
-            )
+            return bm_config.QUERY_QUEUE_FULL_MESSAGE, True
         if timeout is None:
             out, is_err = run_bzrk(["-P", bm_config.PROFILE, "search", query, "--since", since] + list(extra or []))
         else:

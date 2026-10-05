@@ -5,6 +5,7 @@ Split out of berserk_mcp.py in v1.37.0.
 
 from berserk_mcp._version import __version__
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
@@ -930,6 +931,22 @@ def save_json_list(path, items):
 
 AUTH_FAILURE_MESSAGE = "bzrk authentication failed; run `bzrk login` and retry"
 
+QUERY_QUEUE_FULL_MESSAGE = (
+    "Local MCP query queue is full. Retry later, use a narrower 'since' "
+    "window, or raise BERSERK_MCP_MAX_CONCURRENT_QUERIES if this process "
+    "is intentionally serving more parallel callers."
+)
+
+# True while this thread holds a query slot taken through _query_semaphore_slot.
+# run_bzrk reads it so a caller that already holds a slot (bzrk_search, the
+# diagnostics path) does not take a second one: with the default of two slots,
+# two nested holders could otherwise deadlock each other.
+_QUERY_SLOT_HELD = ContextVar("berserk_mcp_query_slot_held", default=False)
+
+
+def _query_slot_held():
+    return _QUERY_SLOT_HELD.get()
+
 
 def _query_semaphore_acquire(timeout):
     if _QUERY_SEMAPHORE is None:
@@ -949,7 +966,10 @@ def _query_semaphore_release(acquired):
 @contextmanager
 def _query_semaphore_slot(timeout):
     acquired = _query_semaphore_acquire(timeout)
+    token = _QUERY_SLOT_HELD.set(True) if acquired else None
     try:
         yield acquired
     finally:
+        if token is not None:
+            _QUERY_SLOT_HELD.reset(token)
         _query_semaphore_release(acquired)
