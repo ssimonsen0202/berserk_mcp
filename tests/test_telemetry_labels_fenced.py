@@ -65,6 +65,14 @@ class ScanSecretsFenceTest(FencedLabelsTestBase):
         self.assertTrue(is_err)
         self.assert_only_fenced(text, INJECT)
 
+    def test_a_label_equal_to_a_server_sentinel_is_still_fenced(self):
+        rows = [{"service": "(no rows)", "ts": bm.AUTH_FAILURE_MESSAGE, "body": f"key {AWS_KEY}"}]
+        self.use_run_bzrk(lambda args, timeout=None: ("\n".join(json.dumps(r) for r in rows), False))
+        text, is_err = bm.handle_call("scan_secrets", {"since": "1h ago"})
+        self.assertFalse(is_err, text)
+        self.assert_only_fenced(text, "(no rows)")
+        self.assert_only_fenced(text, bm.AUTH_FAILURE_MESSAGE)
+
     def test_auth_failure_stays_readable(self):
         self.use_run_bzrk(lambda args, timeout=None: (bm.AUTH_FAILURE_MESSAGE, True))
         text, is_err = bm.handle_call("scan_secrets", {"since": "1h ago"})
@@ -96,6 +104,11 @@ class DetectNewSourcesFenceTest(FencedLabelsTestBase):
         self.services = ["alpha", INJECT]
         text, is_err = bm.handle_call("detect_new_sources", {"since": "24h ago"})
         self.assertFalse(is_err, text)
+        self.assert_only_fenced(text, INJECT)
+
+    def test_drifted_service_names_are_fenced(self):
+        text = parser_factory._format_discovery_summary(False, {"alpha"}, set(), [], [], [INJECT], [], False, False)
+        self.assertIn("drifted_services", text)
         self.assert_only_fenced(text, INJECT)
 
     def test_queued_service_names_are_fenced(self):
@@ -144,6 +157,7 @@ class DefaultFenceTest(unittest.TestCase):
     def test_package_wires_a_real_fence(self):
         for module in (secret_scan, parser_factory):
             with self.subTest(module=module.__name__):
+                self.assertIsNot(module._fence, module._default_fence)
                 self.assertIn(OPEN, module._fence("x"))
 
 

@@ -55,6 +55,16 @@ def _default_fence(text):
 
 
 _fence = _default_fence
+
+
+def _fence_label(text):
+    """Fence a telemetry-derived label. The package fence leaves exact server
+    sentinels such as "(no rows)" unfenced; a label that equals one is still
+    telemetry, so fall back to the default fence."""
+    fenced = _fence(text)
+    return fenced if fenced != text else _default_fence(text)
+
+
 _validate_static = None  # optional callable(kql, since)->report
 _schema_context_provider = None  # optional callable()->(context, schema_hash, status)
 
@@ -903,9 +913,9 @@ def _format_discovery_summary(
     if warnings:
         lines.extend(warnings)
     if new_services:
-        lines.append(f"new_services ({len(new_services)}): " + _fence(", ".join(new_services)))
+        lines.append(f"new_services ({len(new_services)}): " + _fence_label(", ".join(new_services)))
     if drifted_services:
-        lines.append(f"drifted_services ({len(drifted_services)}): " + _fence(", ".join(drifted_services)))
+        lines.append(f"drifted_services ({len(drifted_services)}): " + _fence_label(", ".join(drifted_services)))
     if new_metrics:
         lines.append(f"new_metrics ({len(new_metrics)}) recorded, not queued (infra)")
     if queued:
@@ -914,7 +924,7 @@ def _format_discovery_summary(
             f"queued {len(queued)} service(s) this run (cap {MAX_AUTOQUEUE_PER_RUN})"
             + (f", {deferred} deferred to next run" if deferred > 0 else "")
             + ": "
-            + _fence(", ".join(queued))
+            + _fence_label(", ".join(queued))
         )
     return "\n".join(lines)
 

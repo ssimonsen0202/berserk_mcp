@@ -106,6 +106,14 @@ def _default_fence(text):
 _fence = _default_fence
 
 
+def _fence_label(text):
+    """Fence a telemetry-derived label. The package fence leaves exact server
+    sentinels such as "(no rows)" unfenced; a label that equals one is still
+    telemetry, so fall back to the default fence."""
+    fenced = _fence(text)
+    return fenced if fenced != text else _default_fence(text)
+
+
 def configure(bzrk_search, table, fence=None):
     global _bzrk_search, _table, _fence
     _bzrk_search = bzrk_search
@@ -597,7 +605,7 @@ def scan_secrets(since="1h ago", include_entropy=False, pii_types=()):
 
     if unscanned:
         rows = sum(unscanned.values())
-        services = _fence(", ".join(f"{name} x{count}" for name, count in sorted(unscanned.items())))
+        services = _fence_label(", ".join(f"{name} x{count}" for name, count in sorted(unscanned.items())))
         return (
             f"Secret scan incomplete: {rows} row(s) exceeded the redaction limits and could not be scanned "
             f"({services}). The result is not conclusive; {total} potential secrets were found in the other rows."
@@ -612,7 +620,7 @@ def scan_secrets(since="1h ago", include_entropy=False, pii_types=()):
         # "password=1" / "api_key=1" token would trip the _GENERIC_CREDENTIAL
         # pattern and get banner-flagged (flag mode) or corrupted (redact mode).
         type_counts = ", ".join(f"{name} x{count}" for name, count in sorted(report["types"].items()))
-        first_seen = _fence(report["first_seen"]) if report["first_seen"] else "unknown"
-        lines.append(f"- {_fence(service)}: {type_counts}; first_seen={first_seen}")
+        first_seen = _fence_label(report["first_seen"]) if report["first_seen"] else "unknown"
+        lines.append(f"- {_fence_label(service)}: {type_counts}; first_seen={first_seen}")
     lines.append("Remediation: scrub secrets at ingest, rotate exposed credentials, and re-run this audit.")
     return "\n".join(lines), False

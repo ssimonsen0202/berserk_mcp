@@ -95,12 +95,17 @@ class FleetContextTest(unittest.TestCase):
                 self.timeouts.clear()
                 for ev in self.events.values():
                     ev.clear()
-                self._run_overlapping("search", "list_hosts", finish_order)
+                self._run_overlapping("search", "discover_schema", finish_order)
                 self.assertEqual(self.timeouts.get("first"), self._expected("search"))
-                self.assertEqual(self.timeouts.get("second"), self._expected("list_hosts"))
+                self.assertEqual(self.timeouts.get("second"), self._expected("discover_schema"))
+
+    def test_the_two_tools_have_different_budgets(self):
+        # Otherwise the test above could not tell one call's budget from the other's.
+        self.assertNotEqual(self._expected("search"), self._expected("discover_schema"))
 
     def test_no_budget_is_left_behind_after_the_calls(self):
-        self._run_overlapping("search", "list_hosts", "second")
+        # The first call finishing first is the order that left a stale budget behind.
+        self._run_overlapping("search", "discover_schema", "first")
         # A query outside any tool call runs with no per-tool budget.
         bm.bzrk_search("default | take 1", "1h ago")
         self.assertEqual(self.timeouts.get("MainThread"), "default")

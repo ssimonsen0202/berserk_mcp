@@ -170,12 +170,12 @@ def run_bzrk(args, timeout=bm_config.DEFAULT_TIMEOUT):
     if "search" in args and "--no-stream" not in args:
         args = args + ["--no-stream"]
     with contextlib.ExitStack() as stack:
-        # Every query launch holds a query slot, so BERSERK_MCP_MAX_CONCURRENT_QUERIES
-        # bounds all of them (schema, schema refresh and doctor queries call this
-        # directly). A caller that already holds a slot (bzrk_search, the
-        # diagnostics path) does not take a second one. Non-query commands such
-        # as --version are not limited.
-        needs_slot = "search" in args and not bm_config._query_slot_held()
+        # Every bzrk launch holds a query slot, so BERSERK_MCP_MAX_CONCURRENT_QUERIES
+        # bounds all queries (schema, schema refresh and doctor queries call this
+        # directly). Only --version is exempt: failing closed means a future query
+        # subcommand is limited too. A caller that already holds a slot
+        # (bzrk_search, the diagnostics path) does not take a second one.
+        needs_slot = "--version" not in args and not bm_config._query_slot_held()
         if needs_slot and not stack.enter_context(bm_config._query_semaphore_slot(timeout)):
             return bm_config.QUERY_QUEUE_FULL_MESSAGE, True
         return _run_bzrk_launch(args, timeout)
@@ -339,8 +339,11 @@ def bzrk_search(kql, since, extra=None):
         )
         tool_name = fleet_context.get("tool")
     effective_timeout = timeout if timeout is not None else bm_config.DEFAULT_TIMEOUT
-    with bm_config._query_semaphore_slot(effective_timeout) as acquired:
-        if not acquired:
+    with contextlib.ExitStack() as stack:
+        # A caller that already holds a slot does not take a second one, so a
+        # nested search can never deadlock against the default of two slots.
+        needs_slot = not bm_config._query_slot_held()
+        if needs_slot and not stack.enter_context(bm_config._query_semaphore_slot(effective_timeout)):
             return bm_config.QUERY_QUEUE_FULL_MESSAGE, True
         if timeout is None:
             out, is_err = run_bzrk(["-P", bm_config.PROFILE, "search", query, "--since", since] + list(extra or []))
@@ -414,28 +417,22 @@ def _schema_fetcher():
     mean feeding one call's error text into normalize_snapshot as if it
     were real tables/columns/fields/sample data.
     """
-    out_tables, e_tables = run_bzrk(["-P", bm_config.PROFILE, "search", ".show tables"])
-    out_schema, e_schema = run_bzrk(
-        ["-P", bm_config.PROFILE, "search", f"{bm_queries.T} | getschema", "--since", "1h ago"]
+    queries = (
+        ("tables", [".show tables"]),
+        ("getschema", [f"{bm_queries.T} | getschema", "--since", "1h ago"]),
+        ("fieldstats", [bm_queries.q_discover_fieldstats(None), "--since", "1h ago"]),
+        ("sample", [bm_queries.q_discover_sample(None), "--since", "1h ago"]),
     )
-    out_fields, e_fields = run_bzrk(
-        ["-P", bm_config.PROFILE, "search", bm_queries.q_discover_fieldstats(None), "--since", "1h ago"]
-    )
-    out_sample, e_sample = run_bzrk(
-        ["-P", bm_config.PROFILE, "search", bm_queries.q_discover_sample(None), "--since", "1h ago"]
-    )
-    failed = [
-        name
-        for name, is_err in (
-            ("tables", e_tables),
-            ("getschema", e_schema),
-            ("fieldstats", e_fields),
-            ("sample", e_sample),
-        )
-        if is_err
-    ]
-    if failed:
-        raise RuntimeError(f"schema fetch failed for: {', '.join(failed)}")
+    results = {}
+    for name, query in queries:
+        out, is_err = run_bzrk(["-P", bm_config.PROFILE, "search", *query])
+        if is_err:
+            # Stop at the first failure: the caller holds schema_registry's
+            # lock, and each further query could wait for a query slot.
+            raise RuntimeError(f"schema fetch failed for: {name}")
+        results[name] = out
+    out_tables, out_schema = results["tables"], results["getschema"]
+    out_fields, out_sample = results["fieldstats"], results["sample"]
     return {
         "tables": out_tables,
         "getschema": out_schema,

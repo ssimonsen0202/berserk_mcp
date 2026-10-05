@@ -116,6 +116,20 @@ class QuerySlotTest(unittest.TestCase):
         self.assert_every_search_held_a_slot()
         self.assertEqual(self.sem.acquires, 1)
 
+    def test_any_other_bzrk_command_takes_a_slot(self):
+        # Fail closed: only --version is exempt, so a new query subcommand is limited too.
+        bm.run_bzrk(["-P", "p", "some-future-query", "default | take 1"])
+        self.assertEqual(self.sem.acquires, 1)
+        self.assertEqual(self.launches, [(False, 1)])
+
+    def test_search_inside_a_held_slot_takes_no_second_slot(self):
+        with bm._query_semaphore_slot(1.0) as acquired:
+            self.assertTrue(acquired)
+            text, is_err = bm.bzrk_search("default | take 1", "1h ago")
+        self.assertFalse(is_err, text)
+        self.assertEqual(self.sem.acquires, 1)
+        self.assertEqual(self.sem.held, 0)
+
     def test_version_does_not_take_a_slot(self):
         bm.run_bzrk(["--version"])
         self.assertEqual(self.sem.acquires, 0)
