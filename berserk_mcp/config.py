@@ -249,7 +249,10 @@ _RESULT_CACHE = {}
 _FAIL_COOLDOWN = {}
 
 
-_FLEET_CONTEXT = None
+# The tool name and budget of the tool call running in this thread. A
+# ContextVar, not a module global: concurrent HTTP and task-worker calls each
+# need their own, and a global let one call clear or replace another's budget.
+_FLEET_CONTEXT = ContextVar("berserk_mcp_fleet_context", default=None)
 
 
 _FLEET_BACKEND_ID = None
@@ -275,12 +278,19 @@ def _note_fleet_backend(backend_id):
         _FLEET_BACKEND_ID = backend_id
 
 
+def _get_fleet_context():
+    """The fleet context of the tool call running in this thread, or None."""
+    return _FLEET_CONTEXT.get()
+
+
 def _set_fleet_context(context):
-    """Set the fleet context for the current tool call; return the previous one."""
-    global _FLEET_CONTEXT
-    previous = _FLEET_CONTEXT
-    _FLEET_CONTEXT = context
-    return previous
+    """Set the fleet context for this thread's tool call; return a reset token."""
+    return _FLEET_CONTEXT.set(context)
+
+
+def _restore_fleet_context(token):
+    """Undo the matching _set_fleet_context call."""
+    _FLEET_CONTEXT.reset(token)
 
 
 def _bounded_put(store, key, value, *, ttl, now):

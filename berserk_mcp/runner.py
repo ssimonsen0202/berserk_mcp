@@ -330,13 +330,14 @@ def bzrk_search(kql, since, extra=None):
         return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
     timeout = None
     tool_name = None
-    if bm_config._FLEET_CONTEXT is not None:
+    fleet_context = bm_config._get_fleet_context()
+    if fleet_context is not None:
         timeout = bm_config._window_budget(
-            bm_config._FLEET_CONTEXT.get("budget"),
+            fleet_context.get("budget"),
             since,
-            bm_config._FLEET_CONTEXT.get("budget_multiplier", 1.0),
+            fleet_context.get("budget_multiplier", 1.0),
         )
-        tool_name = bm_config._FLEET_CONTEXT.get("tool")
+        tool_name = fleet_context.get("tool")
     effective_timeout = timeout if timeout is not None else bm_config.DEFAULT_TIMEOUT
     with bm_config._query_semaphore_slot(effective_timeout) as acquired:
         if not acquired:

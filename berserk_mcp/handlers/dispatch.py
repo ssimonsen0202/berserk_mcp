@@ -206,7 +206,7 @@ def handle_call(name, arguments):
             if cached:
                 bm_config._RESULT_CACHE.pop(key, None)
 
-    previous_context = bm_config._set_fleet_context(
+    fleet_token = bm_config._set_fleet_context(
         {
             "tool": str(name),
             "budget": bm_config.TOOL_BUDGET_SECONDS if bm_config.TOOL_BUDGET_SECONDS > 0 else None,
@@ -216,7 +216,7 @@ def handle_call(name, arguments):
     try:
         text, is_err = _handle_call_uncached(name, args)
     finally:
-        bm_config._set_fleet_context(previous_context)
+        bm_config._restore_fleet_context(fleet_token)
 
     text = str(text)
     # `in`, not startswith: the SIMPLE-dispatch error path now fences every
