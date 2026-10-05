@@ -6801,6 +6801,17 @@ class WrongAnswerContainmentTest(unittest.TestCase):
         self.assertIn("discover_schema", kql_arg_desc)
         self.assertNotIn("never a bare column name", kql_arg_desc)
 
+    def test_search_kql_arg_warns_about_kleene_null_trap(self):
+        # KQL not() follows three-valued (Kleene) logic: `not(x > 5)` is null,
+        # not true, when x is null, so those rows silently drop out. A model
+        # that writes the negation without a null guard gets a plausible but
+        # short answer (issue #36).
+        search_tool = next(t for t in bm.TOOLS if t["name"] == "search")
+        kql_arg_desc = search_tool["inputSchema"]["properties"]["kql"]["description"]
+        self.assertIn("Kleene", kql_arg_desc)
+        self.assertIn("isnull", kql_arg_desc)
+        self.assertIn("not(", kql_arg_desc)
+
     # ---- control 3: KQL validation rejects blockers before execution ----
 
     def test_validate_kql_rejects_wrong_table_prefix(self):

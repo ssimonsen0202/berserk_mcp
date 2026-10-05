@@ -42,10 +42,14 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.37.0**. This is a bullet-point overview, most recent
+Current version: **1.37.1**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.37.1** (2026-10-04) — The `search` tool now warns about a KQL
+  null trap. `where not(x > 5)` drops rows where `x` is null, because KQL
+  uses three-valued logic. The description says to add `or isnull(x)`.
+  See [docs/releases/v1.37.1.md](docs/releases/v1.37.1.md).
 - **v1.37.0** (2026-10-04) — The server code moved out of one 6,165-line
   file. It now lives in the `berserk_mcp/` package: 16 modules, one per
   layer, and a small facade, none over 1,200 lines. Behavior does not change. `python3 berserk_mcp.py` still
