@@ -6,6 +6,8 @@ import json
 import math
 import re
 
+import _tag_guard
+
 _bzrk_search = None
 _table = None
 
@@ -89,10 +91,26 @@ _CARD_CANDIDATE = re.compile(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)")
 EXTRA_PII_PATTERNS = []
 
 
-def configure(bzrk_search, table):
-    global _bzrk_search, _table
+# Telemetry-derived text (service names, timestamps, backend error text) is
+# fenced before it reaches the model. berserk_mcp configures the package's
+# fence; until then this default fences too, so an unconfigured module fails
+# closed rather than passing telemetry through as trusted prose.
+_UNTRUSTED_TAG_RE = _tag_guard.tag_pattern("untrusted_log_data")
+
+
+def _default_fence(text):
+    body = _tag_guard.neutralize(str(text), _UNTRUSTED_TAG_RE, "untrusted_log_data")
+    return f"<untrusted_log_data>{body}</untrusted_log_data>"
+
+
+_fence = _default_fence
+
+
+def configure(bzrk_search, table, fence=None):
+    global _bzrk_search, _table, _fence
     _bzrk_search = bzrk_search
     _table = table
+    _fence = fence or _default_fence
 
 
 def _entropy(value):
@@ -544,7 +562,8 @@ def _parse_audit_rows(text):
 def scan_secrets(since="1h ago", include_entropy=False, pii_types=()):
     text, is_err = _bzrk_search(_audit_query(), since)
     if is_err:
-        return text, True
+        # The backend's error text can carry partial result rows.
+        return _fence(text), True
     try:
         audit_rows = _parse_audit_rows(text)
     except AuditParseError:
@@ -578,7 +597,7 @@ def scan_secrets(since="1h ago", include_entropy=False, pii_types=()):
 
     if unscanned:
         rows = sum(unscanned.values())
-        services = ", ".join(f"{name} x{count}" for name, count in sorted(unscanned.items()))
+        services = _fence(", ".join(f"{name} x{count}" for name, count in sorted(unscanned.items())))
         return (
             f"Secret scan incomplete: {rows} row(s) exceeded the redaction limits and could not be scanned "
             f"({services}). The result is not conclusive; {total} potential secrets were found in the other rows."
@@ -593,6 +612,7 @@ def scan_secrets(since="1h ago", include_entropy=False, pii_types=()):
         # "password=1" / "api_key=1" token would trip the _GENERIC_CREDENTIAL
         # pattern and get banner-flagged (flag mode) or corrupted (redact mode).
         type_counts = ", ".join(f"{name} x{count}" for name, count in sorted(report["types"].items()))
-        lines.append(f"- {service}: {type_counts}; first_seen={report['first_seen'] or 'unknown'}")
+        first_seen = _fence(report["first_seen"]) if report["first_seen"] else "unknown"
+        lines.append(f"- {_fence(service)}: {type_counts}; first_seen={first_seen}")
     lines.append("Remediation: scrub secrets at ingest, rotate exposed credentials, and re-run this audit.")
     return "\n".join(lines), False

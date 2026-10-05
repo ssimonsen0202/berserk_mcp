@@ -41,6 +41,20 @@ _log = None  # callable(msg) -> None
 _persist_learned_query = None  # callable(entry, action_source) -> log_entry dict
 _sanitize_name = None  # callable(name) -> str
 _redact = None  # mandatory callable(str) -> str; set by configure()
+
+# Telemetry-derived text (service names, timestamps, backend error text) is
+# fenced before it reaches the model. berserk_mcp configures the package's
+# fence; until then this default fences too, so an unconfigured module fails
+# closed rather than passing telemetry through as trusted prose.
+_UNTRUSTED_TAG_RE = _tag_guard.tag_pattern("untrusted_log_data")
+
+
+def _default_fence(text):
+    body = _tag_guard.neutralize(str(text), _UNTRUSTED_TAG_RE, "untrusted_log_data")
+    return f"<untrusted_log_data>{body}</untrusted_log_data>"
+
+
+_fence = _default_fence
 _validate_static = None  # optional callable(kql, since)->report
 _schema_context_provider = None  # optional callable()->(context, schema_hash, status)
 
@@ -66,6 +80,7 @@ def configure(
     redact=None,
     validate_static=None,
     schema_context_provider=None,
+    fence=None,
 ):
     """Called once by berserk_mcp at import time.
 
@@ -84,7 +99,7 @@ def configure(
         raise ValueError("parser_factory.configure requires a redactor")
     global _bzrk_search, _table, _get_store_dir, _ensure_private_dir, _now_iso
     global _log, _persist_learned_query, _sanitize_name, _redact, KQL_IDIOMS
-    global _validate_static, _schema_context_provider
+    global _validate_static, _schema_context_provider, _fence
     _bzrk_search = bzrk_search
     _table = table
     _get_store_dir = get_store_dir
@@ -96,6 +111,7 @@ def configure(
     _redact = redact
     _validate_static = validate_static
     _schema_context_provider = schema_context_provider
+    _fence = fence or _default_fence
     _schema_cache.clear()
     KQL_IDIOMS = _build_kql_idioms()
 
@@ -887,9 +903,9 @@ def _format_discovery_summary(
     if warnings:
         lines.extend(warnings)
     if new_services:
-        lines.append(f"new_services ({len(new_services)}): " + ", ".join(new_services))
+        lines.append(f"new_services ({len(new_services)}): " + _fence(", ".join(new_services)))
     if drifted_services:
-        lines.append(f"drifted_services ({len(drifted_services)}): " + ", ".join(drifted_services))
+        lines.append(f"drifted_services ({len(drifted_services)}): " + _fence(", ".join(drifted_services)))
     if new_metrics:
         lines.append(f"new_metrics ({len(new_metrics)}) recorded, not queued (infra)")
     if queued:
@@ -898,7 +914,7 @@ def _format_discovery_summary(
             f"queued {len(queued)} service(s) this run (cap {MAX_AUTOQUEUE_PER_RUN})"
             + (f", {deferred} deferred to next run" if deferred > 0 else "")
             + ": "
-            + ", ".join(queued)
+            + _fence(", ".join(queued))
         )
     return "\n".join(lines)
 

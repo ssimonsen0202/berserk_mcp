@@ -16,10 +16,20 @@ import quota_status
 import tool_discovery
 
 
+_QUERY_DETAIL_CHECKS = frozenset({"auth", "table_reachable", "recent_rows"})
+
+
 def _handle_query_tools(name, arguments):
     """Schema, service query, trace, and search tools. Returns (text, is_error) or None."""
     if name == "self_check":
         results = bm_doctor._run_doctor_checks()
+        # These checks put the query's own error text (which can carry partial
+        # result rows) into `detail`. The MCP reply fences it; the --doctor
+        # terminal output stays unfenced. Fence after doctor's length cut, so
+        # the closing tag always survives.
+        for check in results:
+            if check.get("name") in _QUERY_DETAIL_CHECKS and check.get("status") != "pass":
+                check["detail"] = bm_fencing._fence_untrusted(check.get("detail", ""), inline=True)
         code = bm_doctor._doctor_exit_code(results)
         return json.dumps({"checks": results, "exit_code": code}, separators=(",", ":"), sort_keys=True), code == 2
     if name == "schema":
