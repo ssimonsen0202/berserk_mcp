@@ -42,10 +42,15 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.37.1**. This is a bullet-point overview, most recent
+Current version: **1.37.2**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.37.2** (2026-10-05) — Three security fixes from a Codex Security
+  review. Every bzrk query now holds a query slot. Each tool call keeps its
+  own query budget when calls overlap. `scan_secrets`, `detect_new_sources`
+  and `self_check` fence telemetry-derived names and error text. See
+  [docs/releases/v1.37.2.md](docs/releases/v1.37.2.md).
 - **v1.37.1** (2026-10-04) — The `search` tool now warns about a KQL
   null trap. `where not(x > 5)` drops rows where `x` is null, because KQL
   uses three-valued logic. The description says to add `or isnull(x)`.

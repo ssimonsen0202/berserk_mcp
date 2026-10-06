@@ -337,6 +337,7 @@ parser_factory.configure(
     sanitize_name=sanitize_name,
     validate_static=bm_runner._parser_static_validation,
     schema_context_provider=bm_runner._parser_schema_context,
+    fence=lambda text: bm_fencing._fence_untrusted(text, inline=True),
     redact=lambda text: secret_scan.redact(
         text,
         include_entropy=True,
@@ -403,6 +404,7 @@ ai_finops.configure(
 secret_scan.configure(
     bzrk_search=bm_runner.bzrk_search_json,
     table=bm_config.TABLE,
+    fence=lambda text: bm_fencing._fence_untrusted(text, inline=True),
 )
 
 

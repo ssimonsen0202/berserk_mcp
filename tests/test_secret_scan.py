@@ -826,9 +826,11 @@ class SecretAuditMcpTest(unittest.TestCase):
         text, err = bm.handle_call("scan_secrets", {})
         self.assertFalse(err)
         self.assertIn("3 potential secrets detected", text)
-        self.assertIn("api: aws_key x1, password x1", text)
-        self.assertIn("first_seen=2026-07-12T09:00:00Z", text)
-        self.assertIn("worker: api_key x1", text)
+        # Service names and timestamps come from telemetry, so they are fenced
+        # (Codex Security finding 3); the counts are the server's own prose.
+        self.assertIn("- <untrusted_log_data>api</untrusted_log_data>: aws_key x1, password x1", text)
+        self.assertIn("first_seen=<untrusted_log_data>2026-07-12T09:00:00Z</untrusted_log_data>", text)
+        self.assertIn("- <untrusted_log_data>worker</untrusted_log_data>: api_key x1", text)
         self.assertNotIn(AWS_KEY, text)
         self.assertNotIn("hunter2", text)
         self.assertNotIn(SK_KEY, text)

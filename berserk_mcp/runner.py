@@ -8,6 +8,7 @@ from berserk_mcp import fencing as bm_fencing
 from berserk_mcp import queries as bm_queries
 from pathlib import Path
 import _kql_boundary
+import contextlib
 import kql_validation
 import re
 import schema_registry
@@ -168,6 +169,20 @@ def run_bzrk(args, timeout=bm_config.DEFAULT_TIMEOUT):
     # silently return an early partial increment as if it were complete.
     if "search" in args and "--no-stream" not in args:
         args = args + ["--no-stream"]
+    with contextlib.ExitStack() as stack:
+        # Every bzrk launch holds a query slot, so BERSERK_MCP_MAX_CONCURRENT_QUERIES
+        # bounds all queries (schema, schema refresh and doctor queries call this
+        # directly). Only --version is exempt: failing closed means a future query
+        # subcommand is limited too. A caller that already holds a slot
+        # (bzrk_search, the diagnostics path) does not take a second one.
+        needs_slot = "--version" not in args and not bm_config._query_slot_held()
+        if needs_slot and not stack.enter_context(bm_config._query_semaphore_slot(timeout)):
+            return bm_config.QUERY_QUEUE_FULL_MESSAGE, True
+        return _run_bzrk_launch(args, timeout)
+
+
+def _run_bzrk_launch(args, timeout):
+    """Launch one bzrk process for run_bzrk and classify its output."""
     try:
         result = _run_argv_bounded([bm_config._RESOLVED_BZRK_BIN] + args, timeout)
         out = result["stdout"].decode("utf-8", errors="replace").strip()
@@ -315,22 +330,21 @@ def bzrk_search(kql, since, extra=None):
         return (f"invalid 'since' value: {since!r}. Use forms like '15m ago', '1h ago', '2d ago', or 'now'."), True
     timeout = None
     tool_name = None
-    if bm_config._FLEET_CONTEXT is not None:
+    fleet_context = bm_config._get_fleet_context()
+    if fleet_context is not None:
         timeout = bm_config._window_budget(
-            bm_config._FLEET_CONTEXT.get("budget"),
+            fleet_context.get("budget"),
             since,
-            bm_config._FLEET_CONTEXT.get("budget_multiplier", 1.0),
+            fleet_context.get("budget_multiplier", 1.0),
         )
-        tool_name = bm_config._FLEET_CONTEXT.get("tool")
+        tool_name = fleet_context.get("tool")
     effective_timeout = timeout if timeout is not None else bm_config.DEFAULT_TIMEOUT
-    with bm_config._query_semaphore_slot(effective_timeout) as acquired:
-        if not acquired:
-            return (
-                "Local MCP query queue is full. Retry later, use a narrower 'since' "
-                "window, or raise BERSERK_MCP_MAX_CONCURRENT_QUERIES if this process "
-                "is intentionally serving more parallel callers.",
-                True,
-            )
+    with contextlib.ExitStack() as stack:
+        # A caller that already holds a slot does not take a second one, so a
+        # nested search can never deadlock against the default of two slots.
+        needs_slot = not bm_config._query_slot_held()
+        if needs_slot and not stack.enter_context(bm_config._query_semaphore_slot(effective_timeout)):
+            return bm_config.QUERY_QUEUE_FULL_MESSAGE, True
         if timeout is None:
             out, is_err = run_bzrk(["-P", bm_config.PROFILE, "search", query, "--since", since] + list(extra or []))
         else:
@@ -403,28 +417,22 @@ def _schema_fetcher():
     mean feeding one call's error text into normalize_snapshot as if it
     were real tables/columns/fields/sample data.
     """
-    out_tables, e_tables = run_bzrk(["-P", bm_config.PROFILE, "search", ".show tables"])
-    out_schema, e_schema = run_bzrk(
-        ["-P", bm_config.PROFILE, "search", f"{bm_queries.T} | getschema", "--since", "1h ago"]
+    queries = (
+        ("tables", [".show tables"]),
+        ("getschema", [f"{bm_queries.T} | getschema", "--since", "1h ago"]),
+        ("fieldstats", [bm_queries.q_discover_fieldstats(None), "--since", "1h ago"]),
+        ("sample", [bm_queries.q_discover_sample(None), "--since", "1h ago"]),
     )
-    out_fields, e_fields = run_bzrk(
-        ["-P", bm_config.PROFILE, "search", bm_queries.q_discover_fieldstats(None), "--since", "1h ago"]
-    )
-    out_sample, e_sample = run_bzrk(
-        ["-P", bm_config.PROFILE, "search", bm_queries.q_discover_sample(None), "--since", "1h ago"]
-    )
-    failed = [
-        name
-        for name, is_err in (
-            ("tables", e_tables),
-            ("getschema", e_schema),
-            ("fieldstats", e_fields),
-            ("sample", e_sample),
-        )
-        if is_err
-    ]
-    if failed:
-        raise RuntimeError(f"schema fetch failed for: {', '.join(failed)}")
+    results = {}
+    for name, query in queries:
+        out, is_err = run_bzrk(["-P", bm_config.PROFILE, "search", *query])
+        if is_err:
+            # Stop at the first failure: the caller holds schema_registry's
+            # lock, and each further query could wait for a query slot.
+            raise RuntimeError(f"schema fetch failed for: {name}")
+        results[name] = out
+    out_tables, out_schema = results["tables"], results["getschema"]
+    out_fields, out_sample = results["fieldstats"], results["sample"]
     return {
         "tables": out_tables,
         "getschema": out_schema,
