@@ -227,6 +227,7 @@ def _normalize_schema_fields(schema_fields):
 
 
 _BARE_IDENT_RE = re.compile(r"(?<![A-Za-z0-9_$.\-])(\$?[A-Za-z_][A-Za-z0-9_]*)(?![A-Za-z0-9_\-])(\s*\()?")
+_DOTTED_BAG_RE = re.compile(r"\b(resource|attributes)\.([A-Za-z_][A-Za-z0-9_.-]*[A-Za-z0-9_])")
 _ASSIGNED_NAME_RE = re.compile(r"(?<![=!<>])\b([A-Za-z_][A-Za-z0-9_]*)\s*=(?![=~])")
 _ASSIGNED_TUPLE_RE = re.compile(r"\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)+)\s*\)\s*=(?![=~])")
 
@@ -245,17 +246,23 @@ def _extract_referenced_fields(kql):
         refs.add(f"{bag}['{path}']")
         refs.add(f"{bag}.{path}")
     stripped = _strip_strings(kql)
-    defined = _query_defined_names(stripped)
-    # The lookarounds in _BARE_IDENT_RE skip words joined by "-", so
-    # make-series, mv-expand and project-away are not read as field names.
-    for m in _BARE_IDENT_RE.finditer(stripped):
-        bare, call = m.group(1), m.group(2)
-        if call or bare in defined or bare in {"resource", "attributes"}:
-            continue
-        low = bare.lower()
-        if low in _FUNCTION_NAMES or low in _KQL_WORDS:
-            continue
-        refs.add(bare)
+    for bag, path in _DOTTED_BAG_RE.findall(stripped):
+        refs.add(f"{bag}['{path}']")
+        refs.add(f"{bag}.{path}")
+    defined = set()
+    # A name a stage assigns is known from that stage on, not before it.
+    for stage in stripped.split("|"):
+        defined |= _query_defined_names(stage)
+        # The lookarounds in _BARE_IDENT_RE skip words joined by "-", so
+        # make-series, mv-expand and project-away are not read as field names.
+        for m in _BARE_IDENT_RE.finditer(stage):
+            bare, call = m.group(1), m.group(2)
+            if call or bare in defined or bare in {"resource", "attributes"}:
+                continue
+            low = bare.lower()
+            if low in _FUNCTION_NAMES or low in _KQL_WORDS:
+                continue
+            refs.add(bare)
     return refs
 
 

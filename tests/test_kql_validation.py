@@ -240,6 +240,26 @@ class UnknownFieldPrecisionTest(unittest.TestCase):
         kql = "default | where attributes['systemd.unit'] == 'x' and resource['k8s.pod.name'] == 'y' | take 5"
         self.assertEqual(self.unknown(kql), [])
 
+    def test_a_dotted_bag_typo_is_flagged_like_a_bracketed_one(self):
+        msgs = self.unknown("default | where resource.service.nam == 'api' | take 5")
+        self.assertTrue(any("service.nam" in m for m in msgs), msgs)
+        self.assertEqual(self.unknown("default | where resource.service.name == 'api' | take 5"), [])
+
+    def test_a_name_used_before_the_stage_that_defines_it_is_unknown(self):
+        msgs = self.unknown("default | where madeup > 1 | extend madeup=timestamp | take 5")
+        self.assertTrue(any("madeup" in m for m in msgs), msgs)
+        self.assertEqual(self.unknown("default | extend madeup=timestamp | where madeup > ago(1h) | take 5"), [])
+
+    def test_suggests_timestamp_for_dollar_time(self):
+        import schema_registry as sr
+
+        try:
+            from test_schema_registry import GETSCHEMA_JSON
+        except ImportError:
+            from tests.test_schema_registry import GETSCHEMA_JSON
+        snap = sr.normalize_snapshot(getschema_text=GETSCHEMA_JSON)
+        self.assertEqual(sr.suggest_field("$time", snap)[0], "timestamp")
+
     def test_every_fixed_query_in_the_repo_has_no_unknown_fields(self):
         import inspect
 

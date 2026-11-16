@@ -42,7 +42,9 @@ def _safe_example(value):
 
 
 _COLUMN_NAME_RE = re.compile(r"^\$?[A-Za-z_][A-Za-z0-9_]*$")
-_FIELD_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9._-]{0,79}$")
+# Keys may start with a digit; junk numbers are kept out by requiring a
+# resource/attributes prefix (_BAG_PATH_RE), not by this pattern.
+_FIELD_KEY_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,79}$")
 _BAG_PATH_RE = re.compile(
     r"\b(resource|attributes)(?:\[\s*['\"]([^'\"]{1,80})['\"]\s*\]|\.([A-Za-z_][A-Za-z0-9._-]{0,79}))"
 )
@@ -271,6 +273,8 @@ def suggest_field(name, snapshot, limit=3):
     for key in snapshot.get("attribute_fields", {}):
         choices.append(f"attributes['{key}']")
     aliases = {
+        "$time": "timestamp",
+        "time": "timestamp",
         "service": "resource['service.name']",
         "service_name": "resource['service.name']",
         "host": "resource['host.name']",

@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -130,6 +131,7 @@ FIELDSTATS_JSON = _bzrk_json(
         ["resource['host.name']", "string", 1, 1.0, ["node-a"], True],
         ["resource['telemetry.sdk.version']", "string", 1, 0.7142857142857143, ["0.31.0"], True],
         ["resource['pid']", "long", 1, 1.0, [], True],
+        ["resource['123service']", "string", 1, 1.0, [], True],
     ],
 )
 SAMPLE_JSON = _bzrk_json(
@@ -173,7 +175,8 @@ class BzrkOutputFormatTest(unittest.TestCase):
             self.assertIn(col, snap["columns"])
         self.assertEqual(snap["columns"]["timestamp"]["type"], "datetime")
         self.assertTrue(
-            {"service.name", "host.name", "telemetry.sdk.version", "process.pid"} <= set(snap["resource_fields"])
+            {"service.name", "host.name", "telemetry.sdk.version", "process.pid", "123service"}
+            <= set(snap["resource_fields"])
         )
         self.assertEqual(snap["resource_fields"]["service.name"]["examples"], ["api", "web"])
         self.assertTrue({"state", "query_id", "rss_delta_mb"} <= set(snap["attribute_fields"]))
@@ -187,7 +190,7 @@ class BzrkOutputFormatTest(unittest.TestCase):
     def test_numbers_are_never_taken_as_field_names(self):
         for fieldstats in (FIELDSTATS_TEXT_WITH_INDEX, FIELDSTATS_JSON):
             snap = self.snapshot(getschema_text=GETSCHEMA_JSON, fieldstats_text=fieldstats)
-            bad = [k for k in snap["resource_fields"] if k[:1].isdigit()]
+            bad = [k for k in snap["resource_fields"] if re.fullmatch(r"[0-9.]+", k)]
             self.assertEqual(bad, [], f"numeric field names from {fieldstats[:20]!r}")
 
     def test_top_level_otlp_fields_are_known_once_the_schema_is_read(self):
