@@ -14,6 +14,8 @@ from unittest import mock
 import openrouter_webhook_receiver as receiver
 from openrouter_webhook_receiver import (
     ForwardStats,
+    SpanDeduper,
+    claim_new_spans,
     _make_handler,
     check_signature,
     extract_spans,
@@ -36,7 +38,7 @@ def _attr(key, value):
     return {"key": key, "value": {"stringValue": str(value)}}
 
 
-def _sample_payload():
+def _sample_payload(n=1):
     return {
         "resourceSpans": [
             {
@@ -45,8 +47,8 @@ def _sample_payload():
                     {
                         "spans": [
                             {
-                                "traceId": "trace-1",
-                                "spanId": "span-1",
+                                "traceId": f"trace-{n}",
+                                "spanId": f"span-{n}",
                                 "name": "chat.completions",
                                 "startTimeUnixNano": "1700000000000000000",
                                 "endTimeUnixNano": "1700000000500000000",
@@ -92,6 +94,15 @@ class ExtractSpansTest(unittest.TestCase):
         rows = extract_spans(_sample_payload())
         self.assertIsInstance(rows[0]["prompt_tokens"], int)
         self.assertIsInstance(rows[0]["completion_tokens"], int)
+
+    def test_a_non_numeric_token_value_is_kept_not_fatal(self):
+        payload = _payload_with_spans([1])
+        span = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+        span["attributes"].append(_attr("gen_ai.usage.total_tokens", "not-an-integer"))
+        rows = extract_spans(payload)
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["total_tokens"])
+        self.assertEqual(rows[0]["attributes"]["gen_ai.usage.total_tokens"], "not-an-integer")
 
     def test_empty_resource_spans_yields_no_rows(self):
         self.assertEqual(extract_spans({"resourceSpans": []}), [])
@@ -645,36 +656,133 @@ class HandlerIntegrationTest(unittest.TestCase):
         self.assertEqual(status, 401)
 
 
+def _payload_with_spans(ids, with_ids=True):
+    spans = []
+    for i in ids:
+        span = {"name": "chat.completions", "attributes": [_attr("gen_ai.request.model", "openai/gpt-4.1-mini")]}
+        if with_ids:
+            span["traceId"] = f"trace-{i}"
+            span["spanId"] = f"span-{i}"
+        spans.append(span)
+    return {
+        "resourceSpans": [
+            {
+                "resource": {"attributes": [_attr("service.name", "openrouter")]},
+                "scopeSpans": [{"spans": spans}],
+            }
+        ]
+    }
+
+
+def _count_log_records(berserk_payload):
+    return sum(
+        len(sl.get("logRecords", []))
+        for rl in berserk_payload.get("resourceLogs", [])
+        for sl in rl.get("scopeLogs", [])
+    )
+
+
+class SpanDeduperTest(unittest.TestCase):
+    def test_first_claim_wins_and_repeat_is_refused(self):
+        d = SpanDeduper(max_size=10)
+        self.assertTrue(d.claim(("t", "s")))
+        self.assertFalse(d.claim(("t", "s")))
+
+    def test_release_allows_a_retry_to_claim_again(self):
+        d = SpanDeduper(max_size=10)
+        claim = d.claim(("t", "s"))
+        d.release([claim])
+        self.assertTrue(d.claim(("t", "s")))
+
+    def test_a_stale_release_cannot_remove_a_newer_claim(self):
+        # The first attempt's claim is evicted, a retry re-claims the span, then
+        # the first attempt fails late and releases. Only the owner may release.
+        d = SpanDeduper(max_size=1)
+        stale = d.claim(("t", "a"))
+        d.claim(("t", "b"))  # evicts "a"
+        fresh = d.claim(("t", "a"))
+        self.assertTrue(fresh)
+        d.release([stale])
+        self.assertFalse(d.claim(("t", "a")), "the retry's claim must survive the stale release")
+        d.release([fresh])
+        self.assertTrue(d.claim(("t", "a")))
+
+    def test_memory_is_bounded_oldest_is_evicted(self):
+        d = SpanDeduper(max_size=2)
+        for key in (("t", "a"), ("t", "b"), ("t", "c")):
+            self.assertTrue(d.claim(key))
+        self.assertEqual(len(d), 2)
+        self.assertTrue(d.claim(("t", "a")))  # "a" was evicted, so it counts as new again
+
+
+class ClaimNewSpansTest(unittest.TestCase):
+    def test_keeps_only_unseen_spans_and_their_envelope(self):
+        d = SpanDeduper()
+        first, claimed1, new1, dup1 = claim_new_spans(_payload_with_spans([1, 2]), d)
+        self.assertEqual((new1, dup1, len(claimed1)), (2, 0, 2))
+        second, claimed2, new2, dup2 = claim_new_spans(_payload_with_spans([2, 3]), d)
+        self.assertEqual((new2, dup2), (1, 1))
+        spans = second["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        self.assertEqual([sp["spanId"] for sp in spans], ["span-3"])
+        self.assertIn("resource", second["resourceSpans"][0])
+
+    def test_all_duplicates_gives_an_empty_payload(self):
+        d = SpanDeduper()
+        claim_new_spans(_payload_with_spans([1]), d)
+        filtered, claimed, new, dup = claim_new_spans(_payload_with_spans([1]), d)
+        self.assertEqual((new, dup, claimed), (0, 1, []))
+        self.assertEqual(extract_spans(filtered), [])
+
+    def test_spans_without_ids_are_never_deduplicated(self):
+        d = SpanDeduper()
+        _f, _c, new1, dup1 = claim_new_spans(_payload_with_spans([1], with_ids=False), d)
+        _f, _c, new2, dup2 = claim_new_spans(_payload_with_spans([1], with_ids=False), d)
+        self.assertEqual((new1, dup1, new2, dup2), (1, 0, 1, 0))
+
+
 class HandlerForwardingIntegrationTest(unittest.TestCase):
-    """berserk_endpoint set -- forwarding is attempted, but its outcome
-    never affects the webhook response or the local JSONL write, both of
-    which are independent by design."""
+    """berserk_endpoint set. The webhook reply goes out as soon as the local
+    capture is written; redaction and the forward to Berserk happen on a
+    background worker, so a slow ingest can never make OpenRouter time out
+    and retry. Forwarding outcomes never affect the reply or the capture."""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         self.out_path = os.path.join(self.tmpdir, "spans.jsonl")
         self.raw_path = os.path.join(self.tmpdir, "raw.jsonl")
         self.forward_calls = []
+        self.release = threading.Event()
+        self.release.set()  # workers are not held back unless a test clears it
+        self.handler = None
+        self.server = None
 
-    def _start(self, post_fn):
-        handler = _make_handler(
-            self.out_path,
-            self.raw_path,
+    def _start(self, post_fn, **kwargs):
+        kwargs.setdefault("forward_workers", 1)  # deterministic order
+        self.handler = _make_handler(
+            kwargs.pop("out_path", self.out_path),
+            kwargs.pop("raw_path", self.raw_path),
             "correct-secret",
             threading.Lock(),
             berserk_endpoint="http://fake-berserk/v1/logs",
             post_fn=post_fn,
+            **kwargs,
         )
+        self._serve(self.handler)
+
+    def _serve(self, handler):
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.port = self.server.server_port
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
     def tearDown(self):
-        self.server.shutdown()
-        self.server.server_close()
+        self.release.set()
+        if self.server:
+            self.server.shutdown()
+            self.server.server_close()
 
-    def _post(self, body):
+    def _post(self, payload):
+        body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
         conn = HTTPConnection("127.0.0.1", self.port, timeout=5)
         conn.request(
             "POST",
@@ -687,50 +795,57 @@ class HandlerForwardingIntegrationTest(unittest.TestCase):
         conn.close()
         return status, json.loads(raw)
 
-    def test_forwarding_success_is_reported_and_local_write_still_happens(self):
+    def _drain(self, timeout=5):
+        deadline = time.time() + timeout
+        while self.handler.forward_queue.unfinished_tasks and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(self.handler.forward_queue.unfinished_tasks, 0, "forward queue did not drain")
+
+    def _lines(self, path):
+        with open(path) as f:
+            return f.readlines()
+
+    def test_forwarding_success_is_queued_and_local_write_still_happens(self):
         def fake_post(endpoint, payload, timeout=10):
             self.forward_calls.append((endpoint, payload))
             return True, "http 200"
 
         self._start(fake_post)
-        status, resp = self._post(json.dumps(_sample_payload()).encode())
+        status, resp = self._post(_sample_payload())
         self.assertEqual(status, 200)
-        self.assertTrue(resp["berserk_forwarded"])
+        self.assertEqual(resp["berserk_forward"], "queued")
+        self._drain()
         self.assertEqual(len(self.forward_calls), 1)
         self.assertEqual(self.forward_calls[0][0], "http://fake-berserk/v1/logs")
-        with open(self.out_path) as f:
-            self.assertEqual(len(f.readlines()), 1)
+        self.assertEqual(len(self._lines(self.out_path)), 1)
 
     def test_forwarding_failure_does_not_break_response_or_local_write(self):
         def failing_post(endpoint, payload, timeout=10):
             return False, "connection refused"
 
         self._start(failing_post)
-        status, resp = self._post(json.dumps(_sample_payload()).encode())
-        self.assertEqual(status, 200)
-        self.assertFalse(resp["berserk_forwarded"])
-        with open(self.out_path) as f:
-            self.assertEqual(len(f.readlines()), 1)
+        status, resp = self._post(_sample_payload())
+        self.assertEqual((status, resp["berserk_forward"]), (200, "queued"))
+        self._drain()
+        self.assertEqual(self.handler.stats.snapshot()["failed"], 1)
+        self.assertEqual(len(self._lines(self.out_path)), 1)
 
     def test_forwarding_exception_does_not_break_response_or_local_write(self):
         def raising_post(endpoint, payload, timeout=10):
             raise RuntimeError("unexpected")
 
         self._start(raising_post)
-        status, resp = self._post(json.dumps(_sample_payload()).encode())
-        self.assertEqual(status, 200)
-        self.assertFalse(resp["berserk_forwarded"])
-        with open(self.out_path) as f:
-            self.assertEqual(len(f.readlines()), 1)
+        status, resp = self._post(_sample_payload())
+        self.assertEqual((status, resp["berserk_forward"]), (200, "queued"))
+        self._drain()
+        self.assertEqual(self.handler.stats.snapshot()["failed"], 1)
+        self.assertEqual(len(self._lines(self.out_path)), 1)
 
     def test_no_berserk_endpoint_means_no_forwarding_key_in_response(self):
-        handler = _make_handler(self.out_path, self.raw_path, "correct-secret", threading.Lock())
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-        self.port = self.server.server_port
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-        status, resp = self._post(json.dumps(_sample_payload()).encode())
+        self._serve(_make_handler(self.out_path, self.raw_path, "correct-secret", threading.Lock()))
+        status, resp = self._post(_sample_payload())
         self.assertEqual(status, 200)
+        self.assertNotIn("berserk_forward", resp)
         self.assertNotIn("berserk_forwarded", resp)
 
     def test_forward_state_changes_are_logged_and_detail_not_leaked_to_sender(self):
@@ -742,7 +857,8 @@ class HandlerForwardingIntegrationTest(unittest.TestCase):
         self._start(flaky_post)
         err = io.StringIO()
         with redirect_stderr(err):
-            bodies = [self._post(json.dumps(_sample_payload()).encode())[1] for _ in range(3)]
+            bodies = [self._post(_sample_payload(n))[1] for n in (1, 2, 3)]
+            self._drain()
         log = err.getvalue()
         self.assertIn("berserk forward FAILING", log)
         self.assertIn("berserk forward RECOVERED after 2 consecutive", log)
@@ -750,7 +866,7 @@ class HandlerForwardingIntegrationTest(unittest.TestCase):
         # forward lines, not one per failed delivery.
         forward_lines = [line for line in log.splitlines() if line.startswith("berserk forward")]
         self.assertEqual(len(forward_lines), 2, forward_lines)
-        self.assertEqual([b["berserk_forwarded"] for b in bodies], [False, False, True])
+        self.assertEqual([b["berserk_forward"] for b in bodies], ["queued"] * 3)
         # The webhook response goes to OpenRouter: no internal error detail.
         self.assertNotIn("10.0.0.9", json.dumps(bodies))
 
@@ -761,8 +877,9 @@ class HandlerForwardingIntegrationTest(unittest.TestCase):
         self._start(failing_post)
         err = io.StringIO()
         with redirect_stderr(err):
-            for _ in range(5):
-                self._post(json.dumps(_sample_payload()).encode())
+            for n in range(1, 6):
+                self._post(_sample_payload(n))
+            self._drain()
         forward_lines = [line for line in err.getvalue().splitlines() if line.startswith("berserk forward")]
         self.assertEqual(len(forward_lines), 1, forward_lines)
         self.assertIn("FAILING: connection refused", forward_lines[0])
@@ -774,8 +891,9 @@ class HandlerForwardingIntegrationTest(unittest.TestCase):
         self._start(raising_post)
         err = io.StringIO()
         with redirect_stderr(err):
-            for _ in range(3):
-                self._post(json.dumps(_sample_payload()).encode())
+            for n in range(1, 4):
+                self._post(_sample_payload(n))
+            self._drain()
         forward_lines = [line for line in err.getvalue().splitlines() if line.startswith("berserk forward")]
         self.assertEqual(len(forward_lines), 1, forward_lines)
         self.assertIn("unexpected", forward_lines[0])
@@ -792,8 +910,224 @@ class HandlerForwardingIntegrationTest(unittest.TestCase):
         resp.read()
         conn.close()
         self.assertEqual(resp.status, 200)
+        self._drain()
         self.assertEqual(self.forward_calls, [])
         self.assertFalse(os.path.exists(self.out_path))
+
+    # ---- fast reply -------------------------------------------------------
+
+    def test_reply_is_fast_while_the_forward_is_still_running(self):
+        started = threading.Event()
+        self.release.clear()
+
+        def slow_post(endpoint, payload, timeout=10):
+            started.set()
+            self.release.wait(10)
+            self.forward_calls.append(payload)
+            return True, "http 200"
+
+        self._start(slow_post)
+        # The forward stays blocked until self.release is set, so a reply that
+        # came back at all did not wait for it (a waiting reply would hit the
+        # client's 5 s timeout and fail this call). No wall-clock threshold.
+        status, resp = self._post(_sample_payload())
+        self.assertEqual((status, resp["berserk_forward"]), (200, "queued"))
+        self.assertTrue(started.wait(5))
+        self.assertEqual(self.forward_calls, [], "the forward is still in flight")
+        self.release.set()
+        self._drain()
+        self.assertEqual(len(self.forward_calls), 1)
+
+    def test_queue_full_drops_the_forward_but_still_replies_and_records(self):
+        started = threading.Event()
+        self.release.clear()
+
+        def blocked_post(endpoint, payload, timeout=10):
+            started.set()
+            self.release.wait(10)
+            return True, "http 200"
+
+        self._start(blocked_post, forward_queue_size=1)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertEqual(self._post(_sample_payload(1))[1]["berserk_forward"], "queued")
+            self.assertTrue(started.wait(5))  # the worker holds item 1
+            self.assertEqual(self._post(_sample_payload(2))[1]["berserk_forward"], "queued")  # fills the queue
+            status, resp = self._post(_sample_payload(3))  # no room left
+        self.assertEqual((status, resp["berserk_forward"]), (200, "dropped"))
+        self.assertEqual(len(self._lines(self.out_path)), 3, "dropped forwards are still captured locally")
+        self.assertIn("forward queue full", err.getvalue())
+        self.release.set()
+        self._drain()
+
+    # ---- duplicates -------------------------------------------------------
+
+    def test_duplicate_delivery_is_recorded_once_and_forwarded_once(self):
+        def fake_post(endpoint, payload, timeout=10):
+            self.forward_calls.append(payload)
+            return True, "http 200"
+
+        self._start(fake_post)
+        s1, r1 = self._post(_sample_payload())
+        s2, r2 = self._post(_sample_payload())  # OpenRouter retry of the same trace
+        self.assertEqual((s1, s2), (200, 200))
+        self.assertEqual(r1["spans_received"], 1)
+        self.assertEqual((r2["spans_received"], r2["duplicates_skipped"]), (0, 1))
+        self.assertEqual(r2["berserk_forward"], "skipped")
+        self._drain()
+        self.assertEqual(len(self.forward_calls), 1)
+        self.assertEqual(len(self._lines(self.out_path)), 1)
+        self.assertEqual(len(self._lines(self.raw_path)), 2, "the raw capture keeps every delivery")
+
+    def test_partial_overlap_forwards_only_the_new_spans(self):
+        def fake_post(endpoint, payload, timeout=10):
+            self.forward_calls.append(payload)
+            return True, "http 200"
+
+        self._start(fake_post)
+        self._post(_payload_with_spans([1, 2]))
+        self._post(_payload_with_spans([2, 3]))
+        self._drain()
+        self.assertEqual([_count_log_records(p) for p in self.forward_calls], [2, 1])
+        self.assertEqual(len(self._lines(self.out_path)), 3)
+
+    def test_spans_without_ids_are_never_treated_as_duplicates(self):
+        def fake_post(endpoint, payload, timeout=10):
+            self.forward_calls.append(payload)
+            return True, "http 200"
+
+        self._start(fake_post)
+        self._post(_payload_with_spans([1], with_ids=False))
+        self._post(_payload_with_spans([1], with_ids=False))
+        self._drain()
+        self.assertEqual(len(self.forward_calls), 2)
+        self.assertEqual(len(self._lines(self.out_path)), 2)
+
+    # ---- review fixes -----------------------------------------------------
+
+    def test_a_failure_after_the_claim_releases_it_so_the_retry_is_processed(self):
+        real_extract = receiver.extract_spans
+        calls = {"n": 0}
+
+        def flaky_extract(payload):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ValueError("boom")
+            return real_extract(payload)
+
+        self._start(lambda *a, **k: (True, "http 200"))
+        with mock.patch.object(receiver, "extract_spans", flaky_extract), redirect_stderr(io.StringIO()):
+            status, resp = self._post(_sample_payload())
+            self.assertEqual((status, resp), (200, {"ok": True, "parsed": False}))
+            status, resp = self._post(_sample_payload())  # the retry
+        self.assertEqual(status, 200)
+        self.assertEqual(resp["spans_received"], 1, "a failed attempt must not count as already seen")
+        self.assertNotIn("duplicates_skipped", resp)
+
+    def test_a_partial_span_write_is_rolled_back_so_the_retry_does_not_duplicate_rows(self):
+        class HalfWriteFile:
+            """Writes part of the data, then fails like a full disk."""
+
+            def __init__(self, real):
+                self._real = real
+
+            def __enter__(self):
+                self._real.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self._real.__exit__(*exc)
+
+            def write(self, data):
+                self._real.write(data[: len(data) // 2])
+                self._real.flush()
+                raise OSError(28, "No space left on device")
+
+        real_open = open
+        state = {"fail": True}
+
+        def flaky_open(path, mode="r", *a, **k):
+            f = real_open(path, mode, *a, **k)
+            if state["fail"] and str(path) == self.out_path and "a" in mode:
+                return HalfWriteFile(f)
+            return f
+
+        self._start(lambda *a, **k: (True, "http 200"))
+        with mock.patch.object(receiver, "open", flaky_open, create=True), redirect_stderr(io.StringIO()):
+            status, _ = self._post(_payload_with_spans([1, 2]))
+        self.assertEqual(status, 500)
+        self.assertEqual(os.path.getsize(self.out_path), 0, "the half-written rows must be rolled back")
+        state["fail"] = False
+        with mock.patch.object(receiver, "open", flaky_open, create=True):
+            status, resp = self._post(_payload_with_spans([1, 2]))
+        self.assertEqual((status, resp["spans_received"]), (200, 2))
+        self.assertEqual(len(self._lines(self.out_path)), 2, "exactly one row per span")
+
+    def test_a_forward_worker_survives_an_exception_in_its_own_bookkeeping(self):
+        class BrokenStats(ForwardStats):
+            def __init__(self):
+                super().__init__()
+                self.explode = 2  # the first call and the error-path retry both raise
+
+            def record(self, ok, detail):
+                if self.explode:
+                    self.explode -= 1
+                    raise RuntimeError("stats broke")
+                return super().record(ok, detail)
+
+        def fake_post(endpoint, payload, timeout=10):
+            self.forward_calls.append(payload)
+            return True, "http 200"
+
+        self._start(fake_post, stats=BrokenStats())
+        with redirect_stderr(io.StringIO()):
+            self._post(_sample_payload(1))
+            self._drain()
+            self._post(_sample_payload(2))  # the worker must still be alive
+            self._drain()
+        self.assertEqual(len(self.forward_calls), 2)
+
+    def test_an_oversized_body_is_refused_before_it_is_read(self):
+        self._start(lambda *a, **k: (True, "http 200"), max_body_bytes=100)
+        status, resp = self._post(_sample_payload())
+        self.assertEqual((status, resp["error"]), (413, "payload too large"))
+        self.assertFalse(os.path.exists(self.out_path))
+        self.assertFalse(os.path.exists(self.raw_path))
+
+    # ---- storage failures -------------------------------------------------
+
+    def test_storage_failure_answers_500_and_the_retry_is_processed(self):
+        missing_dir = os.path.join(self.tmpdir, "missing")
+        bad_out = os.path.join(missing_dir, "spans.jsonl")
+
+        def fake_post(endpoint, payload, timeout=10):
+            self.forward_calls.append(payload)
+            return True, "http 200"
+
+        self._start(fake_post, out_path=bad_out)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            status, resp = self._post(_sample_payload())
+        self.assertEqual(status, 500)
+        self.assertEqual(resp, {"ok": False, "error": "storage failure"})
+        self.assertIn("storage failure", err.getvalue())
+        os.makedirs(missing_dir)  # the disk problem is fixed; OpenRouter retries
+        status, resp = self._post(_sample_payload())
+        self.assertEqual(status, 200)
+        self.assertEqual(resp["spans_received"], 1, "a failed attempt must not count as already seen")
+        self._drain()
+        self.assertEqual(len(self.forward_calls), 1)
+
+    def test_raw_capture_failure_also_answers_500(self):
+        self._start(lambda *a, **k: (True, "http 200"), raw_path=os.path.join(self.tmpdir, "nodir", "raw.jsonl"))
+        with redirect_stderr(io.StringIO()):
+            status, resp = self._post(_sample_payload())
+        self.assertEqual((status, resp["error"]), (500, "storage failure"))
+
+    def test_non_object_payload_is_tolerated(self):
+        self._start(lambda *a, **k: (True, "http 200"))
+        status, resp = self._post(b"[1, 2, 3]")
+        self.assertEqual((status, resp), (200, {"ok": True, "parsed": False}))
 
 
 class HandlerHmacModeIntegrationTest(unittest.TestCase):
