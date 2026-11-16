@@ -42,6 +42,16 @@ absent one passes only the X-Test-Connection handshake.
 Forward failures (--berserk-endpoint) are summarized on stderr: one line
 when forwarding starts failing, a periodic "still FAILING" line while it
 stays broken, and one line on recovery. Any 2xx from ingest is success.
+
+Reply speed and duplicates: the webhook reply goes out as soon as the local
+capture is written. Redaction and the forward to Berserk run on background
+workers behind a bounded queue, because Berserk's ingest answers in about
+two seconds and OpenRouter retries a delivery it thinks is slow (observed
+2026-11-16: most spans arrived twice). Each (traceId, spanId) is also
+claimed once; a retried delivery is kept in the raw capture but is not
+written to the spans file or forwarded again. If the local capture cannot be
+written the reply is 500 (so OpenRouter retries), and the claim is released
+so that retry is processed.
 """
 
 import argparse
@@ -50,10 +60,12 @@ import hashlib
 import hmac
 import json
 import os
+import queue
 import sys
 import threading
 import time
 import urllib.error
+from collections import OrderedDict
 from datetime import datetime, UTC
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -424,6 +436,183 @@ class ForwardStats:
             }
 
 
+class SpanDeduper:
+    """Thread-safe, bounded set of (traceId, spanId) pairs already handled.
+
+    claim() is atomic: of two concurrent deliveries of the same span exactly
+    one wins. release() undoes a claim whose local write failed, so the retry
+    is processed. The oldest entries are evicted past max_size."""
+
+    def __init__(self, max_size=5000):
+        self._lock = threading.Lock()
+        self._max = max_size
+        self._seen = OrderedDict()
+
+    def claim(self, key):
+        with self._lock:
+            if key in self._seen:
+                return False
+            self._seen[key] = None
+            while len(self._seen) > self._max:
+                self._seen.popitem(last=False)
+            return True
+
+    def release(self, keys):
+        with self._lock:
+            for key in keys:
+                self._seen.pop(key, None)
+
+    def __len__(self):
+        with self._lock:
+            return len(self._seen)
+
+
+def span_key(span):
+    """(traceId, spanId), or None when either is missing (never deduplicated)."""
+    trace_id, span_id = span.get("traceId"), span.get("spanId")
+    return (trace_id, span_id) if trace_id and span_id else None
+
+
+def claim_new_spans(payload, deduper):
+    """Split a webhook payload into spans not seen before.
+
+    Returns (filtered_payload, claimed_keys, new_count, duplicate_count). The
+    filtered payload keeps each resource/scope envelope and only the new spans.
+    If the payload shape is wrong, partial claims are released and the
+    exception propagates."""
+    claimed, new, dup, out_resources = [], 0, 0, []
+    try:
+        for resource_span in payload.get("resourceSpans") or []:
+            out_scopes = []
+            for scope_span in resource_span.get("scopeSpans") or []:
+                keep = []
+                for span in scope_span.get("spans") or []:
+                    key = span_key(span)
+                    if key is not None:
+                        if not deduper.claim(key):
+                            dup += 1
+                            continue
+                        claimed.append(key)
+                    keep.append(span)
+                    new += 1
+                if keep:
+                    out_scopes.append({**scope_span, "spans": keep})
+            if out_scopes:
+                out_resources.append({**resource_span, "scopeSpans": out_scopes})
+    except (AttributeError, TypeError):
+        deduper.release(claimed)
+        raise
+    return {**payload, "resourceSpans": out_resources}, claimed, new, dup
+
+
+def _start_forwarders(berserk_endpoint, post_fn, stats, workers, queue_size):
+    """Start the background workers that redact and forward deliveries to
+    Berserk. Returns the bounded queue the handler feeds."""
+    forward_queue = queue.Queue(maxsize=queue_size)
+
+    def forward_worker():
+        while True:
+            item = forward_queue.get()
+            try:
+                lines = []
+                try:
+                    berserk_payload = spans_to_berserk_payload(item)
+                    if berserk_payload is not None:
+                        ok, detail = post_fn(berserk_endpoint, berserk_payload)
+                        lines = stats.record(ok, detail)
+                except Exception as exc:  # noqa: BLE001 -- forwarding must never kill the worker
+                    lines = stats.record(False, f"raised: {exc}")
+                # Failures are logged by ForwardStats only (state changes and a
+                # periodic summary), never once per delivery: a long outage
+                # must not turn every webhook into a log line.
+                for line in lines:
+                    sys.stderr.write(line + "\n")
+            finally:
+                forward_queue.task_done()
+
+    for i in range(workers):
+        threading.Thread(target=forward_worker, name=f"berserk-forward-{i}", daemon=True).start()
+    return forward_queue
+
+
+class _Delivery:
+    """Everything one webhook delivery needs, shared by all requests."""
+
+    def __init__(self, out_path, raw_out_path, lock, deduper, stats, berserk_endpoint, forward_queue):
+        self.out_path = out_path
+        self.raw_out_path = raw_out_path
+        self.lock = lock
+        self.deduper = deduper
+        self.stats = stats
+        self.berserk_endpoint = berserk_endpoint
+        self.forward_queue = forward_queue
+
+    def _capture_raw(self, body, received_at):
+        with self.lock:
+            if self.raw_out_path:
+                with open(self.raw_out_path, "a") as f:
+                    f.write(json.dumps({"received_at": received_at, "raw": body.decode("utf-8", "replace")}) + "\n")
+
+    def _write_rows(self, rows, received_at):
+        with self.lock, open(self.out_path, "a") as f:
+            for row in rows:
+                row["received_at"] = received_at
+                f.write(json.dumps(row) + "\n")
+
+    def _enqueue(self, filtered):
+        """Queue the new spans for forwarding; returns the status word for the reply."""
+        try:
+            self.forward_queue.put_nowait(filtered)
+            return "queued"
+        except queue.Full:
+            pending = self.forward_queue.maxsize
+            for line in self.stats.record(False, f"forward queue full ({pending} pending)"):
+                sys.stderr.write(line + "\n")
+            return "dropped"
+
+    def process(self, body):
+        """Handle one authenticated, non-handshake delivery. Returns (status, reply)."""
+        received_at = datetime.now(UTC).isoformat()
+        try:
+            self._capture_raw(body, received_at)
+        except OSError as exc:
+            sys.stderr.write(f"storage failure writing raw capture: {exc}\n")
+            return 500, {"ok": False, "error": "storage failure"}
+
+        try:
+            payload = json.loads(body) if body else {}
+        except ValueError as exc:
+            sys.stderr.write(f"failed to parse webhook payload as JSON: {exc}\n")
+            return 200, {"ok": True, "parsed": False}
+        if not isinstance(payload, dict):
+            sys.stderr.write("webhook payload is not a JSON object; kept in the raw capture only\n")
+            return 200, {"ok": True, "parsed": False}
+
+        try:
+            filtered, claimed, n_new, n_dup = claim_new_spans(payload, self.deduper)
+        except (AttributeError, TypeError) as exc:
+            sys.stderr.write(f"unexpected webhook payload shape ({exc}); kept in the raw capture only\n")
+            return 200, {"ok": True, "parsed": False}
+
+        rows = extract_spans(filtered)
+        try:
+            self._write_rows(rows, received_at)
+        except OSError as exc:
+            self.deduper.release(claimed)  # the retry must be processed, not skipped
+            sys.stderr.write(f"storage failure writing spans: {exc}\n")
+            return 500, {"ok": False, "error": "storage failure"}
+
+        resp = {"ok": True, "spans_received": len(rows)}
+        if n_dup:
+            resp["duplicates_skipped"] = n_dup
+        if self.berserk_endpoint:
+            # Best-effort and off the reply path: the local capture is the
+            # durable record, so a failed or dropped forward loses nothing
+            # that backfill cannot recover.
+            resp["berserk_forward"] = "skipped" if n_new == 0 else self._enqueue(filtered)
+        return 200, resp
+
+
 def _make_handler(
     out_path,
     raw_out_path,
@@ -433,10 +622,20 @@ def _make_handler(
     post_fn=post_to_berserk,
     signature_mode="static",
     stats=None,
+    forward_workers=2,
+    forward_queue_size=200,
+    dedupe_size=5000,
 ):
     if signature_mode not in SIGNATURE_MODES:
         raise ValueError(f"unknown signature mode: {signature_mode!r}")
     stats = stats or ForwardStats()
+    deduper = SpanDeduper(dedupe_size)
+    forward_queue = (
+        _start_forwarders(berserk_endpoint, post_fn, stats, forward_workers, forward_queue_size)
+        if berserk_endpoint
+        else queue.Queue(maxsize=forward_queue_size)
+    )
+    delivery = _Delivery(out_path, raw_out_path, lock, deduper, stats, berserk_endpoint, forward_queue)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
@@ -464,50 +663,7 @@ def _make_handler(
                 self._respond(401, {"ok": False, "error": "signature mismatch"})
                 return
 
-            received_at = datetime.now(UTC).isoformat()
-
-            with lock:
-                if raw_out_path:
-                    with open(raw_out_path, "a") as f:
-                        f.write(json.dumps({"received_at": received_at, "raw": body.decode("utf-8", "replace")}) + "\n")
-
-            try:
-                payload = json.loads(body) if body else {}
-            except ValueError as exc:
-                sys.stderr.write(f"failed to parse webhook payload as JSON: {exc}\n")
-                self._respond(200, {"ok": True, "parsed": False})
-                return
-
-            rows = extract_spans(payload)
-            with lock, open(out_path, "a") as f:
-                for row in rows:
-                    row["received_at"] = received_at
-                    f.write(json.dumps(row) + "\n")
-
-            forwarded, forward_detail = None, None
-            if berserk_endpoint:
-                # Best-effort: local archival above has already succeeded
-                # and is the durable record regardless of what happens
-                # here. Never let a forwarding failure surface as a
-                # webhook error to OpenRouter -- that's the local write's
-                # job, already done.
-                try:
-                    berserk_payload = spans_to_berserk_payload(payload)
-                    if berserk_payload is not None:
-                        forwarded, forward_detail = post_fn(berserk_endpoint, berserk_payload)
-                except Exception as exc:  # noqa: BLE001
-                    forwarded, forward_detail = False, f"raised: {exc}"
-                # Failures are logged by ForwardStats only (state changes and a
-                # periodic summary), never once per delivery: a long outage
-                # must not turn every webhook into a log line.
-                if forwarded is not None:
-                    for line in stats.record(forwarded, forward_detail):
-                        sys.stderr.write(line + "\n")
-
-            resp = {"ok": True, "spans_received": len(rows)}
-            if forwarded is not None:
-                resp["berserk_forwarded"] = forwarded
-            self._respond(200, resp)
+            self._respond(*delivery.process(body))
 
         def _respond(self, code, body_dict):
             payload = json.dumps(body_dict).encode("utf-8")
@@ -517,6 +673,9 @@ def _make_handler(
             self.end_headers()
             self.wfile.write(payload)
 
+    Handler.forward_queue = forward_queue
+    Handler.stats = stats
+    Handler.deduper = deduper
     return Handler
 
 
