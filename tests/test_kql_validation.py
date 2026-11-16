@@ -245,6 +245,12 @@ class UnknownFieldPrecisionTest(unittest.TestCase):
         self.assertTrue(any("service.nam" in m for m in msgs), msgs)
         self.assertEqual(self.unknown("default | where resource.service.name == 'api' | take 5"), [])
 
+    def test_nested_or_method_like_dotted_text_is_not_a_bag_path(self):
+        refs = kv._extract_referenced_fields(
+            "default | extend x=foo.resource.service.nam, y=resource.service.nam() | take 5"
+        )
+        self.assertFalse([r for r in refs if "service.nam" in r], refs)
+
     def test_a_name_used_before_the_stage_that_defines_it_is_unknown(self):
         msgs = self.unknown("default | where madeup > 1 | extend madeup=timestamp | take 5")
         self.assertTrue(any("madeup" in m for m in msgs), msgs)

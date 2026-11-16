@@ -227,7 +227,11 @@ def _normalize_schema_fields(schema_fields):
 
 
 _BARE_IDENT_RE = re.compile(r"(?<![A-Za-z0-9_$.\-])(\$?[A-Za-z_][A-Za-z0-9_]*)(?![A-Za-z0-9_\-])(\s*\()?")
-_DOTTED_BAG_RE = re.compile(r"\b(resource|attributes)\.([A-Za-z_][A-Za-z0-9_.-]*[A-Za-z0-9_])")
+# Not preceded by a name or "." (foo.resource.x is not a bag path), and the
+# path must not run on or be called like a method (resource.x()).
+_DOTTED_BAG_RE = re.compile(
+    r"(?<![A-Za-z0-9_$.])(resource|attributes)\.([A-Za-z_][A-Za-z0-9_.-]*[A-Za-z0-9_])(?![A-Za-z0-9_.-]|\s*\()"
+)
 _ASSIGNED_NAME_RE = re.compile(r"(?<![=!<>])\b([A-Za-z_][A-Za-z0-9_]*)\s*=(?![=~])")
 _ASSIGNED_TUPLE_RE = re.compile(r"\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)+)\s*\)\s*=(?![=~])")
 
