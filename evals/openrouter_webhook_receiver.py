@@ -26,10 +26,28 @@ timeUnixNano/severityNumber/severityText/body/attributes is what lands).
 Every string-valued span attribute is redacted via secret_scan.redact()
 before it leaves this box -- gen_ai.prompt/gen_ai.completion/trace.input/
 trace.output carry full real prompt/completion text from live testing.
+
+Signature modes (--signature-mode):
+  static           (default) X-Webhook-Signature must equal the shared secret.
+                   This is what OpenRouter's Broadcast webhook docs describe:
+                   a custom header whose value you set yourself.
+  openrouter-hmac  X-OpenRouter-Signature: t=<unix>,v1=<hex HMAC-SHA256 of
+                   "<t>," + raw body>, accepted within 300 s. Taken from
+                   OpenRouter's video-generation callback docs; NOT confirmed
+                   for Broadcast deliveries. Use only if OpenRouter is shown
+                   to sign Broadcast payloads this way.
+Both modes compare in constant time. A wrong signature is always 401; an
+absent one passes only the X-Test-Connection handshake.
+
+Forward failures (--berserk-endpoint) are summarized on stderr: one line
+when forwarding starts failing, a periodic "still FAILING" line while it
+stays broken, and one line on recovery. Any 2xx from ingest is success.
 """
 
 import argparse
 import functools
+import hashlib
+import hmac
 import json
 import os
 import sys
@@ -269,7 +287,8 @@ def post_to_berserk(endpoint, payload, timeout=10, *, allow_plaintext_remote=Fal
             label="berserk otlp endpoint",
             allow_plaintext_remote=allow_plaintext_remote,
         )
-        return status == 200, f"http {status}"
+        # Any 2xx means ingest accepted the payload (202/204 included).
+        return 200 <= status < 300, f"http {status}"
     except urllib.error.HTTPError as exc:
         return False, f"http {exc.code}"
     except Exception as exc:  # noqa: BLE001 -- forwarding must never raise
@@ -283,23 +302,142 @@ def is_test_connection(headers):
     return False
 
 
-def verify_signature(headers, expected_secret):
-    if not expected_secret:
-        return True
-    for key, value in headers.items():
-        if key.lower() == "x-webhook-signature":
-            return value == expected_secret
-    return False
+SIGNATURE_MODES = ("static", "openrouter-hmac")
+HMAC_TOLERANCE_SECONDS = 300
 
 
-def _provided_signature(headers):
+def _header(headers, name):
+    name = name.lower()
     for key, value in headers.items():
-        if key.lower() == "x-webhook-signature":
+        if key.lower() == name:
             return value
     return None
 
 
-def _make_handler(out_path, raw_out_path, expected_secret, lock, berserk_endpoint=None, post_fn=post_to_berserk):
+def _equal(a, b):
+    """Constant-time string comparison; non-ASCII input is simply unequal."""
+    try:
+        return hmac.compare_digest(a.encode("ascii"), b.encode("ascii"))
+    except (UnicodeEncodeError, AttributeError):
+        return False
+
+
+def _check_openrouter_hmac(value, body, secret, now):
+    parts = {}
+    for item in value.split(","):
+        key, sep, val = item.strip().partition("=")
+        if not sep:
+            return "invalid"
+        parts.setdefault(key, val)
+    ts_text, sig = parts.get("t", ""), parts.get("v1", "")
+    # Bound the length before int(): a unix time has 10 digits, and int()
+    # raises ValueError past ~4300 digits, which would drop the connection
+    # instead of answering 401.
+    if not ts_text.isascii() or not ts_text.isdigit() or len(ts_text) > 12 or not sig:
+        return "invalid"
+    ts = int(ts_text)
+    if abs((time.time() if now is None else now) - ts) > HMAC_TOLERANCE_SECONDS:
+        return "invalid"
+    expected = hmac.new(secret.encode(), f"{ts},".encode() + body, hashlib.sha256).hexdigest()
+    return "valid" if _equal(sig, expected) else "invalid"
+
+
+def check_signature(headers, body, expected_secret, mode="static", now=None):
+    """Return "valid", "invalid" or "absent" for one request.
+
+    `body` must be the raw bytes as received (HMAC covers exact bytes).
+    Each mode reads only its own header, so the static secret is never
+    accepted in HMAC mode and vice versa."""
+    if mode not in SIGNATURE_MODES:
+        raise ValueError(f"unknown signature mode: {mode!r}")
+    if not expected_secret:
+        return "valid"
+    if mode == "static":
+        provided = _header(headers, "x-webhook-signature")
+        if provided is None:
+            return "absent"
+        return "valid" if _equal(provided, expected_secret) else "invalid"
+    provided = _header(headers, "x-openrouter-signature")
+    if provided is None:
+        return "absent"
+    return _check_openrouter_hmac(provided, body, expected_secret, now)
+
+
+def verify_signature(headers, expected_secret):
+    """Static-mode check kept for callers and tests: True only if valid."""
+    return check_signature(headers, b"", expected_secret) == "valid"
+
+
+class ForwardStats:
+    """Thread-safe Berserk forwarding counters that turn per-delivery
+    outcomes into a few log lines: FAILING on the first failure, a
+    periodic "still FAILING" summary, RECOVERED when it works again."""
+
+    def __init__(self, summary_interval=900, clock=time.time):
+        self._lock = threading.Lock()
+        self._interval = summary_interval
+        self._clock = clock
+        self.ok = 0
+        self.failed = 0
+        self.consecutive_failures = 0
+        self.last_error = None
+        self.last_ok_at = None
+        self._last_summary_at = None
+
+    def record(self, ok, detail):
+        """Count one outcome; return the log lines it warrants (maybe none)."""
+        with self._lock:
+            now = self._clock()
+            if ok:
+                self.ok += 1
+                self.last_ok_at = now
+                lines = []
+                if self.consecutive_failures:
+                    lines.append(
+                        f"berserk forward RECOVERED after {self.consecutive_failures} consecutive "
+                        f"failures (last error: {self.last_error}); now {detail}"
+                    )
+                self.consecutive_failures = 0
+                return lines
+            self.failed += 1
+            self.consecutive_failures += 1
+            self.last_error = detail
+            if self.consecutive_failures == 1:
+                self._last_summary_at = now
+                return [f"berserk forward FAILING: {detail} (ok={self.ok} failed={self.failed})"]
+            if now - self._last_summary_at >= self._interval:
+                self._last_summary_at = now
+                return [
+                    f"berserk forward still FAILING: {self.consecutive_failures} consecutive failures, "
+                    f"ok={self.ok} failed={self.failed}, last error: {detail}"
+                ]
+            return []
+
+    def snapshot(self):
+        with self._lock:
+            return {
+                "ok": self.ok,
+                "failed": self.failed,
+                "consecutive_failures": self.consecutive_failures,
+                "last_error": self.last_error,
+                "last_ok_at": self.last_ok_at,
+            }
+
+
+def _make_handler(
+    out_path,
+    raw_out_path,
+    expected_secret,
+    lock,
+    berserk_endpoint=None,
+    post_fn=post_to_berserk,
+    signature_mode="static",
+    stats=None,
+):
+    if signature_mode not in SIGNATURE_MODES:
+        raise ValueError(f"unknown signature mode: {signature_mode!r}")
+    stats = stats or ForwardStats()
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             sys.stderr.write(f"{self.address_string()} - {fmt % args}\n")
@@ -311,9 +449,10 @@ def _make_handler(out_path, raw_out_path, expected_secret, lock, berserk_endpoin
 
             # A *wrong* signature is always rejected, even on the test-connection
             # handshake -- only a genuinely absent header gets the handshake's
-            # documented no-auth-required treatment.
-            provided_sig = _provided_signature(headers)
-            if provided_sig is not None and provided_sig != expected_secret:
+            # documented no-auth-required treatment. Checked against the raw
+            # body bytes, before any parsing.
+            sig_state = check_signature(headers, body, expected_secret, mode=signature_mode)
+            if sig_state == "invalid":
                 self._respond(401, {"ok": False, "error": "signature mismatch"})
                 return
 
@@ -321,7 +460,7 @@ def _make_handler(out_path, raw_out_path, expected_secret, lock, berserk_endpoin
                 self._respond(200, {"ok": True, "test_connection": True})
                 return
 
-            if not verify_signature(headers, expected_secret):
+            if sig_state != "valid":
                 self._respond(401, {"ok": False, "error": "signature mismatch"})
                 return
 
@@ -356,11 +495,14 @@ def _make_handler(out_path, raw_out_path, expected_secret, lock, berserk_endpoin
                     berserk_payload = spans_to_berserk_payload(payload)
                     if berserk_payload is not None:
                         forwarded, forward_detail = post_fn(berserk_endpoint, berserk_payload)
-                        if not forwarded:
-                            sys.stderr.write(f"berserk forward failed: {forward_detail}\n")
                 except Exception as exc:  # noqa: BLE001
-                    forwarded, forward_detail = False, str(exc)
-                    sys.stderr.write(f"berserk forward raised: {exc}\n")
+                    forwarded, forward_detail = False, f"raised: {exc}"
+                # Failures are logged by ForwardStats only (state changes and a
+                # periodic summary), never once per delivery: a long outage
+                # must not turn every webhook into a log line.
+                if forwarded is not None:
+                    for line in stats.record(forwarded, forward_detail):
+                        sys.stderr.write(line + "\n")
 
             resp = {"ok": True, "spans_received": len(rows)}
             if forwarded is not None:
@@ -378,7 +520,15 @@ def _make_handler(out_path, raw_out_path, expected_secret, lock, berserk_endpoin
     return Handler
 
 
-def run_server(port, out_path, raw_out_path, expected_secret, berserk_endpoint=None, allow_plaintext_remote=False):
+def run_server(
+    port,
+    out_path,
+    raw_out_path,
+    expected_secret,
+    berserk_endpoint=None,
+    allow_plaintext_remote=False,
+    signature_mode="static",
+):
     lock = threading.Lock()
     handler = _make_handler(
         out_path,
@@ -387,12 +537,14 @@ def run_server(port, out_path, raw_out_path, expected_secret, berserk_endpoint=N
         lock,
         berserk_endpoint=berserk_endpoint,
         post_fn=functools.partial(post_to_berserk, allow_plaintext_remote=allow_plaintext_remote),
+        signature_mode=signature_mode,
     )
     server = ThreadingHTTPServer(("0.0.0.0", port), handler)
     print(
         f"listening on :{port} -> rows: {out_path}"
         + (f" raw: {raw_out_path}" if raw_out_path else "")
         + (f" berserk: {berserk_endpoint}" if berserk_endpoint else " (berserk forwarding disabled)")
+        + f" signature-mode: {signature_mode}"
     )
     try:
         server.serve_forever()
@@ -435,6 +587,15 @@ def main(argv=None):
         "where the tunnel itself encrypts). Without it such endpoints are refused. A configured http_proxy "
         "still applies to that plaintext; exempt the host with no_proxy.",
     )
+    parser.add_argument(
+        "--signature-mode",
+        choices=SIGNATURE_MODES,
+        default="static",
+        help="static (default): X-Webhook-Signature must equal the secret, as OpenRouter's Broadcast "
+        "webhook docs describe. openrouter-hmac: verify X-OpenRouter-Signature (t=..,v1=HMAC-SHA256 of "
+        '"<t>," + raw body, 300 s window) -- from OpenRouter\'s video-callback docs, not confirmed '
+        "for Broadcast.",
+    )
     args = parser.parse_args(argv)
 
     secret = None
@@ -464,6 +625,7 @@ def main(argv=None):
         secret,
         berserk_endpoint=args.berserk_endpoint,
         allow_plaintext_remote=args.allow_plaintext_remote,
+        signature_mode=args.signature_mode,
     )
 
 

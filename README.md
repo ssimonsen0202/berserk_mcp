@@ -42,10 +42,16 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.37.2**. This is a bullet-point overview, most recent
+Current version: **1.37.3**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.37.3** (2026-11-16) — OpenRouter webhook receiver fixes. Any 2xx
+  from ingest counts as a successful forward. Forward failures log one
+  FAILING line, a periodic summary and a RECOVERED line. The static
+  signature check is constant-time, and an opt-in HMAC mode
+  (`--signature-mode openrouter-hmac`) exists for signed deliveries. See
+  [docs/releases/v1.37.3.md](docs/releases/v1.37.3.md).
 - **v1.37.2** (2026-10-05) — Three security fixes from a Codex Security
   review. Every bzrk query now holds a query slot. Each tool call keeps its
   own query budget when calls overlap. `scan_secrets`, `detect_new_sources`
