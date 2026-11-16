@@ -95,6 +95,15 @@ class ExtractSpansTest(unittest.TestCase):
         self.assertIsInstance(rows[0]["prompt_tokens"], int)
         self.assertIsInstance(rows[0]["completion_tokens"], int)
 
+    def test_a_non_numeric_token_value_is_kept_not_fatal(self):
+        payload = _payload_with_spans([1])
+        span = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+        span["attributes"].append(_attr("gen_ai.usage.total_tokens", "not-an-integer"))
+        rows = extract_spans(payload)
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["total_tokens"])
+        self.assertEqual(rows[0]["attributes"]["gen_ai.usage.total_tokens"], "not-an-integer")
+
     def test_empty_resource_spans_yields_no_rows(self):
         self.assertEqual(extract_spans({"resourceSpans": []}), [])
 
@@ -681,9 +690,22 @@ class SpanDeduperTest(unittest.TestCase):
 
     def test_release_allows_a_retry_to_claim_again(self):
         d = SpanDeduper(max_size=10)
-        d.claim(("t", "s"))
-        d.release([("t", "s")])
+        claim = d.claim(("t", "s"))
+        d.release([claim])
         self.assertTrue(d.claim(("t", "s")))
+
+    def test_a_stale_release_cannot_remove_a_newer_claim(self):
+        # The first attempt's claim is evicted, a retry re-claims the span, then
+        # the first attempt fails late and releases. Only the owner may release.
+        d = SpanDeduper(max_size=1)
+        stale = d.claim(("t", "a"))
+        d.claim(("t", "b"))  # evicts "a"
+        fresh = d.claim(("t", "a"))
+        self.assertTrue(fresh)
+        d.release([stale])
+        self.assertFalse(d.claim(("t", "a")), "the retry's claim must survive the stale release")
+        d.release([fresh])
+        self.assertTrue(d.claim(("t", "a")))
 
     def test_memory_is_bounded_oldest_is_evicted(self):
         d = SpanDeduper(max_size=2)
@@ -905,11 +927,11 @@ class HandlerForwardingIntegrationTest(unittest.TestCase):
             return True, "http 200"
 
         self._start(slow_post)
-        t0 = time.time()
+        # The forward stays blocked until self.release is set, so a reply that
+        # came back at all did not wait for it (a waiting reply would hit the
+        # client's 5 s timeout and fail this call). No wall-clock threshold.
         status, resp = self._post(_sample_payload())
-        elapsed = time.time() - t0
         self.assertEqual((status, resp["berserk_forward"]), (200, "queued"))
-        self.assertLess(elapsed, 1.0, "the reply must not wait for the Berserk forward")
         self.assertTrue(started.wait(5))
         self.assertEqual(self.forward_calls, [], "the forward is still in flight")
         self.release.set()
@@ -980,6 +1002,97 @@ class HandlerForwardingIntegrationTest(unittest.TestCase):
         self._drain()
         self.assertEqual(len(self.forward_calls), 2)
         self.assertEqual(len(self._lines(self.out_path)), 2)
+
+    # ---- review fixes -----------------------------------------------------
+
+    def test_a_failure_after_the_claim_releases_it_so_the_retry_is_processed(self):
+        real_extract = receiver.extract_spans
+        calls = {"n": 0}
+
+        def flaky_extract(payload):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ValueError("boom")
+            return real_extract(payload)
+
+        self._start(lambda *a, **k: (True, "http 200"))
+        with mock.patch.object(receiver, "extract_spans", flaky_extract), redirect_stderr(io.StringIO()):
+            status, resp = self._post(_sample_payload())
+            self.assertEqual((status, resp), (200, {"ok": True, "parsed": False}))
+            status, resp = self._post(_sample_payload())  # the retry
+        self.assertEqual(status, 200)
+        self.assertEqual(resp["spans_received"], 1, "a failed attempt must not count as already seen")
+        self.assertNotIn("duplicates_skipped", resp)
+
+    def test_a_partial_span_write_is_rolled_back_so_the_retry_does_not_duplicate_rows(self):
+        class HalfWriteFile:
+            """Writes part of the data, then fails like a full disk."""
+
+            def __init__(self, real):
+                self._real = real
+
+            def __enter__(self):
+                self._real.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self._real.__exit__(*exc)
+
+            def write(self, data):
+                self._real.write(data[: len(data) // 2])
+                self._real.flush()
+                raise OSError(28, "No space left on device")
+
+        real_open = open
+        state = {"fail": True}
+
+        def flaky_open(path, mode="r", *a, **k):
+            f = real_open(path, mode, *a, **k)
+            if state["fail"] and str(path) == self.out_path and "a" in mode:
+                return HalfWriteFile(f)
+            return f
+
+        self._start(lambda *a, **k: (True, "http 200"))
+        with mock.patch.object(receiver, "open", flaky_open, create=True), redirect_stderr(io.StringIO()):
+            status, _ = self._post(_payload_with_spans([1, 2]))
+        self.assertEqual(status, 500)
+        self.assertEqual(os.path.getsize(self.out_path), 0, "the half-written rows must be rolled back")
+        state["fail"] = False
+        with mock.patch.object(receiver, "open", flaky_open, create=True):
+            status, resp = self._post(_payload_with_spans([1, 2]))
+        self.assertEqual((status, resp["spans_received"]), (200, 2))
+        self.assertEqual(len(self._lines(self.out_path)), 2, "exactly one row per span")
+
+    def test_a_forward_worker_survives_an_exception_in_its_own_bookkeeping(self):
+        class BrokenStats(ForwardStats):
+            def __init__(self):
+                super().__init__()
+                self.explode = 2  # the first call and the error-path retry both raise
+
+            def record(self, ok, detail):
+                if self.explode:
+                    self.explode -= 1
+                    raise RuntimeError("stats broke")
+                return super().record(ok, detail)
+
+        def fake_post(endpoint, payload, timeout=10):
+            self.forward_calls.append(payload)
+            return True, "http 200"
+
+        self._start(fake_post, stats=BrokenStats())
+        with redirect_stderr(io.StringIO()):
+            self._post(_sample_payload(1))
+            self._drain()
+            self._post(_sample_payload(2))  # the worker must still be alive
+            self._drain()
+        self.assertEqual(len(self.forward_calls), 2)
+
+    def test_an_oversized_body_is_refused_before_it_is_read(self):
+        self._start(lambda *a, **k: (True, "http 200"), max_body_bytes=100)
+        status, resp = self._post(_sample_payload())
+        self.assertEqual((status, resp["error"]), (413, "payload too large"))
+        self.assertFalse(os.path.exists(self.out_path))
+        self.assertFalse(os.path.exists(self.raw_path))
 
     # ---- storage failures -------------------------------------------------
 

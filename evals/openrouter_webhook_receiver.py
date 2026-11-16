@@ -174,10 +174,17 @@ def extract_spans(payload):
                 catchall = {}
                 for otlp_key, value in span_attrs.items():
                     field = _KNOWN_ATTR_KEYS.get(otlp_key)
-                    if field:
-                        row[field] = int(value) if field in _TOKEN_FIELDS and value is not None else value
-                    else:
+                    if not field:
                         catchall[otlp_key] = value
+                        continue
+                    if field in _TOKEN_FIELDS and value is not None:
+                        try:
+                            value = int(value)
+                        except (TypeError, ValueError):
+                            # A bad count must not drop the whole span: keep the raw value.
+                            catchall[otlp_key] = value
+                            continue
+                    row[field] = value
                 for field in _KNOWN_ATTR_KEYS.values():
                     row.setdefault(field, None)
                 row["attributes"] = catchall
@@ -436,12 +443,24 @@ class ForwardStats:
             }
 
 
+class _Claim:
+    """Proof of ownership of one (traceId, spanId) claim."""
+
+    __slots__ = ("key",)
+
+    def __init__(self, key):
+        self.key = key
+
+
 class SpanDeduper:
     """Thread-safe, bounded set of (traceId, spanId) pairs already handled.
 
     claim() is atomic: of two concurrent deliveries of the same span exactly
-    one wins. release() undoes a claim whose local write failed, so the retry
-    is processed. The oldest entries are evicted past max_size."""
+    one wins and receives a _Claim; the other receives None. release() undoes
+    claims whose local write failed, so the retry is processed. Only the owner
+    can release: if a claim was evicted and a retry re-claimed the span, a late
+    release from the first attempt does nothing. The oldest entries are evicted
+    past max_size."""
 
     def __init__(self, max_size=5000):
         self._lock = threading.Lock()
@@ -451,16 +470,18 @@ class SpanDeduper:
     def claim(self, key):
         with self._lock:
             if key in self._seen:
-                return False
-            self._seen[key] = None
+                return None
+            claim = _Claim(key)
+            self._seen[key] = claim
             while len(self._seen) > self._max:
                 self._seen.popitem(last=False)
-            return True
+            return claim
 
-    def release(self, keys):
+    def release(self, claims):
         with self._lock:
-            for key in keys:
-                self._seen.pop(key, None)
+            for claim in claims:
+                if self._seen.get(claim.key) is claim:
+                    del self._seen[claim.key]
 
     def __len__(self):
         with self._lock:
@@ -476,7 +497,7 @@ def span_key(span):
 def claim_new_spans(payload, deduper):
     """Split a webhook payload into spans not seen before.
 
-    Returns (filtered_payload, claimed_keys, new_count, duplicate_count). The
+    Returns (filtered_payload, claims, new_count, duplicate_count). The
     filtered payload keeps each resource/scope envelope and only the new spans.
     If the payload shape is wrong, partial claims are released and the
     exception propagates."""
@@ -489,10 +510,11 @@ def claim_new_spans(payload, deduper):
                 for span in scope_span.get("spans") or []:
                     key = span_key(span)
                     if key is not None:
-                        if not deduper.claim(key):
+                        claim = deduper.claim(key)
+                        if claim is None:
                             dup += 1
                             continue
-                        claimed.append(key)
+                        claimed.append(claim)
                     keep.append(span)
                     new += 1
                 if keep:
@@ -510,23 +532,31 @@ def _start_forwarders(berserk_endpoint, post_fn, stats, workers, queue_size):
     Berserk. Returns the bounded queue the handler feeds."""
     forward_queue = queue.Queue(maxsize=queue_size)
 
+    def forward_one(item):
+        lines = []
+        try:
+            berserk_payload = spans_to_berserk_payload(item)
+            if berserk_payload is not None:
+                ok, detail = post_fn(berserk_endpoint, berserk_payload)
+                lines = stats.record(ok, detail)
+        except Exception as exc:  # noqa: BLE001 -- forwarding must never kill the worker
+            lines = stats.record(False, f"raised: {exc}")
+        # Failures are logged by ForwardStats only (state changes and a
+        # periodic summary), never once per delivery: a long outage
+        # must not turn every webhook into a log line.
+        for line in lines:
+            sys.stderr.write(line + "\n")
+
     def forward_worker():
         while True:
             item = forward_queue.get()
             try:
-                lines = []
+                forward_one(item)
+            except Exception as exc:  # noqa: BLE001 -- nothing may end the worker
                 try:
-                    berserk_payload = spans_to_berserk_payload(item)
-                    if berserk_payload is not None:
-                        ok, detail = post_fn(berserk_endpoint, berserk_payload)
-                        lines = stats.record(ok, detail)
-                except Exception as exc:  # noqa: BLE001 -- forwarding must never kill the worker
-                    lines = stats.record(False, f"raised: {exc}")
-                # Failures are logged by ForwardStats only (state changes and a
-                # periodic summary), never once per delivery: a long outage
-                # must not turn every webhook into a log line.
-                for line in lines:
-                    sys.stderr.write(line + "\n")
+                    sys.stderr.write(f"forward worker error: {exc!r}\n")
+                except Exception:  # noqa: BLE001
+                    pass
             finally:
                 forward_queue.task_done()
 
@@ -554,10 +584,47 @@ class _Delivery:
                     f.write(json.dumps({"received_at": received_at, "raw": body.decode("utf-8", "replace")}) + "\n")
 
     def _write_rows(self, rows, received_at):
-        with self.lock, open(self.out_path, "a") as f:
-            for row in rows:
-                row["received_at"] = received_at
-                f.write(json.dumps(row) + "\n")
+        """Append all rows in one write. If it fails part-way, cut the file back
+        to its old size so the sender's retry cannot leave duplicate rows."""
+        data = "".join(json.dumps({**row, "received_at": received_at}) + "\n" for row in rows)
+        with self.lock:
+            try:
+                size = os.path.getsize(self.out_path)
+            except OSError:
+                size = 0
+            try:
+                with open(self.out_path, "a") as f:
+                    f.write(data)
+            except OSError:
+                try:
+                    os.truncate(self.out_path, size)
+                except OSError:
+                    pass
+                raise
+
+    def _store(self, payload, received_at):
+        """Claim, extract and write the new spans.
+
+        Returns (early_reply, stored). early_reply is a (status, body) pair when
+        the delivery cannot continue; otherwise stored is
+        (filtered_payload, rows, new_count, duplicate_count)."""
+        try:
+            filtered, claimed, n_new, n_dup = claim_new_spans(payload, self.deduper)
+        except (AttributeError, TypeError) as exc:
+            sys.stderr.write(f"unexpected webhook payload shape ({exc}); kept in the raw capture only\n")
+            return (200, {"ok": True, "parsed": False}), None
+        try:
+            rows = extract_spans(filtered)
+            self._write_rows(rows, received_at)
+        except OSError as exc:
+            self.deduper.release(claimed)  # the retry must be processed, not skipped
+            sys.stderr.write(f"storage failure writing spans: {exc}\n")
+            return (500, {"ok": False, "error": "storage failure"}), None
+        except Exception as exc:  # noqa: BLE001 -- any failure after the claim must release it
+            self.deduper.release(claimed)
+            sys.stderr.write(f"could not process webhook payload ({exc!r}); kept in the raw capture only\n")
+            return (200, {"ok": True, "parsed": False}), None
+        return None, (filtered, rows, n_new, n_dup)
 
     def _enqueue(self, filtered):
         """Queue the new spans for forwarding; returns the status word for the reply."""
@@ -588,19 +655,10 @@ class _Delivery:
             sys.stderr.write("webhook payload is not a JSON object; kept in the raw capture only\n")
             return 200, {"ok": True, "parsed": False}
 
-        try:
-            filtered, claimed, n_new, n_dup = claim_new_spans(payload, self.deduper)
-        except (AttributeError, TypeError) as exc:
-            sys.stderr.write(f"unexpected webhook payload shape ({exc}); kept in the raw capture only\n")
-            return 200, {"ok": True, "parsed": False}
-
-        rows = extract_spans(filtered)
-        try:
-            self._write_rows(rows, received_at)
-        except OSError as exc:
-            self.deduper.release(claimed)  # the retry must be processed, not skipped
-            sys.stderr.write(f"storage failure writing spans: {exc}\n")
-            return 500, {"ok": False, "error": "storage failure"}
+        early, stored = self._store(payload, received_at)
+        if early:
+            return early
+        filtered, rows, n_new, n_dup = stored
 
         resp = {"ok": True, "spans_received": len(rows)}
         if n_dup:
@@ -625,6 +683,7 @@ def _make_handler(
     forward_workers=2,
     forward_queue_size=200,
     dedupe_size=5000,
+    max_body_bytes=16 * 1024 * 1024,
 ):
     if signature_mode not in SIGNATURE_MODES:
         raise ValueError(f"unknown signature mode: {signature_mode!r}")
@@ -644,6 +703,11 @@ def _make_handler(
         def do_POST(self):
             headers = {k: v for k, v in self.headers.items()}
             length = int(self.headers.get("Content-Length", "0") or "0")
+            if length > max_body_bytes:
+                # Refuse before reading: the body would otherwise sit in memory
+                # (and, queued for forwarding, stay there).
+                self._respond(413, {"ok": False, "error": "payload too large"})
+                return
             body = self.rfile.read(length) if length else b""
 
             # A *wrong* signature is always rejected, even on the test-connection
