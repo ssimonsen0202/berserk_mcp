@@ -330,7 +330,10 @@ def _check_openrouter_hmac(value, body, secret, now):
             return "invalid"
         parts.setdefault(key, val)
     ts_text, sig = parts.get("t", ""), parts.get("v1", "")
-    if not ts_text.isascii() or not ts_text.isdigit() or not sig:
+    # Bound the length before int(): a unix time has 10 digits, and int()
+    # raises ValueError past ~4300 digits, which would drop the connection
+    # instead of answering 401.
+    if not ts_text.isascii() or not ts_text.isdigit() or len(ts_text) > 12 or not sig:
         return "invalid"
     ts = int(ts_text)
     if abs((time.time() if now is None else now) - ts) > HMAC_TOLERANCE_SECONDS:
@@ -492,11 +495,11 @@ def _make_handler(
                     berserk_payload = spans_to_berserk_payload(payload)
                     if berserk_payload is not None:
                         forwarded, forward_detail = post_fn(berserk_endpoint, berserk_payload)
-                        if not forwarded:
-                            sys.stderr.write(f"berserk forward failed: {forward_detail}\n")
                 except Exception as exc:  # noqa: BLE001
-                    forwarded, forward_detail = False, str(exc)
-                    sys.stderr.write(f"berserk forward raised: {exc}\n")
+                    forwarded, forward_detail = False, f"raised: {exc}"
+                # Failures are logged by ForwardStats only (state changes and a
+                # periodic summary), never once per delivery: a long outage
+                # must not turn every webhook into a log line.
                 if forwarded is not None:
                     for line in stats.record(forwarded, forward_detail):
                         sys.stderr.write(line + "\n")

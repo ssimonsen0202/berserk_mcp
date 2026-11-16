@@ -480,6 +480,8 @@ class CheckSignatureHmacModeTest(unittest.TestCase):
             f"t={int(time.time())},v1=",
             f"t={int(time.time())},v1=zz{digest[2:]}",
             f"t={int(time.time())},v1=é{digest[1:]}",
+            "t=" + "9" * 5000 + f",v1={digest}",  # beyond int() digit limit
+            "t=" + "9" * 30 + f",v1={digest}",
         ):
             with self.subTest(value=value):
                 self.assertEqual(self._check({"X-OpenRouter-Signature": value}, body), "invalid")
@@ -610,7 +612,11 @@ class HandlerIntegrationTest(unittest.TestCase):
         return status
 
     def test_test_connection_with_no_signature_header_succeeds(self):
-        self.assertEqual(self._post({"X-Test-Connection": "true"}), 200)
+        body = json.dumps(_sample_payload()).encode()
+        self.assertEqual(self._post({"X-Test-Connection": "true"}, body=body), 200)
+        # The unsigned handshake must never record its body.
+        self.assertFalse(os.path.exists(self.out_path))
+        self.assertFalse(os.path.exists(self.raw_path))
 
     def test_test_connection_with_correct_signature_succeeds(self):
         self.assertEqual(self._post({"X-Test-Connection": "true", "X-Webhook-Signature": "correct-secret"}), 200)
@@ -740,9 +746,54 @@ class HandlerForwardingIntegrationTest(unittest.TestCase):
         log = err.getvalue()
         self.assertIn("berserk forward FAILING", log)
         self.assertIn("berserk forward RECOVERED after 2 consecutive", log)
+        # Bounded logging: two failures and a recovery give exactly two
+        # forward lines, not one per failed delivery.
+        forward_lines = [line for line in log.splitlines() if line.startswith("berserk forward")]
+        self.assertEqual(len(forward_lines), 2, forward_lines)
         self.assertEqual([b["berserk_forwarded"] for b in bodies], [False, False, True])
         # The webhook response goes to OpenRouter: no internal error detail.
         self.assertNotIn("10.0.0.9", json.dumps(bodies))
+
+    def test_sustained_failure_logs_once_per_interval_not_per_delivery(self):
+        def failing_post(endpoint, payload, timeout=10):
+            return False, "connection refused"
+
+        self._start(failing_post)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            for _ in range(5):
+                self._post(json.dumps(_sample_payload()).encode())
+        forward_lines = [line for line in err.getvalue().splitlines() if line.startswith("berserk forward")]
+        self.assertEqual(len(forward_lines), 1, forward_lines)
+        self.assertIn("FAILING: connection refused", forward_lines[0])
+
+    def test_raised_forward_is_counted_and_logged_once(self):
+        def raising_post(endpoint, payload, timeout=10):
+            raise RuntimeError("unexpected")
+
+        self._start(raising_post)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            for _ in range(3):
+                self._post(json.dumps(_sample_payload()).encode())
+        forward_lines = [line for line in err.getvalue().splitlines() if line.startswith("berserk forward")]
+        self.assertEqual(len(forward_lines), 1, forward_lines)
+        self.assertIn("unexpected", forward_lines[0])
+
+    def test_handshake_is_never_forwarded(self):
+        def counting_post(endpoint, payload, timeout=10):
+            self.forward_calls.append(payload)
+            return True, "http 200"
+
+        self._start(counting_post)
+        conn = HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request("POST", "/", body=json.dumps(_sample_payload()).encode(), headers={"X-Test-Connection": "true"})
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(self.forward_calls, [])
+        self.assertFalse(os.path.exists(self.out_path))
 
 
 class HandlerHmacModeIntegrationTest(unittest.TestCase):
@@ -789,8 +840,15 @@ class HandlerHmacModeIntegrationTest(unittest.TestCase):
         self.assertEqual(self._post({"X-Webhook-Signature": SECRET}, body), 401)
 
     def test_handshake_without_signature_passes_but_invalid_signature_fails(self):
-        self.assertEqual(self._post({"X-Test-Connection": "true"}), 200)
-        self.assertEqual(self._post({"X-Test-Connection": "true", "X-OpenRouter-Signature": "t=1,v1=00"}), 401)
+        body = json.dumps(_sample_payload()).encode()
+        self.assertEqual(self._post({"X-Test-Connection": "true"}, body), 200)
+        self.assertEqual(self._post({"X-Test-Connection": "true", "X-OpenRouter-Signature": "t=1,v1=00"}, body), 401)
+        self.assertFalse(os.path.exists(self.out_path))
+        self.assertFalse(os.path.exists(self.raw_path))
+
+    def test_oversized_timestamp_is_401_not_a_dropped_connection(self):
+        header = "t=" + "9" * 5000 + ",v1=" + "0" * 64
+        self.assertEqual(self._post({"X-OpenRouter-Signature": header}, b"{}"), 401)
 
 
 if __name__ == "__main__":
