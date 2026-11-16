@@ -1,0 +1,54 @@
+[
+  {
+    "name": "checkout_errors",
+    "description": "Errors from the checkout service in the last hour.",
+    "kql": "default | where resource['service.name'] == 'checkout' | take 10",
+    "since": "1h ago",
+    "validation_version": 1,
+    "validation_risk": "low",
+    "schema_hash": "sha256:c7ae4849617fc73d2a97189acf13ee007d675b009e3d1ab29cfd12b362e97420",
+    "schema_status": "unavailable",
+    "validated_at": "2026-11-16T17:35:53Z"
+  },
+  {
+    "name": "payments_volume",
+    "description": "Row count for the payments service.",
+    "kql": "default | where resource['service.name'] == 'payments' | count",
+    "since": "6h ago",
+    "validation_version": 1,
+    "validation_risk": "low",
+    "schema_hash": "sha256:c7ae4849617fc73d2a97189acf13ee007d675b009e3d1ab29cfd12b362e97420",
+    "schema_status": "unavailable",
+    "validated_at": "2026-11-16T17:35:53Z",
+    "roles": [
+      "sre"
+    ]
+  },
+  {
+    "name": "checkout_slow_pending",
+    "kql": "default | where resource['service.name'] == 'checkout' | take 5",
+    "since": "1h ago",
+    "description": "Slow checkout spans, awaiting approval.",
+    "generated_by": {
+      "provider": "example",
+      "model": "example-model",
+      "ts": "2026-01-01T00:00:00Z"
+    },
+    "origin": "generated",
+    "status": "pending"
+  },
+  {
+    "name": "payments_top_approved",
+    "kql": "default | where resource['service.name'] == 'payments' | take 5",
+    "since": "1h ago",
+    "description": "Top payments rows, approved.",
+    "generated_by": {
+      "provider": "example",
+      "model": "example-model",
+      "ts": "2026-01-01T00:00:00Z"
+    },
+    "origin": "generated",
+    "status": "approved",
+    "approved_at": "2026-11-16T17:35:53Z"
+  }
+]
