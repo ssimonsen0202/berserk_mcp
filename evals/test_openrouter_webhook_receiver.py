@@ -1,12 +1,21 @@
+import hashlib
+import hmac
+import io
 import json
 import os
 import tempfile
 import threading
+import time
 import unittest
+from contextlib import redirect_stderr
 from http.client import HTTPConnection
+from unittest import mock
 
+import openrouter_webhook_receiver as receiver
 from openrouter_webhook_receiver import (
+    ForwardStats,
     _make_handler,
+    check_signature,
     extract_spans,
     is_test_connection,
     post_to_berserk,
@@ -283,6 +292,22 @@ class PostToBerserkTest(unittest.TestCase):
         ok, detail = post_to_berserk("https://x/v1/logs", {"a": 1}, send=self._send_status(500))
         self.assertFalse(ok)
 
+    def test_any_2xx_is_success_and_status_is_in_detail(self):
+        # Fix 1: ingest may answer 202/204 for an accepted payload. Treating
+        # those as failures made every forward log as failed while data landed.
+        for status in (200, 201, 202, 204, 299):
+            with self.subTest(status=status):
+                ok, detail = post_to_berserk("https://x/v1/logs", {"a": 1}, send=self._send_status(status))
+                self.assertTrue(ok)
+                self.assertEqual(detail, f"http {status}")
+
+    def test_non_2xx_returned_status_is_failure(self):
+        for status in (100, 199, 300, 301, 304):
+            with self.subTest(status=status):
+                ok, detail = post_to_berserk("https://x/v1/logs", {"a": 1}, send=self._send_status(status))
+                self.assertFalse(ok)
+                self.assertEqual(detail, f"http {status}")
+
     def test_never_raises_on_connection_error(self):
         def send(*args, **kwargs):
             raise OSError("connection refused")
@@ -348,6 +373,216 @@ class VerifySignatureTest(unittest.TestCase):
     def test_header_lookup_is_case_insensitive(self):
         headers = {"x-webhook-signature": "s3cr3t"}
         self.assertTrue(verify_signature(headers, "s3cr3t"))
+
+    def test_static_comparison_is_constant_time(self):
+        # Fix 4: the endpoint is public (Tailscale Funnel); a plain == leaks
+        # how many leading characters of a guess are right.
+        with mock.patch.object(receiver.hmac, "compare_digest", wraps=hmac.compare_digest) as cd:
+            self.assertTrue(verify_signature({"X-Webhook-Signature": "s3cr3t"}, "s3cr3t"))
+            self.assertFalse(verify_signature({"X-Webhook-Signature": "s3cr3x"}, "s3cr3t"))
+        self.assertEqual(cd.call_count, 2)
+
+    def test_non_ascii_header_value_is_rejected_not_a_crash(self):
+        self.assertFalse(verify_signature({"X-Webhook-Signature": "sécret"}, "s3cr3t"))
+
+
+SECRET = "whsec-test-secret"
+
+
+def _hmac_header(body, secret=SECRET, ts=None):
+    ts = int(time.time()) if ts is None else ts
+    digest = hmac.new(secret.encode(), f"{ts},".encode() + body, hashlib.sha256).hexdigest()
+    return f"t={ts},v1={digest}"
+
+
+class CheckSignatureStaticModeTest(unittest.TestCase):
+    """Default mode: X-Webhook-Signature is a static value Simon configures
+    in OpenRouter's Broadcast destination headers (the documented setup)."""
+
+    def test_valid_invalid_absent(self):
+        self.assertEqual(check_signature({"X-Webhook-Signature": SECRET}, b"{}", SECRET), "valid")
+        self.assertEqual(check_signature({"X-Webhook-Signature": "nope"}, b"{}", SECRET), "invalid")
+        self.assertEqual(check_signature({}, b"{}", SECRET), "absent")
+
+    def test_hmac_header_alone_does_not_authenticate_in_static_mode(self):
+        headers = {"X-OpenRouter-Signature": _hmac_header(b"{}")}
+        self.assertEqual(check_signature(headers, b"{}", SECRET), "absent")
+
+    def test_no_secret_configured_is_valid(self):
+        self.assertEqual(check_signature({}, b"{}", None), "valid")
+
+
+class CheckSignatureHmacModeTest(unittest.TestCase):
+    """Opt-in mode (--signature-mode openrouter-hmac). Scheme from OpenRouter's
+    video-generation callback docs: X-OpenRouter-Signature: t=<ts>,v1=<hex>,
+    HMAC-SHA256 over "<ts>," + raw body, 300 s tolerance. Not verified for
+    Broadcast deliveries."""
+
+    MODE = "openrouter-hmac"
+
+    def _check(self, headers, body=b'{"resourceSpans":[]}', now=None):
+        return check_signature(headers, body, SECRET, mode=self.MODE, now=now)
+
+    def test_valid_signature_over_exact_raw_body(self):
+        body = b'{"resourceSpans": [],  "x": 1}'
+        self.assertEqual(self._check({"X-OpenRouter-Signature": _hmac_header(body)}, body), "valid")
+
+    def test_header_lookup_is_case_insensitive(self):
+        body = b"{}"
+        self.assertEqual(self._check({"x-openrouter-signature": _hmac_header(body)}, body), "valid")
+
+    def test_absent_header(self):
+        self.assertEqual(self._check({}), "absent")
+
+    def test_forged_signature(self):
+        ts = int(time.time())
+        self.assertEqual(self._check({"X-OpenRouter-Signature": f"t={ts},v1={'0' * 64}"}), "invalid")
+
+    def test_valid_signature_for_a_different_body(self):
+        header = _hmac_header(b'{"resourceSpans":[]}')
+        self.assertEqual(self._check({"X-OpenRouter-Signature": header}, b'{"resourceSpans":[1]}'), "invalid")
+
+    def test_signature_over_reserialized_json_is_rejected(self):
+        raw = b'{"b": 1,   "a": 2}'
+        reserialized = json.dumps(json.loads(raw)).encode()
+        header = _hmac_header(reserialized)
+        self.assertEqual(self._check({"X-OpenRouter-Signature": header}, raw), "invalid")
+
+    def test_wrong_secret(self):
+        body = b"{}"
+        header = _hmac_header(body, secret="other-secret")
+        self.assertEqual(self._check({"X-OpenRouter-Signature": header}, body), "invalid")
+
+    def test_stale_and_future_timestamps_rejected(self):
+        body = b"{}"
+        now = 1_800_000_000
+        for ts in (now - 301, now + 301):
+            with self.subTest(ts=ts):
+                header = _hmac_header(body, ts=ts)
+                self.assertEqual(self._check({"X-OpenRouter-Signature": header}, body, now=now), "invalid")
+        for ts in (now - 300, now + 300):
+            with self.subTest(ts=ts):
+                header = _hmac_header(body, ts=ts)
+                self.assertEqual(self._check({"X-OpenRouter-Signature": header}, body, now=now), "valid")
+
+    def test_malformed_headers_are_invalid_not_a_crash(self):
+        body = b"{}"
+        good = _hmac_header(body)
+        digest = good.split("v1=")[1]
+        for value in (
+            "",
+            "garbage",
+            f"v1={digest}",
+            f"t=,v1={digest}",
+            f"t=abc,v1={digest}",
+            f"t=1.5,v1={digest}",
+            f"t={int(time.time())}",
+            f"t={int(time.time())},v1=",
+            f"t={int(time.time())},v1=zz{digest[2:]}",
+            f"t={int(time.time())},v1=é{digest[1:]}",
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(self._check({"X-OpenRouter-Signature": value}, body), "invalid")
+
+    def test_static_header_alone_does_not_authenticate_in_hmac_mode(self):
+        self.assertEqual(self._check({"X-Webhook-Signature": SECRET}), "absent")
+
+    def test_unknown_mode_raises(self):
+        with self.assertRaises(ValueError):
+            check_signature({}, b"{}", SECRET, mode="md5-please")
+
+
+class ForwardStatsTest(unittest.TestCase):
+    """Fix 3: forward failures used to be one stderr line per delivery and
+    nothing else. ForwardStats logs state changes and a periodic summary."""
+
+    def setUp(self):
+        self.now = 1_000.0
+        self.stats = ForwardStats(summary_interval=900, clock=lambda: self.now)
+
+    def test_success_from_the_start_logs_nothing(self):
+        self.assertEqual(self.stats.record(True, "http 200"), [])
+        self.assertEqual(self.stats.record(True, "http 202"), [])
+
+    def test_first_failure_logs_a_failing_transition(self):
+        lines = self.stats.record(False, "timed out")
+        self.assertEqual(len(lines), 1)
+        self.assertIn("FAILING", lines[0])
+        self.assertIn("timed out", lines[0])
+
+    def test_repeated_failures_inside_the_interval_stay_quiet(self):
+        self.stats.record(False, "timed out")
+        self.now += 60
+        self.assertEqual(self.stats.record(False, "timed out"), [])
+
+    def test_periodic_summary_while_still_failing(self):
+        self.stats.record(True, "http 200")
+        self.stats.record(False, "timed out")
+        for _ in range(3):
+            self.now += 300
+            lines = self.stats.record(False, "http 429")
+        self.assertEqual(len(lines), 1)
+        self.assertIn("still FAILING", lines[0])
+        self.assertIn("4 consecutive", lines[0])
+        self.assertIn("http 429", lines[0])
+
+    def test_recovery_logs_once_with_the_failure_count(self):
+        self.stats.record(False, "timed out")
+        self.stats.record(False, "timed out")
+        lines = self.stats.record(True, "http 200")
+        self.assertEqual(len(lines), 1)
+        self.assertIn("RECOVERED", lines[0])
+        self.assertIn("2 consecutive", lines[0])
+        self.assertEqual(self.stats.record(True, "http 200"), [])
+
+    def test_snapshot_counts(self):
+        self.stats.record(True, "http 200")
+        self.stats.record(False, "timed out")
+        snap = self.stats.snapshot()
+        self.assertEqual(snap["ok"], 1)
+        self.assertEqual(snap["failed"], 1)
+        self.assertEqual(snap["consecutive_failures"], 1)
+        self.assertEqual(snap["last_error"], "timed out")
+
+    def test_thread_safe_counts(self):
+        stats = ForwardStats()
+
+        def work():
+            for _ in range(500):
+                stats.record(False, "x")
+                stats.record(True, "http 200")
+
+        threads = [threading.Thread(target=work) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        snap = stats.snapshot()
+        self.assertEqual(snap["ok"], 4000)
+        self.assertEqual(snap["failed"], 4000)
+
+
+class MainSignatureModeTest(unittest.TestCase):
+    def test_unknown_signature_mode_refuses_to_start(self):
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            receiver.main(["--signature-mode", "md5-please", "--secret-file", os.devnull])
+        self.assertNotEqual(cm.exception.code, 0)
+
+    def test_default_mode_is_static(self):
+        with (
+            mock.patch.object(receiver, "run_server") as run,
+            mock.patch.dict(os.environ, {"OPENROUTER_WEBHOOK_SECRET": SECRET}),
+        ):
+            receiver.main([])
+        self.assertEqual(run.call_args.kwargs["signature_mode"], "static")
+
+    def test_hmac_mode_is_passed_through(self):
+        with (
+            mock.patch.object(receiver, "run_server") as run,
+            mock.patch.dict(os.environ, {"OPENROUTER_WEBHOOK_SECRET": SECRET}),
+        ):
+            receiver.main(["--signature-mode", "openrouter-hmac"])
+        self.assertEqual(run.call_args.kwargs["signature_mode"], "openrouter-hmac")
 
 
 class HandlerIntegrationTest(unittest.TestCase):
@@ -491,6 +726,71 @@ class HandlerForwardingIntegrationTest(unittest.TestCase):
         status, resp = self._post(json.dumps(_sample_payload()).encode())
         self.assertEqual(status, 200)
         self.assertNotIn("berserk_forwarded", resp)
+
+    def test_forward_state_changes_are_logged_and_detail_not_leaked_to_sender(self):
+        results = iter([(False, "http 503 from 10.0.0.9"), (False, "timed out"), (True, "http 202")])
+
+        def flaky_post(endpoint, payload, timeout=10):
+            return next(results)
+
+        self._start(flaky_post)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            bodies = [self._post(json.dumps(_sample_payload()).encode())[1] for _ in range(3)]
+        log = err.getvalue()
+        self.assertIn("berserk forward FAILING", log)
+        self.assertIn("berserk forward RECOVERED after 2 consecutive", log)
+        self.assertEqual([b["berserk_forwarded"] for b in bodies], [False, False, True])
+        # The webhook response goes to OpenRouter: no internal error detail.
+        self.assertNotIn("10.0.0.9", json.dumps(bodies))
+
+
+class HandlerHmacModeIntegrationTest(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.out_path = os.path.join(self.tmpdir, "spans.jsonl")
+        self.raw_path = os.path.join(self.tmpdir, "raw.jsonl")
+        handler = _make_handler(
+            self.out_path, self.raw_path, SECRET, threading.Lock(), signature_mode="openrouter-hmac"
+        )
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.port = self.server.server_port
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def _post(self, headers, body=b""):
+        conn = HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request("POST", "/", body=body, headers=headers)
+        resp = conn.getresponse()
+        status = resp.status
+        resp.read()
+        conn.close()
+        return status
+
+    def test_valid_hmac_payload_is_recorded(self):
+        body = json.dumps(_sample_payload()).encode()
+        status = self._post({"X-OpenRouter-Signature": _hmac_header(body), "Content-Type": "application/json"}, body)
+        self.assertEqual(status, 200)
+        with open(self.out_path) as f:
+            self.assertEqual(len(f.readlines()), 1)
+
+    def test_tampered_body_is_rejected_and_not_recorded(self):
+        body = json.dumps(_sample_payload()).encode()
+        header = _hmac_header(body)
+        status = self._post({"X-OpenRouter-Signature": header}, body.replace(b"gpt-4", b"gpt-5"))
+        self.assertEqual(status, 401)
+        self.assertFalse(os.path.exists(self.raw_path))
+
+    def test_static_secret_header_is_not_accepted_in_hmac_mode(self):
+        body = json.dumps(_sample_payload()).encode()
+        self.assertEqual(self._post({"X-Webhook-Signature": SECRET}, body), 401)
+
+    def test_handshake_without_signature_passes_but_invalid_signature_fails(self):
+        self.assertEqual(self._post({"X-Test-Connection": "true"}), 200)
+        self.assertEqual(self._post({"X-Test-Connection": "true", "X-OpenRouter-Signature": "t=1,v1=00"}), 401)
 
 
 if __name__ == "__main__":
