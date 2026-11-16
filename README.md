@@ -42,10 +42,16 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.37.4**. This is a bullet-point overview, most recent
+Current version: **1.37.5**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.37.5** (2026-11-16) — The schema snapshot is read again. Since the
+  bzrk CLI changed its table output, the snapshot was empty, so
+  `validate_kql` never reported an unknown field. The fetcher now asks bzrk
+  for JSON, and an empty result is not cached. The unknown-field check no
+  longer reports function calls or names that the query defines. See
+  [docs/releases/v1.37.5.md](docs/releases/v1.37.5.md).
 - **v1.37.4** (2026-11-16) — The OpenRouter webhook receiver replies as soon
   as it writes the local capture. It forwards to Berserk in the background, so
   OpenRouter stops retrying slow deliveries. It records and forwards a retried
