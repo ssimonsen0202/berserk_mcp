@@ -185,5 +185,105 @@ class KqlValidationTest(unittest.TestCase):
         self.assertIsNone(malformed["rows_returned"])
 
 
+class UnknownFieldPrecisionTest(unittest.TestCase):
+    """Once the schema snapshot is real again, the unknown-field check must
+    flag genuinely unknown top-level names without crying wolf on correct
+    queries."""
+
+    def unknown(self, kql, fields=None):
+        report = kv.validate_kql_static(
+            kql, table="default", since="1h ago", schema_fields=fields if fields is not None else self.fields()
+        )
+        return [f["message"] for f in report["findings"] if f["code"] == "UNKNOWN_FIELD"]
+
+    @staticmethod
+    def fields():
+        import schema_registry as sr
+
+        try:
+            from test_schema_registry import FIELDSTATS_JSON, GETSCHEMA_JSON, SAMPLE_JSON
+        except ImportError:  # run as tests.test_kql_validation
+            from tests.test_schema_registry import FIELDSTATS_JSON, GETSCHEMA_JSON, SAMPLE_JSON
+
+        return sr.schema_fields(
+            sr.normalize_snapshot(
+                getschema_text=GETSCHEMA_JSON, fieldstats_text=FIELDSTATS_JSON, sample_text=SAMPLE_JSON
+            )
+        )
+
+    def test_dollar_time_is_flagged_and_dollar_raw_is_known(self):
+        msgs = self.unknown("default | where $time > ago(1h) | summarize n=count() | take 5")
+        self.assertTrue(any("$time" in m for m in msgs), msgs)
+        self.assertEqual(self.unknown("default | where isnotnull($raw) | take 5"), [])
+
+    def test_a_made_up_bare_column_is_flagged(self):
+        msgs = self.unknown("default | where nosuchcolumn > 5 | take 5")
+        self.assertTrue(any("nosuchcolumn" in m for m in msgs), msgs)
+
+    def test_function_calls_and_names_the_query_defines_are_not_unknown(self):
+        kql = (
+            "default | where timestamp > ago(1h) and ingest_time > datetime(2026-11-16T14:57:50Z) "
+            "| summarize rows=count(), newest=max(timestamp), spans=dcount(tostring(attributes['span.id'])) "
+            "by svc=tostring(resource['service.name']) | extend share=rows * 1.0 | order by rows desc | take 10"
+        )
+        self.assertEqual(self.unknown(kql), [])
+
+    def test_tuple_assignment_and_hyphenated_operators_are_not_unknown(self):
+        kql = (
+            "default | where isnotnull(metric_name) | make-series v=avg(value) on timestamp step 5m "
+            "| extend (anomalies, score, baseline) = series_decompose_anomalies(v) | mv-expand anomalies | take 10"
+        )
+        self.assertEqual(self.unknown(kql), [])
+
+    def test_bag_keys_missing_from_the_sample_are_not_flagged(self):
+        # Bag keys come from a three-row sample; absence proves nothing.
+        kql = "default | where attributes['systemd.unit'] == 'x' and resource['k8s.pod.name'] == 'y' | take 5"
+        self.assertEqual(self.unknown(kql), [])
+
+    def test_a_dotted_bag_typo_is_flagged_like_a_bracketed_one(self):
+        msgs = self.unknown("default | where resource.service.nam == 'api' | take 5")
+        self.assertTrue(any("service.nam" in m for m in msgs), msgs)
+        self.assertEqual(self.unknown("default | where resource.service.name == 'api' | take 5"), [])
+
+    def test_nested_or_method_like_dotted_text_is_not_a_bag_path(self):
+        refs = kv._extract_referenced_fields(
+            "default | extend x=foo.resource.service.nam, y=resource.service.nam() | take 5"
+        )
+        self.assertFalse([r for r in refs if "service.nam" in r], refs)
+
+    def test_a_name_used_before_the_stage_that_defines_it_is_unknown(self):
+        msgs = self.unknown("default | where madeup > 1 | extend madeup=timestamp | take 5")
+        self.assertTrue(any("madeup" in m for m in msgs), msgs)
+        self.assertEqual(self.unknown("default | extend madeup=timestamp | where madeup > ago(1h) | take 5"), [])
+
+    def test_suggests_timestamp_for_dollar_time(self):
+        import schema_registry as sr
+
+        try:
+            from test_schema_registry import GETSCHEMA_JSON
+        except ImportError:
+            from tests.test_schema_registry import GETSCHEMA_JSON
+        snap = sr.normalize_snapshot(getschema_text=GETSCHEMA_JSON)
+        self.assertEqual(sr.suggest_field("$time", snap)[0], "timestamp")
+
+    def test_every_fixed_query_in_the_repo_has_no_unknown_fields(self):
+        import inspect
+
+        import berserk_mcp
+        from berserk_mcp import queries as q
+        from berserk_mcp import tools
+
+        kqls = [v[0] for v in tools.SIMPLE.values() if isinstance(v, tuple) and isinstance(v[0], str)]
+        kqls += [v for n, v in vars(q).items() if isinstance(v, str) and n.isupper() and "|" in v]
+        for name, fn in inspect.getmembers(q, inspect.isfunction):
+            params = inspect.signature(fn).parameters.values()
+            if name.startswith("q_") and fn.__module__ == q.__name__ and all(p.default is not p.empty for p in params):
+                kqls.append(fn())
+        self.assertGreater(len(kqls), 40)
+        problems = {kql[:90]: self.unknown(kql) for kql in kqls if self.unknown(kql)}
+        self.assertEqual(problems, {})
+        self.assertTrue(berserk_mcp)
+
+
 if __name__ == "__main__":
     unittest.main()

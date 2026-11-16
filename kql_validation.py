@@ -6,6 +6,7 @@ pipelines, unbounded results, expensive operators, broad raw scans, and schema
 misses before a user-originated query reaches ``bzrk``.
 """
 
+import difflib
 import json
 import re
 
@@ -85,10 +86,6 @@ _RAW_SCAN_RE = re.compile(
     r"\b(body|\$raw)\b[^|]{0,80}\b(contains|has_any|matches\s+regex)\b|\b(contains|has_any|matches\s+regex)\b[^|]{0,80}\b(body|\$raw)\b",
     re.IGNORECASE,
 )
-_FIELD_REF_RE = re.compile(
-    r"(resource|attributes)\s*\[\s*['\"]([^'\"]+)['\"]\s*\]|"
-    r"\b([A-Za-z_][A-Za-z0-9_]*)\b"
-)
 _FUNCTION_NAMES = {
     "avg",
     "count",
@@ -139,6 +136,14 @@ _KQL_WORDS = {
     "project-keep",
     "regex",
     "sort",
+    "step",
+    "from",
+    "to",
+    "as",
+    "kind",
+    "not",
+    "between",
+    "null",
     "summarize",
     "tail",
     "take",
@@ -221,26 +226,47 @@ def _normalize_schema_fields(schema_fields):
     return out
 
 
+_BARE_IDENT_RE = re.compile(r"(?<![A-Za-z0-9_$.\-])(\$?[A-Za-z_][A-Za-z0-9_]*)(?![A-Za-z0-9_\-])(\s*\()?")
+# Not preceded by a name or "." (foo.resource.x is not a bag path), and the
+# path must not run on or be called like a method (resource.x()).
+_DOTTED_BAG_RE = re.compile(
+    r"(?<![A-Za-z0-9_$.])(resource|attributes)\.([A-Za-z_][A-Za-z0-9_.-]*[A-Za-z0-9_])(?![A-Za-z0-9_.-]|\s*\()"
+)
+_ASSIGNED_NAME_RE = re.compile(r"(?<![=!<>])\b([A-Za-z_][A-Za-z0-9_]*)\s*=(?![=~])")
+_ASSIGNED_TUPLE_RE = re.compile(r"\(\s*([A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)+)\s*\)\s*=(?![=~])")
+
+
+def _query_defined_names(stripped):
+    """Names a query creates itself (extend x=..., summarize n=count(), (a,b)=...)."""
+    names = set(_ASSIGNED_NAME_RE.findall(stripped))
+    for group in _ASSIGNED_TUPLE_RE.findall(stripped):
+        names.update(n.strip() for n in group.split(","))
+    return names
+
+
 def _extract_referenced_fields(kql):
     refs = set()
     for bag, path in re.findall(r"(resource|attributes)\s*\[\s*['\"]([^'\"]+)['\"]\s*\]", str(kql or "")):
         refs.add(f"{bag}['{path}']")
         refs.add(f"{bag}.{path}")
     stripped = _strip_strings(kql)
-    for m in _FIELD_REF_RE.finditer(stripped):
-        bag, path, bare = m.group(1), m.group(2), m.group(3)
-        if bag and path:
-            refs.add(f"{bag}['{path}']")
-            refs.add(f"{bag}.{path}")
-            continue
-        if not bare:
-            continue
-        low = bare.lower()
-        if low in _FUNCTION_NAMES or low in _KQL_WORDS:
-            continue
-        if bare in {"resource", "attributes"}:
-            continue
-        refs.add(bare)
+    for bag, path in _DOTTED_BAG_RE.findall(stripped):
+        refs.add(f"{bag}['{path}']")
+        refs.add(f"{bag}.{path}")
+    defined = set()
+    # A name a stage assigns is known from that stage on, not before it.
+    for stage in stripped.split("|"):
+        defined |= _query_defined_names(stage)
+        # The lookarounds in _BARE_IDENT_RE skip words joined by "-", so
+        # make-series, mv-expand and project-away are not read as field names.
+        for m in _BARE_IDENT_RE.finditer(stage):
+            bare, call = m.group(1), m.group(2)
+            if call or bare in defined or bare in {"resource", "attributes"}:
+                continue
+            low = bare.lower()
+            if low in _FUNCTION_NAMES or low in _KQL_WORDS:
+                continue
+            refs.add(bare)
     return refs
 
 
@@ -413,6 +439,13 @@ def _check_performance(stripped, parts, expensive_names, has_selective):
     return findings
 
 
+def _near_known_bag_key(ref, known):
+    if "[" not in ref:
+        return False  # the bag.key twin of a bracketed ref; judge the bracketed form only
+    candidates = [k for k in known if "[" in k and k != ref]
+    return bool(difflib.get_close_matches(ref, candidates, n=1, cutoff=0.85))
+
+
 def _check_schema(query, schema_fields, suggest):
     """Unknown-field checks against the known schema."""
     findings = []
@@ -422,6 +455,11 @@ def _check_schema(query, schema_fields, suggest):
         for ref in sorted(_extract_referenced_fields(query)):
             low = ref.lower()
             if low in _FUNCTION_NAMES or low in _KQL_WORDS:
+                continue
+            # Bag keys come from a three-row sample, so a missing key proves
+            # nothing on its own; flag it only when it is a near-miss of a
+            # known key (a likely typo such as service.nam).
+            if ("[" in ref or "." in ref) and not _near_known_bag_key(ref, known):
                 continue
             if ref not in known:
                 unknown.append(ref)

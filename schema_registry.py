@@ -41,55 +41,156 @@ def _safe_example(value):
     return text[:MAX_EXAMPLE_CHARS]
 
 
-def _parse_getschema(raw):
-    columns = {}
+_COLUMN_NAME_RE = re.compile(r"^\$?[A-Za-z_][A-Za-z0-9_]*$")
+# Keys may start with a digit; junk numbers are kept out by requiring a
+# resource/attributes prefix (_BAG_PATH_RE), not by this pattern.
+_FIELD_KEY_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,79}$")
+_BAG_PATH_RE = re.compile(
+    r"\b(resource|attributes)(?:\[\s*['\"]([^'\"]{1,80})['\"]\s*\]|\.([A-Za-z_][A-Za-z0-9._-]{0,79}))"
+)
+
+# Top-level OTLP fields every Berserk table carries. getschema lists only the
+# columns it has seen materialised, so these are added once getschema answers.
+BUILTIN_COLUMNS = {
+    "$raw": "dynamic",
+    "timestamp": "datetime",
+    "ingest_time": "datetime",
+    "start_time": "datetime",
+    "end_time": "datetime",
+    "body": "string",
+    "severity_text": "string",
+    "severity_number": "long",
+    "metric_name": "string",
+    "value": "real",
+    "trace_id": "string",
+    "span_id": "string",
+    "parent_span_id": "string",
+    "span_name": "string",
+    "duration": "timespan",
+    "status_code": "string",
+    "resource": "dynamic",
+    "attributes": "dynamic",
+}
+
+
+def _json_table_rows(raw):
+    """Return rows as dicts from ``bzrk --json`` output, or None if not JSON."""
+    text = str(raw or "").strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    rows = []
+    for table in parsed.get("Tables") or []:
+        schema = table.get("schema") or {}
+        names = [str(c.get("name", "")) for c in schema.get("columns") or []]
+        for row in table.get("rows") or []:
+            if isinstance(row, list):
+                rows.append(dict(zip(names, row, strict=False)))
+    return rows
+
+
+def _text_rows(raw):
+    """Split a bzrk text table into token lists, dropping headers and the row index."""
     for line in str(raw or "").splitlines():
         line = line.strip()
-        if not line or line.startswith(("==", "-", "|")):
-            continue
-        if line.lower().startswith(("column", "name ")):
+        if not line or line.startswith(("==", "-", "|", "#")):
             continue
         parts = re.split(r"\s+", line)
-        if len(parts) >= 2:
-            name, typ = parts[0].strip("|"), parts[1].strip("|")
-            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
+        if len(parts) > 2 and parts[0].isdigit():
+            parts = parts[1:]  # bzrk 2026-08-19 prints a row-index column
+        yield parts
+
+
+def _parse_getschema(raw):
+    columns = {}
+    rows = _json_table_rows(raw)
+    if rows is not None:
+        for row in rows:
+            name, typ = str(row.get("ColumnName") or ""), str(row.get("ColumnType") or "dynamic")
+            if _COLUMN_NAME_RE.match(name):
                 columns[name] = {"type": typ.lower(), "nullable": True}
+        return columns
+    for parts in _text_rows(raw):
+        if len(parts) < 2 or parts[0].lower().startswith(("column", "name")):
+            continue
+        # Old format: "name type". Current format: "name ordinal DataType ColumnType".
+        name, typ = parts[0].strip("|"), (parts[-1] if len(parts) >= 4 else parts[1]).strip("|")
+        if _COLUMN_NAME_RE.match(name):
+            columns[name] = {"type": typ.lower(), "nullable": True}
     return columns
 
 
 def _extract_bracketed_keys(raw, label):
+    rows = _json_table_rows(raw)
+    if rows is not None:
+        column = "resource_keys" if label == "resource" else "attribute_keys"
+        keys = []
+        for row in rows:
+            for token in row.get(column) or []:
+                token = str(token)
+                if _FIELD_KEY_RE.match(token) and token not in keys:
+                    keys.append(token)
+        return keys
     keys = []
     for line in str(raw or "").splitlines():
         if label and label not in line:
             continue
         for bracketed in re.findall(r"\[([^\]]+)\]", line):
             for token in re.findall(r"['\"]([^'\"]+)['\"]", bracketed):
-                if re.match(r"^[A-Za-z0-9._-]{1,80}$", token) and token not in keys:
+                if _FIELD_KEY_RE.match(token) and token not in keys:
                     keys.append(token)
     return keys
 
 
+def _bag_key(path):
+    """Return the key inside ``resource['k']`` / ``resource.k``, or None."""
+    match = _BAG_PATH_RE.search(str(path or ""))
+    if not match:
+        return None
+    key = match.group(2) or match.group(3)
+    return key if _FIELD_KEY_RE.match(key) else None
+
+
+def _examples(values, path):
+    examples = []
+    for ex in values:
+        safe = _safe_example(ex)
+        if safe and safe != path and safe not in examples:
+            examples.append(safe)
+        if len(examples) >= MAX_EXAMPLES_PER_FIELD:
+            break
+    return examples
+
+
 def _parse_fieldstats(raw, prefix="resource"):
     fields = {}
+    rows = _json_table_rows(raw)
+    if rows is not None:
+        for row in rows:
+            key = _bag_key(row.get("AttributePath"))
+            if key:
+                hint = row.get("Hint")
+                fields[key] = {
+                    "type": str(row.get("Type") or "string").lower(),
+                    "examples": _examples(hint if isinstance(hint, list) else [], key),
+                }
+        return fields
     for line in str(raw or "").splitlines():
-        for path in re.findall(r"(?:resource|attributes)?\.?([A-Za-z0-9_.-]+)", line):
-            if "." not in path:
-                continue
-            if not re.match(r"^[A-Za-z0-9._-]{1,80}$", path):
-                continue
-            examples = []
-            for ex in re.findall(r"['\"]([^'\"]{1,120})['\"]", line):
-                safe = _safe_example(ex)
-                if safe and safe != path and safe not in examples:
-                    examples.append(safe)
-                if len(examples) >= MAX_EXAMPLES_PER_FIELD:
-                    break
-            fields[path] = {"type": "string", "examples": examples}
+        # Only bag-qualified paths count; never bare numbers or versions.
+        key = _bag_key(line)
+        if not key:
+            continue
+        fields[key] = {"type": "string", "examples": _examples(re.findall(r"['\"]([^'\"]{1,120})['\"]", line), key)}
     return fields
 
 
 def _merge_field(fields, key, typ="string", examples=None):
-    if not key or not re.match(r"^[A-Za-z0-9._-]{1,80}$", key):
+    if not key or not _FIELD_KEY_RE.match(key):
         return
     item = fields.setdefault(key, {"type": typ, "examples": []})
     if typ and item.get("type") == "string":
@@ -111,16 +212,9 @@ def normalize_snapshot(
     source_status="fresh",
 ):
     columns = _parse_getschema(getschema_text)
-    for name, typ in {
-        "timestamp": "datetime",
-        "metric_name": "string",
-        "value": "real",
-        "body": "string",
-        "resource": "dynamic",
-        "attributes": "dynamic",
-    }.items():
-        if name in str(getschema_text or "") and name not in columns:
-            columns[name] = {"type": typ, "nullable": True}
+    if columns:
+        for name, typ in BUILTIN_COLUMNS.items():
+            columns.setdefault(name, {"type": typ, "nullable": True})
     resource_fields = {}
     attribute_fields = {}
     for key, val in _parse_fieldstats(fieldstats_text, "resource").items():
@@ -179,6 +273,8 @@ def suggest_field(name, snapshot, limit=3):
     for key in snapshot.get("attribute_fields", {}):
         choices.append(f"attributes['{key}']")
     aliases = {
+        "$time": "timestamp",
+        "time": "timestamp",
         "service": "resource['service.name']",
         "service_name": "resource['service.name']",
         "host": "resource['host.name']",
@@ -258,6 +354,8 @@ def get_schema_snapshot(
     path = _cache_file(config_dir, table)
     with _LOCK:
         cached = _read_cache(path)
+        if cached and not cached.get("columns"):
+            cached = None  # an empty snapshot is a failed read, not a schema
         if cached and not force and _fresh(cached, ttl_seconds):
             cached = dict(cached)
             cached["source_status"] = cached.get("source_status") or "fresh"
@@ -279,6 +377,8 @@ def get_schema_snapshot(
                 supported_idioms=raw.get("supported_idioms"),
                 source_status="fresh",
             )
+            if not snapshot["columns"]:
+                raise ValueError("getschema returned no columns")
             _write_cache(path, snapshot)
             return snapshot
         except Exception:

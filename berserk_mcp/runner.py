@@ -425,7 +425,9 @@ def _schema_fetcher():
     )
     results = {}
     for name, query in queries:
-        out, is_err = run_bzrk(["-P", bm_config.PROFILE, "search", *query])
+        # --json: the text table changed shape in bzrk 2026-08-19 (row-index
+        # column, "Name:type" header) and left the snapshot empty for weeks.
+        out, is_err = run_bzrk(["-P", bm_config.PROFILE, "search", "--json", *query])
         if is_err:
             # Stop at the first failure: the caller holds schema_registry's
             # lock, and each further query could wait for a query slot.
