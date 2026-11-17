@@ -283,7 +283,8 @@ def rank_saved_entries(items, stats, cap):
     scored = []
     for pos, item in enumerate(items):
         nm = projectable_name(item)
-        if nm is None:
+        # A stale entry (WP11 sets health) is never projected.
+        if nm is None or item.get("health") == "stale":
             continue
         scored.append((_rank_key(stats.get(nm) or {}, pos), pos, item))
     scored.sort(key=lambda row: row[0], reverse=True)

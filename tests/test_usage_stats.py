@@ -607,3 +607,54 @@ class EvictionTest(_UsageBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewRoundOneTest(unittest.TestCase):
+    """Codex round 1 on WP4: bounded usage values, stale exclusion."""
+
+    def setUp(self):
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        saved = (bm.LEARNED_PATH, bm.ACTIVE_ROLE, bm.ACTIVE_TIER_RESOLVED)
+
+        def restore():
+            bm.LEARNED_PATH, bm.ACTIVE_ROLE, bm.ACTIVE_TIER_RESOLVED = saved
+
+        self.addCleanup(restore)
+        bm.LEARNED_PATH = Path(self._tmp.name) / "learned.json"
+        bm.ACTIVE_ROLE, bm.ACTIVE_TIER_RESOLVED = "all", bm.TIER_DEEP
+        from berserk_mcp import usage
+
+        self.usage = usage
+
+    def test_long_timestamp_is_rejected(self):
+        self.assertIsNone(self.usage.valid_timestamp("2026-11-17T10:00:00." + "1" * 100000 + "Z"))
+        self.assertEqual(self.usage.valid_timestamp("2026-11-17T10:00:00.123Z"), "2026-11-17T10:00:00.123Z")
+
+    def test_huge_counter_is_capped(self):
+        self.assertLessEqual(self.usage._count(10**100), self.usage.MAX_COUNT)
+
+    def test_snapshot_never_returns_more_than_the_cap(self):
+        data = {f"q{i}": {"calls": 1} for i in range(self.usage.MAX_ENTRIES + 1)}
+        self.usage.usage_path().write_text(json.dumps(data), encoding="utf-8")
+        self.assertLessEqual(len(self.usage.snapshot()), self.usage.MAX_ENTRIES)
+
+    def test_stale_entry_is_not_projected(self):
+        bm.LEARNED_PATH.write_text(
+            json.dumps(
+                [
+                    {"name": "ok_q", "description": "d", "kql": "default | take 1", "since": "1h ago"},
+                    {
+                        "name": "stale_q",
+                        "description": "d",
+                        "kql": "default | take 2",
+                        "since": "1h ago",
+                        "health": "stale",
+                    },
+                ]
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual([t["name"] for t in bm._saved_query_tools()], ["saved__ok_q"])

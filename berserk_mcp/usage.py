@@ -34,7 +34,9 @@ OUTCOMES = ("rows", "empty", "error")
 # MCP clients limit tool names to 64 characters; "saved__" takes 7.
 _MAX_NAME_CHARS = 64 - len("saved__")
 _NAME_RE = re.compile(r"[a-z0-9_]+")
-_ISO_RE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z")
+_ISO_RE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z")
+# The file is local but can be hand-edited: counts are bounded on read.
+MAX_COUNT = 10**12
 _COUNTERS = ("calls", "rows_calls", "zero_row_calls", "error_calls")
 
 
@@ -54,7 +56,9 @@ def valid_timestamp(value):
 
 
 def _count(value):
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return min(value, MAX_COUNT)
+    return 0
 
 
 def _clean(raw):
@@ -76,7 +80,7 @@ def snapshot():
     """The usage dict, {name: stats}. Takes no lock. Never raises: a missing or
     damaged file gives an empty dict."""
     try:
-        return _clean(_store.load_json_dict(usage_path(), logger=bm_config.log))
+        return prune(_clean(_store.load_json_dict(usage_path(), logger=bm_config.log)), None)
     except Exception as exc:
         bm_config.log(f"usage snapshot failed: {type(exc).__name__}: {exc}")
         return {}
