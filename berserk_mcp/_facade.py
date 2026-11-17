@@ -19,6 +19,7 @@ LAYERS = (
     "queries",
     "runner",
     "tools",
+    "usage",
     "learned",
     "httpconfig",
     "doctor",
