@@ -188,7 +188,8 @@ def _handle_learning_loop(name, arguments):
             return "NOT saved - the query failed when verified:\n" + bm_fencing._fence_untrusted(out), True
         rows_verified, empty_error = _empty_result_check(kql, out, arguments.get("allow_empty") is True)
         if empty_error:
-            return empty_error, True  # nosemgrep: unfenced-bzrk-output-reaches-return -- fixed text, or bzrk text already fenced in _empty_result_check
+            # Safe: fixed server text, or bzrk text already fenced in _empty_result_check.
+            return empty_error, True  # nosemgrep: unfenced-bzrk-output-reaches-return
         all_items = bm_learned.load_learned()
         is_amendment = any(it["name"] == nm for it in all_items)
         # Require a real JSON boolean true — a string like "false" is truthy
