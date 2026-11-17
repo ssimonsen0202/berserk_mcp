@@ -124,6 +124,32 @@ def _empty_result_check(kql, out, allow_empty):
     )
 
 
+def _save_query_input_error(name, desc, kql):
+    """Error text for save_query input that must be refused before any query
+    runs, else None."""
+    if not kql or not desc:
+        return "save_query needs name, description, and kql."
+    if len(desc) > bm_learned.SAVE_QUERY_DESCRIPTION_MAX_CHARS:
+        return (
+            f"description is too long (maximum {bm_learned.SAVE_QUERY_DESCRIPTION_MAX_CHARS} "
+            "characters). LEARNED_STORE_CAP (500) bounds entry count, not size -- "
+            "tools/list parses the whole store on every call, so an unbounded "
+            "description compounds into a mandatory-path cost for every client."
+        )
+    return _hidden_name_refusal(name)
+
+
+def _hidden_name_refusal(name):
+    """Refusal text when `name` is held by an entry this role or tier cannot
+    see, else None. Runs before any query, and says nothing about why, so a
+    hidden entry's role, description and KQL stay hidden; overwrite=true
+    cannot replace it."""
+    held = next((it for it in bm_learned.load_learned() if it.get("name") == name), None)
+    if held is not None and not bm_config.item_visible(held):
+        return bm_learned.HIDDEN_NAME_MESSAGE.format(name=name)
+    return None
+
+
 def _visible_duplicate(all_items, name, kql):
     """A visible saved entry under another name with the same KQL fingerprint."""
     fingerprint = bm_learned.kql_fingerprint(kql)
@@ -169,20 +195,9 @@ def _handle_learning_loop(name, arguments):
         desc = str(arguments.get("description", "")).strip()
         kql = str(arguments.get("kql", "")).strip()
         since = arguments.get("since") or "1h ago"
-        if not kql or not desc:
-            return "save_query needs name, description, and kql.", True
-        if len(desc) > bm_learned.SAVE_QUERY_DESCRIPTION_MAX_CHARS:
-            return (
-                f"description is too long (maximum {bm_learned.SAVE_QUERY_DESCRIPTION_MAX_CHARS} "
-                "characters). LEARNED_STORE_CAP (500) bounds entry count, not size -- "
-                "tools/list parses the whole store on every call, so an unbounded "
-                "description compounds into a mandatory-path cost for every client."
-            ), True
-        # A name held by an entry this role or tier cannot see: refuse before
-        # any query runs, without saying why; overwrite=true cannot replace it.
-        held = next((it for it in bm_learned.load_learned() if it.get("name") == nm), None)
-        if held is not None and not bm_config.item_visible(held):
-            return bm_learned.HIDDEN_NAME_MESSAGE.format(name=nm), True
+        refusal = _save_query_input_error(nm, desc, kql)
+        if refusal:
+            return refusal, True
         validation_report = None
         if bm_config.KQL_VALIDATION_MODE != "off":
             validation_report = bm_runner._validate_user_kql(kql, since)
