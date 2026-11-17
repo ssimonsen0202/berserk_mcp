@@ -772,8 +772,17 @@ def build_mgmt_tools(*, TABLE, MAX_INTERPOLATED_NAME_CHARS, MAX_SEARCH_TERM_CHAR
     return [
         {
             "name": "list_saved",
-            "description": "List previously-saved custom queries (name + description). For a non-standard question, CHECK HERE FIRST before writing new KQL.",
-            "inputSchema": {"type": "object", "properties": {}},
+            "description": "List previously-saved custom queries (name + description). For a non-standard question, CHECK HERE FIRST before writing new KQL. Pass query to get the 10 best matches for a topic instead of the full list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "maxLength": 200,
+                        "description": "optional topic; returns the 10 best-matching saved queries",
+                    }
+                },
+            },
         },
         {
             "name": "run_saved",
@@ -909,7 +918,7 @@ def build_mgmt_tools(*, TABLE, MAX_INTERPOLATED_NAME_CHARS, MAX_SEARCH_TERM_CHAR
         },
         {
             "name": "find_tool",
-            "description": "Find a tool by what you're trying to do, when the full tool list isn't resident (BERSERK_MCP_DISCOVERY=1). Returns up to 5 candidates with their full inputSchema inline, so no second round trip is needed before calling one. If nothing matches confidently, returns the always-resident anchor set instead and says so explicitly.",
+            "description": "Find a tool by what you're trying to do. Searches the built-in tools and the saved queries (saved__<name>) in every mode, whether or not the full tool list is shown. Returns up to 5 candidates with their full inputSchema inline, so no second round trip is needed before calling one; at most 2 are saved queries when built-in tools match. If nothing matches confidently, returns the always-resident anchor set instead and says so explicitly.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

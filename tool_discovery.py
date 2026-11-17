@@ -157,15 +157,24 @@ def _idf_weight(token, doc_freq, n_tools):
     return math.log((n_tools + 1) / (df + 1)) + 1
 
 
-def search(index, query, top_k=5, tool_order=None):
+def search(index, query, top_k=5, tool_order=None, weights_from=None):
     """Return up to top_k (tool_name, score) pairs, highest score first.
     Ties break by tool_order (the order tools were registered in) so results
-    are deterministic rather than dependent on dict iteration order."""
+    are deterministic rather than dependent on dict iteration order.
+
+    weights_from: an optional second index. When given, word weights use its
+    document frequencies and tool count instead of `index`'s own, so extra
+    entries in `index` cannot change the weights of the tools in
+    `weights_from`. A word absent from it gets df=0 (the same +1 smoothing)."""
     per_tool, doc_freq = index
+    n_weight = len(per_tool)
+    if weights_from is not None:
+        n_weight = len(weights_from[0])
+        doc_freq = weights_from[1]
     query_tokens = tokenize(query, expand_synonyms=True, drop_stopwords=True)
     if not query_tokens:
         return []
-    n_tools = len(per_tool)
+    n_tools = n_weight
 
     order = {name: i for i, name in enumerate(tool_order)} if tool_order else {}
     scores = Counter()

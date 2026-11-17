@@ -96,6 +96,70 @@ class RecallGateTest(unittest.TestCase):
         self.assertEqual(missing, set(), f"tools with no recall-test coverage: {sorted(missing)}")
 
 
+class RecallGateWithSavedStoreTest(unittest.TestCase):
+    """WP2: indexing saved entries changes the document frequencies that
+    weight every query word. Built-in recall must hold with a full
+    500-entry store loaded, measured through the real find_tool path."""
+
+    SERVICES = ("checkout", "billing", "gateway", "auth", "search", "payments", "inventory", "mailer")
+    SUBJECTS = ("errors", "latency", "cpu", "memory", "containers", "hosts", "logs", "services", "traces", "metrics")
+    VERBS = ("Counts", "Lists", "Shows", "Ranks", "Finds", "Reports", "Lists top", "Summarises")
+
+    def setUp(self):
+        import json
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        saved = (bm.LEARNED_PATH, bm.ACTIVE_ROLE, bm.ACTIVE_TIER_RESOLVED, bm.SAVED_TOOL_PROJECTION_CAP)
+
+        def restore():
+            bm.LEARNED_PATH, bm.ACTIVE_ROLE, bm.ACTIVE_TIER_RESOLVED, bm.SAVED_TOOL_PROJECTION_CAP = saved
+
+        self.addCleanup(restore)
+        store = Path(self._tmp.name) / "learned.json"
+        entries = []
+        for i in range(500):
+            verb = self.VERBS[i % len(self.VERBS)]
+            subject = self.SUBJECTS[(i // 3) % len(self.SUBJECTS)]
+            service = self.SERVICES[(i // 7) % len(self.SERVICES)]
+            entries.append(
+                {
+                    "name": f"saved_{i}_{subject}_{service}",
+                    "description": f"{verb} {subject} for the {service} service over the last hour, grouped by host.",
+                    "kql": bm.TABLE + " | take 1",
+                    "since": "1h ago",
+                }
+            )
+        store.write_text(json.dumps(entries), encoding="utf-8")
+        bm.LEARNED_PATH = store
+        bm.ACTIVE_ROLE, bm.ACTIVE_TIER_RESOLVED = "all", bm.TIER_DEEP
+
+    def test_builtin_recall_holds_with_500_entry_store(self):
+        import json
+
+        self.assertEqual(len(bm.saved_query_index_docs()), 500)
+        tool_names = {t["name"] for t in bm.TOOLS + bm.MGMT_TOOLS}
+        misses = []
+        total = 0
+        for tool_name, phrasings in PHRASINGS.items():
+            self.assertIn(tool_name, tool_names)
+            for phrase in phrasings:
+                total += 1
+                text, is_error = bm.handle_call("find_tool", {"intent": phrase})
+                self.assertFalse(is_error, text)
+                names = [c["name"] for c in json.loads(text)["candidates"]]
+                if tool_name not in names:
+                    misses.append((tool_name, phrase, names))
+        recall = 1 - (len(misses) / total) if total else 0
+        detail = "\n".join(f"  {t!r} <- {p!r} -> got {got}" for t, p, got in misses[:25])
+        self.assertGreaterEqual(
+            recall,
+            0.99,
+            f"recall@5 with a 500-entry store = {recall:.4f} ({len(misses)}/{total} misses), needs >=0.99\n{detail}",
+        )
+
+
 PHRASINGS = {
     "list_containers": ["what containers are running", "list all containers", "show me the containers"],
     "top_cpu": ["which container is using the most cpu", "top cpu containers", "highest cpu usage container"],

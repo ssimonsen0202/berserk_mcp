@@ -206,9 +206,36 @@ def _visible_duplicate(all_items, name, kql):
     )
 
 
+LIST_SAVED_QUERY_MAX_CHARS = 200
+LIST_SAVED_QUERY_LIMIT = 10
+
+
+def _list_saved_ranked(query):
+    """list_saved with a query: (text, is_error) for the best matches, or None
+    when no query was given and the caller lists every entry."""
+    if query is None:
+        return None
+    if not isinstance(query, str):
+        return "query must be a string", True
+    if len(query) > LIST_SAVED_QUERY_MAX_CHARS:
+        return f"query is too long (maximum {LIST_SAVED_QUERY_MAX_CHARS} characters)", True
+    if not query.strip():
+        return None
+    # Same index as find_tool, so a client that ignores list_changed can
+    # still find a saved query added mid-session.
+    ranked = bm_learned.search_saved_entries(query, LIST_SAVED_QUERY_LIMIT)
+    if not ranked:
+        return "No saved queries match that query.", False
+    lines = ["- " + it["name"] + ": " + bm_learned._saved_query_description(it) for it in ranked]
+    return "Saved queries (best match first):\n" + "\n".join(lines), False
+
+
 def _handle_learning_loop(name, arguments):
     """list_saved / run_saved / save_query. Returns (text, is_error) or None."""
     if name == "list_saved":
+        ranked = _list_saved_ranked(arguments.get("query"))
+        if ranked is not None:
+            return ranked
         items = [it for it in bm_learned.load_learned() if bm_config.item_visible(it)]
         if not items:
             return "No saved queries yet.", False

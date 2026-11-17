@@ -6,6 +6,7 @@ Split out of berserk_mcp.py in v1.37.0.
 from berserk_mcp import config as bm_config
 from berserk_mcp import doctor as bm_doctor
 from berserk_mcp import fencing as bm_fencing
+from berserk_mcp import learned as bm_learned
 from berserk_mcp import queries as bm_queries
 from berserk_mcp import runner as bm_runner
 from berserk_mcp import tools as bm_tools
@@ -13,7 +14,6 @@ import agent_analytics
 import ai_finops
 import json
 import quota_status
-import tool_discovery
 
 
 _QUERY_DETAIL_CHECKS = frozenset({"auth", "table_reachable", "recent_rows"})
@@ -114,8 +114,9 @@ def _handle_search_tools(name, arguments):
         if len(str(intent)) > bm_queries.MAX_SEARCH_TERM_CHARS:
             return f"intent is too long (maximum {bm_queries.MAX_SEARCH_TERM_CHARS} characters)", True
         visible = {t["name"]: t for t in bm_tools.TOOLS + bm_tools.MGMT_TOOLS if bm_config.tool_visible(t)}
-        ranked = tool_discovery.search(bm_tools._DISCOVERY_INDEX, str(intent), top_k=5)
-        candidates = [visible[n] for n, _ in ranked if n in visible]
+        ranked, saved_tools = bm_learned.rank_discovery(str(intent))
+        picked = _pick_discovery_candidates(ranked, visible, saved_tools)
+        candidates = [visible[n] if n in visible else saved_tools[n] for n in picked]
         low_confidence = not candidates
         if low_confidence:
             candidates = [visible[n] for n in sorted(bm_tools._ANCHOR_TOOL_NAMES) if n in visible]
@@ -141,6 +142,32 @@ def _handle_search_tools(name, arguments):
         out, err = bm_runner.bzrk_search_json(bm_queries.q_cc_search(str(term), agent), since)
         return bm_fencing._fence_untrusted(out), err
     return None
+
+
+_FIND_TOOL_CANDIDATES = 5
+_FIND_TOOL_MAX_SAVED = 2
+
+
+def _pick_discovery_candidates(ranked, visible, saved_tools):
+    """Names of the find_tool candidates, best first. At most
+    _FIND_TOOL_MAX_SAVED are saved tools unless no built-in tool matched, so a
+    saved description stuffed with keywords cannot push built-in tools out.
+    `ranked` is already ordered by score, then built-in before saved."""
+    builtin_names = [n for n, _ in ranked if n in visible]
+    cap = _FIND_TOOL_MAX_SAVED if builtin_names else _FIND_TOOL_CANDIDATES
+    picked = []
+    kept_saved = 0
+    for name, _score in ranked:
+        if len(picked) >= _FIND_TOOL_CANDIDATES:
+            break
+        if name in saved_tools:
+            if kept_saved >= cap:
+                continue
+            kept_saved += 1
+            picked.append(name)
+        elif name in visible:
+            picked.append(name)
+    return picked
 
 
 def _handle_analytics_tools(name, arguments):
