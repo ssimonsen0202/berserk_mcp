@@ -1398,7 +1398,11 @@ def _persist_validated_queries(
             ), False
         if log_entry.get("action") == "duplicate":
             existing = log_entry.get("duplicate_of") or log_entry.get("name", q["name"])
-            duplicates.append({"name": q["name"], "duplicate_of": existing})
+            # The report reaches the tool caller (generate_parser); never name
+            # an entry hidden from the active role. verified_queries is
+            # server state and keeps the real name.
+            shown = existing if log_entry.get("duplicate_visible", True) else "(hidden)"
+            duplicates.append({"name": q["name"], "duplicate_of": shown})
             duplicate_of.append(existing)
             continue
         saved_names.append(log_entry.get("name", q["name"]))

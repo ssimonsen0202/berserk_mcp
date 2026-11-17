@@ -282,7 +282,7 @@ def persist_learned_query(entry, action_source):
 
     Every write stores kql_sha256 / kql_fp_v. A generated write whose KQL
     matches another entry's fingerprint under a different name writes nothing
-    and returns {"name", "action": "duplicate", "duplicate_of"}; the same name
+    and returns {"name", "action": "duplicate", "duplicate_of", "duplicate_visible"}; the same name
     with the same KQL as a stored generated entry returns
     {"name", "action": "unchanged"} and keeps the stored entry as it is.
     """
@@ -334,7 +334,14 @@ def persist_learned_query(entry, action_source):
             # no list_changed.
             for it in all_items:
                 if it["name"] != nm and entry_fingerprint(it) == fingerprint:
-                    return {"name": it["name"], "action": "duplicate", "duplicate_of": it["name"]}
+                    return {
+                        "name": it["name"],
+                        "action": "duplicate",
+                        "duplicate_of": it["name"],
+                        # Callers that show the result to a tool caller must
+                        # not name an entry the active role cannot see.
+                        "duplicate_visible": bm_config.item_visible(it),
+                    }
             # Same name and same KQL as a stored generated entry: the KQL an
             # operator approved has not changed, so the approval stands.
             same = by_name.get(nm)

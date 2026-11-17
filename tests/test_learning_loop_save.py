@@ -385,7 +385,8 @@ class DuplicateTest(_SaveBase):
             "since": "1h ago",
         }
         log = bm.persist_learned_query(entry, action_source="generated")
-        self.assertEqual(log, {"name": "human", "action": "duplicate", "duplicate_of": "human"})
+        self.assertEqual(log["action"], "duplicate")
+        self.assertEqual(log["duplicate_of"], "human")
         # Invisible to the active role or not, nothing is written.
         self.assertEqual(self.store_path.read_text(encoding="utf-8"), before)
         self.assertFalse(amend.exists())
@@ -430,6 +431,20 @@ class DuplicateTest(_SaveBase):
         self.assertEqual(inner["queries_saved"], [])
         self.assertEqual(inner["duplicates"], [{"name": "dup_q", "duplicate_of": "human"}])
         self.assertEqual([it["name"] for it in bm.load_learned()], ["human"])
+
+    def test_job_report_does_not_name_a_duplicate_hidden_from_the_role(self):
+        # generate_parser returns this report to the caller, so a duplicate
+        # the active role cannot see must not be named in it.
+        self.put({"name": "sre_hidden_query", "description": "H.", "kql": KQL, "since": "1h ago", "roles": ["sre"]})
+        bm.ACTIVE_ROLE = "soc"
+        queries = [{"name": "dup_q", "description": "Dup.", "kql": KQL, "since": "1h ago"}]
+        report, ok = bm.parser_factory._persist_validated_queries(
+            queries, "svc", "service", "p", "m", "hash", "fresh", [], "", 1
+        )
+        self.assertTrue(ok)
+        self.assertNotIn("sre_hidden_query", json.dumps(report))
+        self.assertEqual(report["report"]["duplicates"], [{"name": "dup_q", "duplicate_of": "(hidden)"}])
+        self.assertEqual([it["name"] for it in bm.load_learned()], ["sre_hidden_query"])
 
     def test_persist_validated_queries_unchanged_counts_as_saved(self):
         self.put(
