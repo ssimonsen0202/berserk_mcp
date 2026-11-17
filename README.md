@@ -42,10 +42,14 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.37.8**. This is a bullet-point overview, most recent
+Current version: **1.37.9**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.37.9** (2026-11-17) — `save_query` no longer reveals or replaces a
+  saved query that the caller's role or tier cannot see. Such a name gets a
+  short "not available" reply, and `overwrite=true` cannot replace the entry.
+  See [docs/releases/v1.37.9.md](docs/releases/v1.37.9.md).
 - **v1.37.8** (2026-11-17) — `save_query` now checks that a query returns
   rows. It rejects a query that matches nothing in 24 hours, unless the
   caller passes `allow_empty=true`. Then the entry carries an unverified
