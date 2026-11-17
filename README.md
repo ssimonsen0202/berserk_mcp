@@ -42,10 +42,16 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.37.5**. This is a bullet-point overview, most recent
+Current version: **1.37.6**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.37.6** (2026-11-16) — Test-only baseline for the learning-loop work. One
+  doctor test now skips when the suite runs as root, because root ignores the
+  directory mode it checks. A saved-query store written by v1.37.5 is now a
+  test fixture, with a compatibility test for `tools/list`, `list_saved` and
+  `run_saved`. The server behaves as before. See
+  [docs/releases/v1.37.6.md](docs/releases/v1.37.6.md).
 - **v1.37.5** (2026-11-16) — The schema snapshot is read again. Since the
   bzrk CLI changed its table output, the snapshot was empty, so
   `validate_kql` never reported an unknown field. The fetcher now asks bzrk

@@ -4968,6 +4968,10 @@ class DoctorPreflightTest(unittest.TestCase):
         "POSIX permission bits aren't enforced the same way on Windows; "
         "chmod doesn't reliably block directory-content creation there.",
     )
+    @unittest.skipIf(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        "root ignores the 0o500 directory mode this test relies on.",
+    )
     def test_learned_store_writable_fail_when_parent_not_writable(self):
         orig = bm.LEARNED_PATH
         readonly_dir = Path(self._tmp.name) / "readonly"
