@@ -109,7 +109,7 @@ def _handle_learning_loop(name, arguments):
         lines = []
         for item in items:
             description = str(item.get("description", ""))
-            if item.get("origin") == "generated":
+            if bm_config.is_generated(item):
                 description = "<generated-description>" + description + "</generated-description>"
             lines.append("- " + item["name"] + ": " + description)
         return "Saved queries:\n" + "\n".join(lines), False

@@ -272,6 +272,17 @@ class LearnedOlderShapesCompatTest(_LegacyStoreBase):
         desc = self.projected()["saved__old_no_status"]["description"]
         self.assertTrue(desc.startswith("<generated-description>"))
 
+    def test_older_no_origin_entry_is_fenced_in_tools_list_and_list_saved(self):
+        # generated_by without origin counts as generated for visibility
+        # (config.is_generated), so its model-written description must be
+        # fenced too, in both places it is shown.
+        desc = self.projected()["saved__old_no_origin"]["description"]
+        self.assertEqual(desc, "<generated-description>" + OLD_NO_ORIGIN["description"] + "</generated-description>")
+        self.assertIn(
+            "- old_no_origin: <generated-description>" + OLD_NO_ORIGIN["description"] + "</generated-description>",
+            self.listed_saved(),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

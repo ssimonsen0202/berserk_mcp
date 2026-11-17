@@ -33,3 +33,4 @@ Not checked live: whether each MCP client honours
 | Package | Version | PR | Deviations | Open follow-ups |
 |---|---|---|---|---|
 | WP0 baseline | v1.37.6 | [#104](https://github.com/ssimonsen0202/berserk_mcp/pull/104) | The fixture's two generated entries went through `persist_learned_query` with a minimal entry, so they lack the validation fields the full generation pipeline adds. Codex review round 1 (2 low findings, both fixed): two older store shapes (a generated entry with no `status`, one with `generated_by` but no `origin`) are added by hand in the compat test, since v1.37.5 cannot write them; `saved__*` dispatch now asserts the stored KQL and `since`. | The generated path treats a table of several rows ending in `0` as empty (`count_result_is_zero`); fix after WP1. |
+| Fix outside the spec: fence `generated_by`-only entries | v1.37.7 | pending | Found by the WP0 Codex review, round 2. The owner asked for its own PR. | none |

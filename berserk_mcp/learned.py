@@ -170,7 +170,7 @@ def _saved_query_description(item):
     # text, before the fence is added, so it can never cut the fence.
     filtered = bm_tools._without_hidden_tool_sentences(text, bm_tools._hidden_tool_names())
     text = filtered if filtered is text or filtered.strip() else "Saved query."
-    if item.get("origin") == "generated":
+    if bm_config.is_generated(item):
         text = "<generated-description>" + text + "</generated-description>"
     return text
 
