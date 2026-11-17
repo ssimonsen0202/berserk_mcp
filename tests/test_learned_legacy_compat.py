@@ -8,6 +8,7 @@ format cannot break an existing store without a test failing.
 """
 
 import hashlib
+import json
 import shutil
 import sys
 import tempfile
@@ -27,7 +28,9 @@ PENDING = "checkout_slow_pending"  # generated, pending approval
 APPROVED = "payments_top_approved"  # generated, approved
 
 
-class LearnedLegacyCompatTest(unittest.TestCase):
+class _LegacyStoreBase(unittest.TestCase):
+    """Temporary copy of the fixture store, bzrk stubbed, state restored."""
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -64,6 +67,8 @@ class LearnedLegacyCompatTest(unittest.TestCase):
         self.assertFalse(is_err)
         return text
 
+
+class LearnedLegacyCompatTest(_LegacyStoreBase):
     # ---- the fixture itself ----
     def test_fixture_has_the_four_legacy_shapes(self):
         by_name = {it["name"]: it for it in bm.load_learned()}
@@ -157,6 +162,16 @@ class LearnedLegacyCompatTest(unittest.TestCase):
         bm.handle_call("run_saved", {"name": MANUAL, "since": "2h ago"})
         self.assertIn("2h ago", self.calls[-1])
 
+    def test_saved_tool_dispatch_uses_the_stored_kql_and_since(self):
+        by_name = {it["name"]: it for it in bm.load_learned()}
+        for name in (MANUAL, ROLE_SCOPED, APPROVED, PENDING):
+            self.calls.clear()
+            bm.handle_call("saved__" + name, {})
+            self.assertIn(by_name[name]["kql"], self.calls[-1], name)
+            self.assertIn(by_name[name]["since"], self.calls[-1], name)
+        bm.handle_call("saved__" + MANUAL, {"since": "2h ago"})
+        self.assertIn("2h ago", self.calls[-1])
+
     def test_pending_generated_entry_is_not_runnable_in_the_small_tier(self):
         self.use("all", bm.TIER_SMALL)
         self.calls.clear()
@@ -201,6 +216,61 @@ class LearnedLegacyCompatTest(unittest.TestCase):
                 bm.handle_call("saved__" + APPROVED, {})
         self.assertEqual(hashlib.sha256(self.store_path.read_bytes()).hexdigest(), before)
         self.assertEqual(self.store_path.read_bytes(), FIXTURE.read_bytes())
+
+
+# Older store shapes that v1.37.5 no longer writes but still reads:
+# a generated entry from before the approval gate (no "status"), and one
+# that carries "generated_by" without "origin". config.is_generated treats
+# both as generated and awaiting_approval treats a missing status as
+# pending. Built by hand because the current code cannot produce them.
+OLD_NO_STATUS = {
+    "name": "old_no_status",
+    "description": "Generated before the approval gate existed.",
+    "kql": "default | where resource['service.name'] == 'checkout' | take 3",
+    "since": "1h ago",
+    "origin": "generated",
+}
+OLD_NO_ORIGIN = {
+    "name": "old_no_origin",
+    "description": "Carries generated_by but no origin.",
+    "kql": "default | where resource['service.name'] == 'payments' | take 3",
+    "since": "1h ago",
+    "generated_by": {"provider": "example", "model": "example-model", "ts": "2026-01-01T00:00:00Z"},
+}
+
+
+class LearnedOlderShapesCompatTest(_LegacyStoreBase):
+    def setUp(self):
+        super().setUp()
+        items = json.loads(self.store_path.read_text(encoding="utf-8"))
+        items += [dict(OLD_NO_STATUS), dict(OLD_NO_ORIGIN)]
+        self.store_path.write_text(json.dumps(items, indent=2), encoding="utf-8")
+
+    def test_older_generated_shapes_are_hidden_in_the_small_tier(self):
+        old = {"saved__old_no_status", "saved__old_no_origin"}
+        self.use("all", bm.TIER_SMALL)
+        self.assertFalse(old & set(self.projected()))
+        self.assertFalse(old & self.listed_tools())
+        text = self.listed_saved()
+        self.assertNotIn("old_no_status", text)
+        self.assertNotIn("old_no_origin", text)
+        self.calls.clear()
+        for name in ("old_no_status", "old_no_origin"):
+            self.assertTrue(bm.handle_call("run_saved", {"name": name})[1], name)
+            self.assertEqual(bm.handle_call("saved__" + name, {}), ("unknown tool: saved__" + name, True))
+        self.assertEqual(self.calls, [])
+
+    def test_older_generated_shapes_are_visible_and_runnable_in_the_deep_tier(self):
+        old = {"saved__old_no_status", "saved__old_no_origin"}
+        self.assertEqual(old & set(self.projected()), old)
+        for name in ("old_no_status", "old_no_origin"):
+            text, is_err = bm.handle_call("saved__" + name, {})
+            self.assertFalse(is_err, name)
+            self.assertIn("7", text)
+
+    def test_older_no_status_entry_is_fenced_as_generated(self):
+        desc = self.projected()["saved__old_no_status"]["description"]
+        self.assertTrue(desc.startswith("<generated-description>"))
 
 
 if __name__ == "__main__":
