@@ -172,6 +172,11 @@ def _save_query_input_error(name, desc, kql):
     runs, else None."""
     if not kql or not desc:
         return "save_query needs name, description, and kql."
+    if len(name) > bm_learned.MAX_SAVED_NAME_CHARS:
+        return (
+            f"name is too long (maximum {bm_learned.MAX_SAVED_NAME_CHARS} characters after "
+            "sanitising), because saved__<name> must fit the 64-character tool-name limit."
+        )
     if len(desc) > bm_learned.SAVE_QUERY_DESCRIPTION_MAX_CHARS:
         return (
             f"description is too long (maximum {bm_learned.SAVE_QUERY_DESCRIPTION_MAX_CHARS} "
@@ -227,7 +232,9 @@ def _list_saved_ranked(query):
     if not ranked:
         return "No saved queries match that query.", False
     lines = [
-        "- " + bm_learned.sanitize_name(it["name"]) + ": " + bm_learned._saved_query_description(it) for it in ranked
+        "- " + bm_learned.projectable_name(it) + ": " + bm_learned._saved_query_description(it)
+        for it in ranked
+        if bm_learned.projectable_name(it)
     ]
     return "Saved queries (best match first):\n" + "\n".join(lines), False
 
@@ -238,7 +245,9 @@ def _handle_learning_loop(name, arguments):
         ranked = _list_saved_ranked(arguments.get("query"))
         if ranked is not None:
             return ranked
-        items = [it for it in bm_learned.load_learned() if bm_config.item_visible(it)]
+        items = [
+            it for it in bm_learned.load_learned() if bm_config.item_visible(it) and bm_learned.projectable_name(it)
+        ]
         if not items:
             return "No saved queries yet.", False
         lines = []
@@ -248,7 +257,7 @@ def _handle_learning_loop(name, arguments):
             description = bm_learned._saved_query_description(item)
             # Stored names are not trusted either; show the sanitised form,
             # the same name saved__ dispatch and run_saved resolve.
-            lines.append("- " + bm_learned.sanitize_name(item["name"]) + ": " + description)
+            lines.append("- " + bm_learned.projectable_name(item) + ": " + description)
         return "Saved queries:\n" + "\n".join(lines), False
     if name == "run_saved":
         qn = bm_learned.sanitize_name(arguments.get("name", ""))

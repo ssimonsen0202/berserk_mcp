@@ -440,3 +440,30 @@ class ReviewRoundOneTest(unittest.TestCase):
         ]
         self.write(items)
         self.assertLessEqual(len(bm_learned.saved_query_index_docs()), bm_learned.LEARNED_STORE_CAP)
+
+
+class SavedNameLengthTest(ReviewRoundOneTest):
+    """Codex round 2 on WP2: saved__<name> must fit the 64-character tool-name
+    limit MCP clients apply."""
+
+    LONG = "x" * 200
+
+    def test_save_query_refuses_a_name_too_long_for_a_tool_name(self):
+        text, is_err = bm.handle_call("save_query", {"name": self.LONG, "description": "d", "kql": "default | take 1"})
+        self.assertTrue(is_err)
+        self.assertIn("too long", text)
+
+    def test_existing_long_name_is_never_projected_indexed_or_listed(self):
+        self.write(
+            [
+                {"name": self.LONG, "description": "zebra", "kql": "default | take 1", "since": "1h ago"},
+                {"name": "short", "description": "zebra", "kql": "default | take 2", "since": "1h ago"},
+            ]
+        )
+        names = [t["name"] for t in bm_learned._saved_query_tools()]
+        self.assertEqual(names, ["saved__short"])
+        self.assertTrue(all(len(n) <= 64 for n in names))
+        self.assertNotIn(self.LONG, json.dumps(bm_learned.saved_query_index_docs()))
+        for args in ({}, {"query": "zebra"}):
+            self.assertNotIn(self.LONG, bm.handle_call("list_saved", args)[0], args)
+        self.assertNotIn(self.LONG, bm.handle_call("find_tool", {"intent": "zebra"})[0])

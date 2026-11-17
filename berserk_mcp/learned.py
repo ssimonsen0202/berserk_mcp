@@ -46,6 +46,20 @@ def save_learned(items):
     return _store.save_json_list(bm_config.LEARNED_PATH, items, logger=bm_config.log)
 
 
+# MCP clients limit tool names to 64 characters; "saved__" takes 7.
+MAX_SAVED_NAME_CHARS = 64 - len("saved__")
+
+
+def projectable_name(item):
+    """The sanitised name of a saved entry, or None when it has no usable
+    name or saved__<name> would exceed the 64-character tool-name limit."""
+    try:
+        nm = sanitize_name(item["name"])
+    except (KeyError, TypeError):
+        return None
+    return nm if len(nm) <= MAX_SAVED_NAME_CHARS else None
+
+
 def sanitize_name(n):
     n = re.sub(r"[^a-zA-Z0-9_]+", "_", str(n).strip().lower()).strip("_")
     return n or "query"
@@ -202,9 +216,8 @@ def _project_saved_entry(item):
     """The tool definition one saved entry projects to, or None when the
     entry has no usable name. The one place a saved entry becomes a tool, so
     tools/list and find_tool return the same definition."""
-    try:
-        nm = sanitize_name(item["name"])
-    except (KeyError, TypeError):
+    nm = projectable_name(item)
+    if nm is None:
         return None
     tool = {
         "name": "saved__" + nm,
@@ -278,10 +291,10 @@ def _build_saved_index():
         if len(docs) >= LEARNED_STORE_CAP:
             # A hand-edited store can exceed the write cap; never index more.
             break
-        try:
-            name = "saved__" + sanitize_name(item["name"])
-        except (KeyError, TypeError):
+        nm = projectable_name(item)
+        if nm is None:
             continue
+        name = "saved__" + nm
         if name in by_tool:
             continue
         docs.append({"name": name, "description": _saved_index_text(item)})
