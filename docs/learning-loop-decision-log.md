@@ -38,4 +38,26 @@ Not checked live: whether each MCP client honours
 | Fix outside the spec: `save_query` and hidden names | v1.37.9 | [#107](https://github.com/ssimonsen0202/berserk_mcp/pull/107) | Found by the WP1 Codex review, round 1; the owner asked for its own PR. The store write also refuses under its lock (`HiddenNameError`). Codex round 1 widened it: refuse before any query runs; generated writes and `review_generated` respect visibility. Accepted limit: a taken name can be told apart from a free one (store-wide names). | Per-role name spaces, if roles must be a secrecy boundary (owner decision). At the 500-entry cap, eviction can remove an entry another role owns (Codex round 2); take up in WP4, which rewrites eviction. A hidden name created in the gap between the check and the save still costs the verification queries before the refusal (Codex round 3); accepted, nothing is replaced or revealed. |
 | WP3 saved-query envelope | v1.37.10 | [#108](https://github.com/ssimonsen0202/berserk_mcp/pull/108) | `review=` is `approved` or `pending` only; `unreviewed` arrives with WP8. The "last returned rows at" sentence waits for WP4. Two helpers added (`_saved_header_extra`, `_empty_saved_text`). A `nosemgrep` marker documents why the header (counts, a sanitised name and a digest) may be returned. Tests-first proof: all 9 new tests failed on the base commit. Codex round 1 (2 low, both fixed): `since` is stripped before it reaches the header; `run_saved` now resolves a name the same way as `saved__*` dispatch (an unsanitised stored name used to run only through `saved__*`). Round 2 (2 low): the SIMPLE tools put an unstripped `since` into the same header; `_envelope_header` now strips it for every caller. Round 3 (1 low): whitespace inside `since` (tab, vertical tab, U+2028) also reached the header; `tools.display_since` now collapses every whitespace run, for both paths. Two stored names that sanitise to the same value still collide (predates this work). | Reject or repair stored names that sanitise to the same value (`foo-bar` and `foo bar` both become `saved__foo_bar`). |
 | WP5 real model id | v1.37.11 | [#109](https://github.com/ssimonsen0202/berserk_mcp/pull/109) | `_provider_model` returns an error for an unknown provider (the spec names three). A failed model lookup in the ladder counts as an attempt, like any other failed call. Three `spy_llm_complete` test doubles gained `model=None`. Tests-first proof: all 5 new tests failed on the base commit. Codex round 1 (1 finding, declined): an operator-set model id or a Hermes-reported id such as "unknown" is recorded as sent; the record must say what was sent, and the code itself no longer writes a fallback. | none |
-| WP6 ladder failure history | v1.37.12 | pending | A provider that generated a reply and then hit a call error still adds a note from its last validation or parse errors. One extra test beyond the spec (a model-lookup error adds no note). Secret and forged-tag tests patch `_parse_generated_reply`, because real parse errors do not echo model text. Tests-first proof: all 6 new tests failed on the base commit. | none |
+| WP6 ladder failure history | v1.37.12 | [#110](https://github.com/ssimonsen0202/berserk_mcp/pull/110) | A provider that generated a reply and then hit a call error still adds a note from its last validation or parse errors. One extra test beyond the spec (a model-lookup error adds no note). Secret and forged-tag tests patch `_parse_generated_reply`, because real parse errors do not echo model text. Tests-first proof: all 6 new tests failed on the base commit. | none |
+
+## Release A: complete (2026-11-17)
+
+Release A of the spec (revision 4) is merged: WP0, WP1, WP3, WP5 and WP6, as
+v1.37.6, v1.37.8, v1.37.10, v1.37.11 and v1.37.12. Each package has its own
+release note in `docs/releases/`. Codex reviews of these packages found two
+defects outside the spec, each fixed in its own PR (v1.37.7 and v1.37.9).
+
+What release A changes for users:
+
+- `save_query` refuses a query that returns no rows in 24 hours, unless
+  `allow_empty=true`, and refuses the same KQL under a second name.
+- `save_query` cannot reveal or replace a saved query the caller cannot see.
+- Saved-query results carry the same evidence header as the built-in tools.
+- Generated queries record the model that wrote them, and a later model in
+  the ladder sees what earlier models got wrong.
+
+Open follow-ups, in the rows above: stored names that sanitise to the same
+value collide; eviction at the 500-entry cap ignores roles (WP4); the
+generated path's count check misreads a several-row table ending in `0`.
+
+Release B (WP2, WP4, WP17 report) needs its own owner approval.
