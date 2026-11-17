@@ -63,22 +63,24 @@ def _handle_parser_core(name, arguments):
         return "\n".join(outcomes), any_needs_human
     if name == "review_generated":
         items = bm_learned.load_learned()
-        generated = [it for it in items if "generated_by" in it]
+        generated = [it for it in items if bm_config.is_generated(it)]
         nm = arguments.get("name")
         if nm:
             nm = bm_learned.sanitize_name(nm)
             match = next((it for it in generated if it["name"] == nm), None)
             if not match:
                 return f"No generated query named '{nm}'.", True
-            return json.dumps(match, separators=(",", ":")), False
+            # Every field of a generated entry was written by a model.
+            return bm_fencing._fence_untrusted(json.dumps(match, separators=(",", ":"))), False
         if not generated:
             return "No generated queries yet.", False
         lines = []
         for it in generated:
-            gb = it.get("generated_by", {})
+            gb = it.get("generated_by")
+            gb = gb if isinstance(gb, dict) else {}
             status = bm_config.GENERATED_PENDING if bm_config.awaiting_approval(it) else bm_config.GENERATED_APPROVED
             lines.append(
-                f"- {it['name']}: {it.get('description', '')} "
+                f"- {it['name']}: {bm_learned._saved_query_description(it)} "
                 f"[{gb.get('provider', '?')}/{gb.get('model', '?')} @ {gb.get('ts', '?')}] "
                 f"status={status}"
             )

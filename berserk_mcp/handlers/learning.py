@@ -108,9 +108,9 @@ def _handle_learning_loop(name, arguments):
             return "No saved queries yet.", False
         lines = []
         for item in items:
-            description = str(item.get("description", ""))
-            if item.get("origin") == "generated":
-                description = "<generated-description>" + description + "</generated-description>"
+            # Same sanitising and fence as the tools/list projection, so a
+            # forged closing tag cannot end the fence early.
+            description = bm_learned._saved_query_description(item)
             lines.append("- " + item["name"] + ": " + description)
         return "Saved queries:\n" + "\n".join(lines), False
     if name == "run_saved":
