@@ -658,3 +658,21 @@ class ReviewRoundOneTest(unittest.TestCase):
             encoding="utf-8",
         )
         self.assertEqual([t["name"] for t in bm._saved_query_tools()], ["saved__ok_q"])
+
+
+class UsageFileBoundTest(ReviewRoundOneTest):
+    """Codex round 2 on WP4: an oversized usage file is never parsed."""
+
+    def test_oversized_file_reads_as_empty_and_is_not_rewritten(self):
+        path = self.usage.usage_path()
+        path.write_text(
+            json.dumps({"q": {"calls": 1, "junk": "x" * (self.usage.MAX_FILE_BYTES + 10)}}), encoding="utf-8"
+        )
+        before = path.stat().st_size
+        self.assertEqual(self.usage.snapshot(), {})
+        self.usage.record("q", "rows")
+        self.assertEqual(path.stat().st_size, before)
+
+    def test_unknown_fields_are_dropped(self):
+        self.usage.usage_path().write_text(json.dumps({"q": {"calls": 2, "junk": "x" * 1000}}), encoding="utf-8")
+        self.assertNotIn("junk", self.usage.snapshot()["q"])

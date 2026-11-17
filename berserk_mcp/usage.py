@@ -37,6 +37,10 @@ _NAME_RE = re.compile(r"[a-z0-9_]+")
 _ISO_RE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z")
 # The file is local but can be hand-edited: counts are bounded on read.
 MAX_COUNT = 10**12
+# 500 entries of bounded fields fit easily; anything larger was not written
+# by this module and is never parsed.
+MAX_FILE_BYTES = 256 * 1024
+_TIMESTAMPS = ("last_called", "last_rows_at")
 _COUNTERS = ("calls", "rows_calls", "zero_row_calls", "error_calls")
 
 
@@ -69,18 +73,36 @@ def _clean(raw):
     for name, stats in raw.items():
         if not _valid_name(name) or not isinstance(stats, dict):
             continue
-        entry = dict(stats)
-        for key in _COUNTERS:
-            entry[key] = _count(stats.get(key))
+        # Known fields only: unknown keys from a hand-edited file are dropped.
+        entry = {key: _count(stats.get(key)) for key in _COUNTERS}
+        for key in _TIMESTAMPS:
+            stamp = valid_timestamp(stats.get(key))
+            if stamp:
+                entry[key] = stamp
         out[name] = entry
     return out
+
+
+def _oversized(path):
+    try:
+        return path.stat().st_size > MAX_FILE_BYTES
+    except OSError:
+        return False
+
+
+def _load(path):
+    """The raw dict in `path`, or {} when it is missing, damaged or larger than
+    MAX_FILE_BYTES (checked before reading, so it is never parsed)."""
+    if _oversized(path):
+        return {}
+    return _store.load_json_dict(path, logger=bm_config.log)
 
 
 def snapshot():
     """The usage dict, {name: stats}. Takes no lock. Never raises: a missing or
     damaged file gives an empty dict."""
     try:
-        return prune(_clean(_store.load_json_dict(usage_path(), logger=bm_config.log)), None)
+        return prune(_clean(_load(usage_path())), None)
     except Exception as exc:
         bm_config.log(f"usage snapshot failed: {type(exc).__name__}: {exc}")
         return {}
@@ -139,7 +161,10 @@ def record(name, outcome):
             return
         path = usage_path()
         with _store.FileLock(path, timeout_seconds=LOCK_TIMEOUT_SECONDS):
-            data = _clean(_store.load_json_dict(path, logger=bm_config.log))
+            if _oversized(path):
+                bm_config.log(f"usage record skipped: {path.name} exceeds {MAX_FILE_BYTES} bytes")
+                return
+            data = _clean(_load(path))
             now = bm_config.now_iso()
             entry = data.setdefault(name, {key: 0 for key in _COUNTERS})
             entry["calls"] = _count(entry.get("calls")) + 1
