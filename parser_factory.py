@@ -190,7 +190,7 @@ def _bound_report(report, cap=None):
     if len(json.dumps(report)) <= cap:
         return report
     trimmed = dict(report)
-    for list_field in ("warnings", "last_errors", "queries_saved"):
+    for list_field in ("warnings", "last_errors", "queries_saved", "duplicates"):
         if list_field in trimmed and isinstance(trimmed[list_field], list):
             trimmed[list_field] = trimmed[list_field][:1]
     if len(json.dumps(trimmed)) <= cap:
@@ -1352,6 +1352,8 @@ def _persist_validated_queries(
     """Persist validated generated queries and update schema knowledge with
     the verified query names. Returns (report_dict, ok_bool)."""
     saved_names = []
+    duplicates = []
+    duplicate_of = []
     for q in validated_queries:
         entry = {
             "name": q["name"],
@@ -1394,13 +1396,24 @@ def _persist_validated_queries(
                     "attempts": attempts_used,
                 }
             ), False
+        if log_entry.get("action") == "duplicate":
+            existing = log_entry.get("duplicate_of") or log_entry.get("name", q["name"])
+            # The report reaches the tool caller (generate_parser); never name
+            # an entry hidden from the active role. verified_queries is
+            # server state and keeps the real name.
+            shown = existing if log_entry.get("duplicate_visible", True) else "(hidden)"
+            duplicates.append({"name": q["name"], "duplicate_of": shown})
+            duplicate_of.append(existing)
+            continue
         saved_names.append(log_entry.get("name", q["name"]))
 
     with _FileLock(_schema_knowledge_path()):  # F-007: whole RMW cycle, not just the save
         knowledge = load_json_dict(_schema_knowledge_path())
         key = f"{kind}:{source}"
         if key in knowledge.get("sources", {}):
-            knowledge["sources"][key]["verified_queries"] = saved_names
+            knowledge["sources"][key]["verified_queries"] = saved_names + [
+                n for n in duplicate_of if n not in saved_names
+            ]
             save_json_dict(_schema_knowledge_path(), knowledge)
 
     report = {
@@ -1408,6 +1421,7 @@ def _persist_validated_queries(
         "model": used_model,
         "attempts": attempts_used,
         "queries_saved": saved_names,
+        "duplicates": duplicates,
         "warnings": warnings,
     }
     # _bound_report trims top-level list fields, so bound the inner report

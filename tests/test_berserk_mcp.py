@@ -113,7 +113,7 @@ class BerserkMcpTest(unittest.TestCase):
 
         def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
             self.calls.append(list(args))
-            return ("OK", False)
+            return ("col\nOK", False)
 
         self._orig = bm.run_bzrk
         bm.run_bzrk = fake_run_bzrk
@@ -536,7 +536,7 @@ class BerserkMcpTest(unittest.TestCase):
 
     def test_learned_store_capped_at_500(self):
         bm.save_learned([{"name": f"q{i}", "description": "x", "kql": "default | count"} for i in range(600)])
-        bm.handle_call("save_query", {"name": "one_more", "description": "x", "kql": "default | count"})
+        bm.handle_call("save_query", {"name": "one_more", "description": "x", "kql": "default | take 7"})
         self.assertEqual(len(bm.load_learned()), 500)
 
     @unittest.skipIf(sys.platform == "win32", "POSIX permission bits only")
@@ -818,7 +818,7 @@ class BerserkMcpTest(unittest.TestCase):
         oldest-first eviction, no origin protection needed since a human
         write is always allowed to make room for itself."""
         bm.save_learned([{"name": f"q{i}", "description": "x", "kql": "default | count"} for i in range(500)])
-        bm.handle_call("save_query", {"name": "one_more", "description": "x", "kql": "default | count"})
+        bm.handle_call("save_query", {"name": "one_more", "description": "x", "kql": "default | take 7"})
         items = bm.load_learned()
         self.assertEqual(len(items), 500)
         self.assertNotIn("q0", [it["name"] for it in items])
@@ -1120,7 +1120,7 @@ class BerserkMcpTest(unittest.TestCase):
         def worker(i):
             try:
                 bm.persist_learned_query(
-                    {"name": f"concurrent_{i}", "description": "d", "kql": "default | take 1"},
+                    {"name": f"concurrent_{i}", "description": "d", "kql": f"default | take {i + 1}"},
                     action_source="generated",
                 )
             except Exception as e:  # pragma: no cover - surfaced via errors list
@@ -3416,7 +3416,7 @@ class RoleFilterTest(unittest.TestCase):
 
         def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
             self.calls.append(list(args))
-            return ("OK", False)
+            return ("col\nOK", False)
 
         self._orig_run = bm.run_bzrk
         bm.run_bzrk = fake_run_bzrk
@@ -4025,7 +4025,7 @@ class FleetControlsTest(unittest.TestCase):
     def test_save_query_persists_validation_metadata_and_legacy_run_still_works(self):
         def fake(args, timeout=bm.DEFAULT_TIMEOUT):
             self.calls.append(list(args))
-            return "OK", False
+            return "col\nOK", False
 
         bm.run_bzrk = fake
         with tempfile.TemporaryDirectory() as d:
@@ -4359,7 +4359,7 @@ class BodyPreservingJsonModeTest(unittest.TestCase):
 
         def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
             self.calls.append(list(args))
-            return ("OK", False)
+            return ("col\nOK", False)
 
         self._orig = bm.run_bzrk
         bm.run_bzrk = fake_run_bzrk
@@ -5273,7 +5273,7 @@ class SavedQueryProjectionTest(unittest.TestCase):
 
         def fake_run_bzrk(args, timeout=bm.DEFAULT_TIMEOUT):
             self.calls.append(list(args))
-            return ("OK", False)
+            return ("col\nOK", False)
 
         self._orig_run = bm.run_bzrk
         bm.run_bzrk = fake_run_bzrk

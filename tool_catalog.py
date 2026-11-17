@@ -786,7 +786,7 @@ def build_mgmt_tools(*, TABLE, MAX_INTERPOLATED_NAME_CHARS, MAX_SEARCH_TERM_CHAR
         },
         {
             "name": "save_query",
-            "description": "Persist a WORKING KQL query as a reusable named query so it never has to be figured out again. Call this after you answer a non-standard question with a custom search query. The query is run once to verify it works; if it errors it is NOT saved. Replacing an existing saved query of the same name requires overwrite=true.",
+            "description": "Persist a WORKING KQL query as a reusable named query so it never has to be figured out again. Call this after you answer a non-standard question with a custom search query. The query is run to verify it works; if it errors, or matches no rows in 24h, it is NOT saved (allow_empty=true accepts an empty result and marks the query unverified). The same KQL under a second name is refused. Replacing an existing saved query of the same name requires overwrite=true.",
             "inputSchema": {
                 "type": "object",
                 "properties": dict(
@@ -804,6 +804,10 @@ def build_mgmt_tools(*, TABLE, MAX_INTERPOLATED_NAME_CHARS, MAX_SEARCH_TERM_CHAR
                         "overwrite": {
                             "type": "boolean",
                             "description": "must be true to replace an existing saved query of the same name",
+                        },
+                        "allow_empty": {
+                            "type": "boolean",
+                            "description": "must be true to save a query that matches no rows in 24h; it is then marked unverified",
                         },
                         "mgmt_token": {
                             "type": "string",

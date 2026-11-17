@@ -8,6 +8,7 @@ from berserk_mcp import fencing as bm_fencing
 from berserk_mcp import learned as bm_learned
 from berserk_mcp import queries as bm_queries
 from berserk_mcp import runner as bm_runner
+from berserk_mcp import tools as bm_tools
 import hmac
 import os
 import parser_factory
@@ -100,6 +101,42 @@ def _run_saved_entry(match, since_arg):
     return prefix + bm_fencing._fence_limited(out), err
 
 
+def _empty_result_check(kql, out, allow_empty):
+    """Zero-row check for save_query. Returns (rows_verified, error_text).
+
+    An empty first result triggers one retry over 24h through the same
+    bzrk_search_json call, so the query slot and window budget apply. The KQL
+    is unchanged, so it is not validated again. allow_empty must be a real
+    JSON true (the caller passes `is True`), like overwrite."""
+    if not bm_tools.result_is_empty(out):
+        return True, None
+    out, is_err = bm_runner.bzrk_search_json(kql, "24h ago")
+    if is_err:
+        return False, "NOT saved - the query failed when verified:\n" + bm_fencing._fence_untrusted(out)
+    if not bm_tools.result_is_empty(out):
+        return True, None
+    if allow_empty:
+        return False, None
+    return False, (
+        "NOT saved - the query ran but matched nothing in 24h. A bare column name "
+        "silently matches zero rows; check the field access with discover_schema. "
+        "Pass allow_empty=true only if an empty result is the expected normal state."
+    )
+
+
+def _visible_duplicate(all_items, name, kql):
+    """A visible saved entry under another name with the same KQL fingerprint."""
+    fingerprint = bm_learned.kql_fingerprint(kql)
+    return next(
+        (
+            it
+            for it in all_items
+            if it.get("name") != name and bm_config.item_visible(it) and bm_learned.entry_fingerprint(it) == fingerprint
+        ),
+        None,
+    )
+
+
 def _handle_learning_loop(name, arguments):
     """list_saved / run_saved / save_query. Returns (text, is_error) or None."""
     if name == "list_saved":
@@ -149,6 +186,10 @@ def _handle_learning_loop(name, arguments):
         out, is_err = bm_runner.bzrk_search_json(kql, since)
         if is_err:
             return "NOT saved - the query failed when verified:\n" + bm_fencing._fence_untrusted(out), True
+        rows_verified, empty_error = _empty_result_check(kql, out, arguments.get("allow_empty") is True)
+        if empty_error:
+            # Safe: fixed server text, or bzrk text already fenced in _empty_result_check.
+            return empty_error, True  # nosemgrep: unfenced-bzrk-output-reaches-return
         all_items = bm_learned.load_learned()
         is_amendment = any(it["name"] == nm for it in all_items)
         # Require a real JSON boolean true — a string like "false" is truthy
@@ -157,7 +198,17 @@ def _handle_learning_loop(name, arguments):
             return (
                 f"A saved query named '{nm}' already exists. Pass overwrite=true to replace it (this will be logged)."
             ), True
-        entry = {"name": nm, "description": desc, "kql": kql, "since": since}
+        duplicate = _visible_duplicate(all_items, nm, kql)
+        if duplicate is not None:
+            # Entries the caller cannot see are skipped: naming one, or
+            # refusing because of one, would reveal that it exists.
+            return (
+                f"NOT saved - the same KQL is already saved as '{duplicate['name']}'. "
+                f"Use run_saved name={duplicate['name']}. overwrite=true does not bypass this check."
+            ), True
+        entry = {"name": nm, "description": desc, "kql": kql, "since": since, "rows_verified": rows_verified}
+        if rows_verified:
+            entry["rows_verified_at"] = bm_config.now_iso()
         if validation_report:
             schema_info = validation_report.get("schema", {})
             entry.update(
@@ -173,7 +224,8 @@ def _handle_learning_loop(name, arguments):
         if roles:
             entry["roles"] = roles
         bm_learned.persist_learned_query(entry, action_source="manual")
-        return "Saved '" + nm + "'. Reusable now via run_saved name=" + nm + " (verified, returned data).", False
+        verdict = "Verified: returned rows." if rows_verified else "NOT verified to return rows (allow_empty)."
+        return "Saved '" + nm + "'. " + verdict + " Reusable now via run_saved name=" + nm + ".", False
     return None
 
 
