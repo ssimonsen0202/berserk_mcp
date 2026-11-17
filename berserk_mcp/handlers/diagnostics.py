@@ -63,7 +63,7 @@ def _handle_parser_core(name, arguments):
         return "\n".join(outcomes), any_needs_human
     if name == "review_generated":
         items = bm_learned.load_learned()
-        generated = [it for it in items if bm_config.is_generated(it)]
+        generated = [it for it in items if bm_config.is_generated(it) and bm_config.item_visible(it)]
         nm = arguments.get("name")
         if nm:
             nm = bm_learned.sanitize_name(nm)

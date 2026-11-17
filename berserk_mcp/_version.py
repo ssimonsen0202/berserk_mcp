@@ -1,3 +1,3 @@
 """berserk-mcp version."""
 
-__version__ = "1.37.8"
+__version__ = "1.37.9"

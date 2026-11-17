@@ -178,6 +178,11 @@ def _handle_learning_loop(name, arguments):
                 "tools/list parses the whole store on every call, so an unbounded "
                 "description compounds into a mandatory-path cost for every client."
             ), True
+        # A name held by an entry this role or tier cannot see: refuse before
+        # any query runs, without saying why; overwrite=true cannot replace it.
+        held = next((it for it in bm_learned.load_learned() if it.get("name") == nm), None)
+        if held is not None and not bm_config.item_visible(held):
+            return bm_learned.HIDDEN_NAME_MESSAGE.format(name=nm), True
         validation_report = None
         if bm_config.KQL_VALIDATION_MODE != "off":
             validation_report = bm_runner._validate_user_kql(kql, since)
@@ -191,7 +196,8 @@ def _handle_learning_loop(name, arguments):
             # Safe: fixed server text, or bzrk text already fenced in _empty_result_check.
             return empty_error, True  # nosemgrep: unfenced-bzrk-output-reaches-return
         all_items = bm_learned.load_learned()
-        is_amendment = any(it["name"] == nm for it in all_items)
+        same_name = next((it for it in all_items if it["name"] == nm), None)
+        is_amendment = same_name is not None
         # Require a real JSON boolean true — a string like "false" is truthy
         # in Python and must not authorize an overwrite.
         if is_amendment and arguments.get("overwrite") is not True:
@@ -223,7 +229,10 @@ def _handle_learning_loop(name, arguments):
         roles = bm_config.normalize_roles(arguments.get("roles"))
         if roles:
             entry["roles"] = roles
-        bm_learned.persist_learned_query(entry, action_source="manual")
+        try:
+            bm_learned.persist_learned_query(entry, action_source="manual")
+        except bm_learned.HiddenNameError:
+            return bm_learned.HIDDEN_NAME_MESSAGE.format(name=nm), True
         verdict = "Verified: returned rows." if rows_verified else "NOT verified to return rows (allow_empty)."
         return "Saved '" + nm + "'. " + verdict + " Reusable now via run_saved name=" + nm + ".", False
     return None

@@ -267,6 +267,13 @@ def entry_rows_verified(item):
     return item.get("rows_verified") is not False
 
 
+HIDDEN_NAME_MESSAGE = "The name '{name}' is not available. Choose another name."
+
+
+class HiddenNameError(ValueError):
+    """A manual write named an entry the active role or tier cannot see."""
+
+
 def persist_learned_query(entry, action_source):
     """Storage core shared by the save_query tool and the parser-factory
     pipeline: dedupe by name, append, cap at 500, and log the amendment.
@@ -297,6 +304,11 @@ def persist_learned_query(entry, action_source):
         fingerprint = kql_fingerprint(entry.get("kql", ""))
         existing = next((it for it in all_items if it["name"] == nm), None)
         is_amendment = existing is not None
+        if action_source != "generated" and existing is not None and not bm_config.item_visible(existing):
+            # Checked again under the lock: a manual write never replaces an
+            # entry its caller cannot see (the handler checks first, but a
+            # concurrent write could create the entry in between).
+            raise HiddenNameError(nm)
         if action_source == "generated":
             # Every generated write starts pending, including a regenerated
             # query replacing an approved one: new KQL needs a new approval.
@@ -305,8 +317,10 @@ def persist_learned_query(entry, action_source):
             by_name = {it["name"]: it for it in all_items}
 
             def _is_free_or_generated(candidate):
+                # A generated entry the active role cannot see is not free:
+                # replacing it would change another role's query.
                 found = by_name.get(candidate)
-                return found is None or found.get("origin") == "generated"
+                return found is None or (found.get("origin") == "generated" and bm_config.item_visible(found))
 
             if not _is_free_or_generated(nm):
                 base = nm
