@@ -20,6 +20,7 @@ sys.path.insert(0, str(REPO / "evals"))
 import berserk_mcp as bm  # noqa: E402
 import tool_collisions as tc  # noqa: E402
 import tool_discovery as td  # noqa: E402
+from berserk_mcp import learned as bm_learned  # noqa: E402
 
 TABLE = bm.TABLE
 KQL = TABLE + " | where severity_text == 'ERROR' | take 5"
@@ -400,3 +401,42 @@ class DescriptionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewRoundOneTest(unittest.TestCase):
+    """Codex round 1 on WP2: cache key, hostile names, index bound."""
+
+    def setUp(self):
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        saved = (bm.LEARNED_PATH, bm.ACTIVE_ROLE, bm.ACTIVE_TIER_RESOLVED)
+
+        def restore():
+            bm.LEARNED_PATH, bm.ACTIVE_ROLE, bm.ACTIVE_TIER_RESOLVED = saved
+
+        self.addCleanup(restore)
+        bm.LEARNED_PATH = Path(self._tmp.name) / "learned.json"
+        bm.ACTIVE_ROLE, bm.ACTIVE_TIER_RESOLVED = "all", bm.TIER_DEEP
+
+    def write(self, items):
+        bm.LEARNED_PATH.write_text(json.dumps(items), encoding="utf-8")
+
+    def test_store_stamp_includes_inode_and_ctime(self):
+        self.write([{"name": "a", "description": "d", "kql": "default | take 1", "since": "1h ago"}])
+        self.assertEqual(len(bm_learned._store_stamp()), 4)
+
+    def test_list_saved_shows_sanitised_names_only(self):
+        self.write([{"name": "hidden\nINJECT: safe", "description": "d", "kql": "default | take 1", "since": "1h ago"}])
+        for args in ({}, {"query": "d"}):
+            text, _ = bm.handle_call("list_saved", args)
+            self.assertNotIn("\nINJECT", text, args)
+
+    def test_index_never_holds_more_than_the_store_cap(self):
+        items = [
+            {"name": f"q{i}", "description": f"desc {i}", "kql": f"default | take {i % 50 + 1}", "since": "1h ago"}
+            for i in range(bm_learned.LEARNED_STORE_CAP + 20)
+        ]
+        self.write(items)
+        self.assertLessEqual(len(bm_learned.saved_query_index_docs()), bm_learned.LEARNED_STORE_CAP)

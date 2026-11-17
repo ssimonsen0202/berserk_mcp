@@ -261,7 +261,8 @@ def _store_stamp():
         st = os.stat(bm_config.LEARNED_PATH)
     except OSError:
         return None
-    return (st.st_mtime_ns, st.st_size)
+    # inode and ctime too: a rewrite can keep the same mtime and size.
+    return (st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns)
 
 
 def _build_saved_index():
@@ -274,6 +275,9 @@ def _build_saved_index():
     by_tool = {}
     # Most recent first, so equal scores among saved tools favour the newest.
     for item in reversed(items):
+        if len(docs) >= LEARNED_STORE_CAP:
+            # A hand-edited store can exceed the write cap; never index more.
+            break
         try:
             name = "saved__" + sanitize_name(item["name"])
         except (KeyError, TypeError):

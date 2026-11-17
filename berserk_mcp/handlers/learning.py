@@ -226,7 +226,9 @@ def _list_saved_ranked(query):
     ranked = bm_learned.search_saved_entries(query, LIST_SAVED_QUERY_LIMIT)
     if not ranked:
         return "No saved queries match that query.", False
-    lines = ["- " + it["name"] + ": " + bm_learned._saved_query_description(it) for it in ranked]
+    lines = [
+        "- " + bm_learned.sanitize_name(it["name"]) + ": " + bm_learned._saved_query_description(it) for it in ranked
+    ]
     return "Saved queries (best match first):\n" + "\n".join(lines), False
 
 
@@ -244,7 +246,9 @@ def _handle_learning_loop(name, arguments):
             # Same sanitising and fence as the tools/list projection, so a
             # forged closing tag cannot end the fence early.
             description = bm_learned._saved_query_description(item)
-            lines.append("- " + item["name"] + ": " + description)
+            # Stored names are not trusted either; show the sanitised form,
+            # the same name saved__ dispatch and run_saved resolve.
+            lines.append("- " + bm_learned.sanitize_name(item["name"]) + ": " + description)
         return "Saved queries:\n" + "\n".join(lines), False
     if name == "run_saved":
         qn = bm_learned.sanitize_name(arguments.get("name", ""))
