@@ -42,10 +42,15 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.37.11**. This is a bullet-point overview, most recent
+Current version: **1.37.12**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.37.12** (2026-11-17) — The author ladder now passes failure history
+  up. When one model fails validation, the next model sees a short note about
+  what went wrong. The ladder keeps at most three notes, redacts each one, and
+  fences them as data. The attempt budget does not change.
+  See [docs/releases/v1.37.12.md](docs/releases/v1.37.12.md).
 - **v1.37.11** (2026-11-17) — Generated queries now record the real model id
   in `generated_by.model`. Before, a missing model setting stored the provider
   name, such as "hermes". The ladder resolves the model once per attempt,
