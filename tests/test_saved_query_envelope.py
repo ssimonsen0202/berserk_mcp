@@ -97,6 +97,17 @@ class SavedEnvelopeTest(_EnvelopeBase):
             header = bm._envelope("list_hosts", since, ROWS).split("\n", 1)[0]
             self.assertTrue(header.startswith("window=1h ago  rows=2  source=fixed:list_hosts"), repr(header))
 
+    def test_whitespace_inside_since_is_collapsed_in_server_text(self):
+        for since in ("1h\tago", "1h\x0bago", "1h\x0cago", "1h\u2028ago", "1h \r\n ago"):
+            header = bm._envelope("list_hosts", since, ROWS).split("\n", 1)[0]
+            self.assertTrue(header.startswith("window=1h ago  rows=2  "), repr(header))
+            self.assertTrue(bm._envelope("list_hosts", since, "(no rows)").startswith("No rows in window 1h ago. "))
+            self.put(self.entry())
+            self.reply = ("(no rows)", False)
+            text, _ = bm.handle_call("run_saved", {"name": "probe", "since": since})
+            self.assertTrue(text.startswith("No rows in window 1h ago. "), repr(text[:40]))
+            self.reply = (ROWS, False)
+
     def test_run_saved_resolves_an_unsanitised_stored_name_like_saved_dispatch(self):
         self.put(self.entry("Weird Name!"))
         by_run = bm.handle_call("run_saved", {"name": "Weird Name!"})

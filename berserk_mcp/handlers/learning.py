@@ -82,9 +82,9 @@ def _run_saved_entry(match, since_arg):
     saved__<name> projected-tool dispatch (issue #5) so the two code paths
     can never drift -- see docs/claude-code-review-feedback-loop.md fault 2
     for what happens when a fix lands at only one call site."""
-    # Stripped: valid_since() accepts surrounding whitespace, and since is
+    # Whitespace collapsed: valid_since() accepts it, and since is
     # written into the server-text header, outside the fence.
-    since = str(since_arg or match.get("since") or "1h ago").strip()
+    since = bm_tools.display_since(since_arg or match.get("since") or "1h ago")
     prefix = ""
     if bm_config.KQL_VALIDATION_MODE != "off":
         report = bm_runner._validate_user_kql(match["kql"], since)

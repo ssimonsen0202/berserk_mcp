@@ -267,6 +267,13 @@ def result_is_empty(out):
     return count is not None and count <= 1 and bm_runner.count_result_is_zero(out)
 
 
+def display_since(since):
+    """`since` as it may appear in server text outside the fence: every run
+    of whitespace (newline, tab, vertical tab, form feed, U+2028 ...)
+    becomes one space. valid_since() accepts such whitespace."""
+    return " ".join(str(since).split())
+
+
 def _envelope_header(source, ref_key, since, out, extra=()):
     """Return the one-line evidence header for a result. Never raises on
     well-formed text.
@@ -278,9 +285,7 @@ def _envelope_header(source, ref_key, since, out, extra=()):
     The ref hashes the rows as the client receives them (after the same output
     filter dispatch applies), never the raw rows, so it cannot confirm a guess
     at a redacted value."""
-    # valid_since() accepts surrounding whitespace; a newline here would
-    # split the server header, which sits outside the fence.
-    since = str(since).strip()
+    since = display_since(since)
     rows = result_row_count(out)
     header = f"window={since}"
     if rows is not None:
@@ -314,7 +319,7 @@ def _envelope(tool, since, out, fence_body=False):
             next_step = _EMPTY_NEXT_STEP.get(tool, _DEFAULT_EMPTY_NEXT_STEP)
             if _names_hidden_tool(next_step, _hidden_tool_names()):
                 next_step = _DEFAULT_EMPTY_NEXT_STEP
-            return f"No rows in window {str(since).strip()}. {next_step}"
+            return f"No rows in window {display_since(since)}. {next_step}"
         header = _envelope_header("fixed:" + tool, tool, since, out)
         body = bm_fencing._fence_untrusted(out) if fence_body else out
         return f"{header}\n\n{body}"
