@@ -50,7 +50,9 @@ first — full detail for each notable release lives in
   `origin` now gets the generated-description fence. The server already
   treated such an entry as generated when it decided who sees it, but showed
   its model-written description unfenced. The fix covers `tools/list` and
-  `list_saved`. See [docs/releases/v1.37.7.md](docs/releases/v1.37.7.md).
+  `list_saved`. `list_saved` and `review_generated` now sanitise descriptions
+  as `tools/list` does, so a forged tag cannot end the fence early. See
+  [docs/releases/v1.37.7.md](docs/releases/v1.37.7.md).
 - **v1.37.6** (2026-11-16) — Test-only baseline for the learning-loop work. One
   doctor test now skips when the suite runs as root, because root ignores the
   directory mode it checks. A saved-query store written by v1.37.5 is now a
