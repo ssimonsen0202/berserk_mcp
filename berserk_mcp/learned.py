@@ -8,6 +8,7 @@ from berserk_mcp import fencing as bm_fencing
 from berserk_mcp import queries as bm_queries
 from berserk_mcp import runner as bm_runner
 from berserk_mcp import tools as bm_tools
+from berserk_mcp import usage as bm_usage
 from pathlib import Path
 import _store
 import _tag_guard
@@ -21,6 +22,7 @@ import parser_factory
 import re
 import secret_scan
 import threading
+import time
 import tool_discovery
 import unicodedata
 
@@ -65,42 +67,61 @@ def sanitize_name(n):
     return n or "query"
 
 
-def _make_room(existing_items, room_needed, protect_human):
-    """Evict `room_needed` entries from `existing_items` (oldest first) to
-    make room for a new entry that will be appended separately by the
-    caller -- this list never includes that new entry, so it can never be
-    the one evicted (F-006).
+class StoreFullError(ValueError):
+    """The store is at capacity and no entry the writer may see can be removed.
+    A ValueError so existing callers that catch it keep working."""
 
-    protect_human=True (a generated write): only origin=='generated'
-    entries are eligible for eviction -- a generated write must never
-    knock a human entry out of the store just because the store happens
-    to be at capacity. Raises ValueError if room_needed still can't be
-    met, i.e. the store is saturated with human entries and there is
-    nothing a generated write is allowed to remove; the caller must not
+
+STORE_FULL_MESSAGE = (
+    "the saved-query store is full and no entry this role and tier can see may be "
+    "removed to make room; ask the operator to free space"
+)
+
+
+def _make_room(existing_items, room_needed, protect_human, usage=None):
+    """Evict `room_needed` entries from `existing_items` to make room for a new
+    entry that the caller appends separately -- this list never includes that
+    new entry, so it can never be the one evicted (F-006).
+
+    Eligible entries are only those `item_visible` accepts for the writing role
+    and tier: a write never removes an entry its author cannot see. Among them
+    the least used goes first: fewest calls, then oldest last_called, then
+    oldest position. An entry never called sorts first. `usage` is the
+    usage.snapshot() dict, keyed by sanitised name (read here without a lock).
+
+    protect_human=True (a generated write): only origin=='generated' entries
+    are eligible -- a generated write must never knock a human entry out of
+    the store just because the store happens to be at capacity.
+
+    protect_human=False (a manual/human write): any visible entry is eligible,
+    generated ones before human ones.
+
+    Raises StoreFullError if room_needed cannot be met; the caller must not
     have persisted anything at that point.
-
-    protect_human=False (a manual/human write): unchanged prior behavior
-    -- simple oldest-first eviction regardless of origin. A human write is
-    always allowed to make room for itself.
     """
     if room_needed <= 0:
         return existing_items
-    kept = list(existing_items)
-    i = 0
-    evicted = 0
-    while evicted < room_needed and i < len(kept):
-        if not protect_human or kept[i].get("origin") == "generated":
-            del kept[i]
-            evicted += 1
-        else:
-            i += 1
-    if evicted < room_needed:
-        raise ValueError(
-            "cannot persist generated query: learned-query store is at "
-            "capacity with human entries; a generated write must not "
-            "evict a human entry to make room"
-        )
-    return kept
+    stats = usage if isinstance(usage, dict) else {}
+    candidates = []
+    for pos, item in enumerate(existing_items):
+        if protect_human and item.get("origin") != "generated":
+            continue
+        if not bm_config.item_visible(item):
+            continue
+        used = stats.get(sanitize_name(item.get("name", ""))) or {}
+        calls = used.get("calls") if isinstance(used.get("calls"), int) else 0
+        last_called = bm_usage.valid_timestamp(used.get("last_called")) or ""
+        candidates.append(((0 if item.get("origin") == "generated" else 1, calls, last_called, pos), pos))
+    if len(candidates) < room_needed:
+        if protect_human and not any(it.get("origin") == "generated" for it in existing_items):
+            raise StoreFullError(
+                "cannot persist generated query: learned-query store is at "
+                "capacity with human entries; a generated write must not "
+                "evict a human entry to make room"
+            )
+        raise StoreFullError(STORE_FULL_MESSAGE)
+    doomed = {pos for _, pos in sorted(candidates)[:room_needed]}
+    return [item for pos, item in enumerate(existing_items) if pos not in doomed]
 
 
 LEARNED_STORE_CAP = 500
@@ -229,19 +250,83 @@ def _project_saved_entry(item):
     return tool
 
 
+# The ranked projection is stable: it is recomputed when the learned store
+# changes (or the role, tier or cap does), or when the cached ranking is older
+# than this. A usage write alone never reorders tools/list.
+RANKING_TTL_SECONDS = 3600
+
+
+def _ranking_now():
+    return time.monotonic()
+
+
+_RANK_LOCK = threading.Lock()
+_RANK_CACHE = {"key": None, "at": 0.0, "order": []}
+
+
+def _rank_key(stats, position):
+    calls = stats.get("calls")
+    calls = calls if isinstance(calls, int) and not isinstance(calls, bool) else 0
+    return (calls, bm_usage.valid_timestamp(stats.get("last_called")) or "", position)
+
+
+def rank_saved_entries(items, stats, cap):
+    """Indexes into `items` (visible entries in store order) for the entries to
+    project, best first.
+
+    Score key, descending: calls, then last_called, then store position (later
+    ranks higher). When human-origin entries exist, up to half the cap (rounded
+    up) is reserved for the best of them; the remaining slots go to the best of
+    everything not yet chosen. The chosen entries are listed by the same key."""
+    if cap <= 0:
+        return []
+    scored = []
+    for pos, item in enumerate(items):
+        nm = projectable_name(item)
+        # A stale entry (WP11 sets health) is never projected.
+        if nm is None or item.get("health") == "stale":
+            continue
+        scored.append((_rank_key(stats.get(nm) or {}, pos), pos, item))
+    scored.sort(key=lambda row: row[0], reverse=True)
+    reserve = -(-cap // 2)
+    chosen = [row for row in scored if not bm_config.is_generated(row[2])][:reserve]
+    taken = {row[1] for row in chosen}
+    chosen += [row for row in scored if row[1] not in taken][: cap - len(chosen)]
+    chosen.sort(key=lambda row: row[0], reverse=True)
+    return [row[1] for row in chosen]
+
+
+def _projection_order(items):
+    """The cached ranking for `items`, recomputed on a store change or after
+    RANKING_TTL_SECONDS."""
+    stamp = _store_stamp()
+    key = (stamp, bm_config.ACTIVE_ROLE, bm_config.ACTIVE_TIER_RESOLVED, SAVED_TOOL_PROJECTION_CAP)
+    now = _ranking_now()
+    with _RANK_LOCK:
+        cached = _RANK_CACHE
+        fresh = cached["key"] == key and stamp is not None and 0 <= now - cached["at"] < RANKING_TTL_SECONDS
+        if fresh and all(i < len(items) for i in cached["order"]):
+            return list(cached["order"])
+        order = rank_saved_entries(items, bm_usage.snapshot(), SAVED_TOOL_PROJECTION_CAP)
+        cached.update(key=key, at=now, order=order)
+        return list(order)
+
+
 def _saved_query_tools():
-    """Tool definitions projected from the learned-query store, most recent
-    first-class. Never raises: a missing or malformed store must not break
-    tools/list, which every client depends on to function at all."""
+    """Tool definitions projected from the learned-query store, best ranked
+    first (see rank_saved_entries). Never raises: a missing or malformed store
+    must not break tools/list, which every client depends on to function at
+    all."""
     if SAVED_TOOL_PROJECTION_CAP <= 0:
         return []
     try:
         items = [it for it in load_learned() if bm_config.item_visible(it)]
+        order = _projection_order(items)
     except Exception:
         return []
     tools = []
-    for item in items[-SAVED_TOOL_PROJECTION_CAP:]:
-        tool = _project_saved_entry(item)
+    for index in order:
+        tool = _project_saved_entry(items[index])
         if tool is not None:
             tools.append(tool)
     return tools
@@ -545,7 +630,11 @@ def persist_learned_query(entry, action_source):
         items = [it for it in all_items if it["name"] != nm]
         room_needed = (len(items) + 1) - LEARNED_STORE_CAP
         if room_needed > 0:
-            items = _make_room(items, room_needed, protect_human=(action_source == "generated"))
+            # The usage snapshot is a lock-free read, so the learned-store lock
+            # held here never nests with the usage lock.
+            items = _make_room(
+                items, room_needed, protect_human=(action_source == "generated"), usage=bm_usage.snapshot()
+            )
         items.append(entry)
         save_learned(items)
 
@@ -588,6 +677,14 @@ def persist_learned_query(entry, action_source):
     except Exception as exc:
         bm_config.log(f"failed to send tools/list_changed notification: {type(exc).__name__}: {exc}")
     return log_entry
+
+
+def _stored_names():
+    """Sanitised names in the store, read without its lock (see usage.py)."""
+    return {sanitize_name(it["name"]) for it in load_learned() if isinstance(it, dict) and "name" in it}
+
+
+bm_usage.set_stored_names_source(_stored_names)
 
 
 parser_factory.configure(

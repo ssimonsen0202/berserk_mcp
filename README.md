@@ -42,15 +42,25 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.37.13**. This is a bullet-point overview, most recent
+Current version: **1.37.14**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.37.14** (2026-11-17) — The server now counts how often each saved query
+  runs. `run_saved` and the `saved__*` tools record a call, and whether it
+  returned rows, returned none or failed. `list_saved` shows `calls` and
+  `last_called` for each entry. The tool list now shows the best-used saved
+  queries first, not only the newest, and keeps half its places for
+  human-written ones. The ranking changes when the store changes or once an
+  hour, so a call alone never reorders `tools/list`. A full store now evicts
+  the least-used entry the writer can see, and refuses the save when none
+  qualifies. An empty result for a verified query says when it last returned
+  rows. See [docs/releases/v1.37.14.md](docs/releases/v1.37.14.md).
 - **v1.37.13** (2026-11-17) — `find_tool` now finds saved queries as well as
   built-in tools, in every mode. It searches all visible saved queries, not
   only the 25 listed as tools. At most two of the five candidates come from
   saved queries when a built-in tool matches. Discovery mode now lists up to five
-  recent saved tools next to the anchor tools; set
+  saved tools next to the anchor tools; set
   `BERSERK_MCP_DISCOVERY_SAVED_CAP` to change that, or `0` to list none.
   `list_saved` takes an optional `query` and returns the ten best matches.
   See [docs/releases/v1.37.13.md](docs/releases/v1.37.13.md).
@@ -903,6 +913,18 @@ rows, the sentence warns that an empty result is not a clean answer. A saved
 count of 0 is an answer and appears as normal. Set `BERSERK_MCP_ENVELOPE=0` to
 remove the header.
 
+The server counts every run of a saved query in `usage_stats.json`, beside the
+saved-query file. A call, a call that returned no rows and a failed call each
+have a counter. Recording a call never fails the call and never rewrites the
+saved-query file. `list_saved` shows `calls` and `last_called` for each entry.
+The `saved__*` tools in `tools/list` follow a ranking: most calls first, then
+the latest call, then the newest entry. Human-written entries keep at least
+half of the places. The ranking changes when the store changes or after one
+hour, so calls alone never reorder `tools/list`. When the store is full, a new
+save removes the least-used entry. It removes only an entry that the writing
+role and tier can see. A generated save never removes a human-written entry. If
+no entry qualifies, the server refuses the save and writes nothing.
+
 ### Ingestion advisor
 
 `suggest_ingestion` is an all-lane read-only tool (v1.12.0; see
@@ -954,7 +976,7 @@ this is discovery over berserk-mcp's own *tool catalog*.
 By default, the server lists the full tool catalog up front. Set
 `BERSERK_MCP_DISCOVERY=1` to list only 8 fixed anchor tools plus
 `find_tool`, which finds every other tool (v1.26.0, issue #14). Discovery mode also
-lists the five most recent saved tools; `BERSERK_MCP_DISCOVERY_SAVED_CAP` sets that
+lists the five best-ranked saved tools; `BERSERK_MCP_DISCOVERY_SAVED_CAP` sets that
 number. Measured against a real
 MCP handshake: the full schema costs ~17,560 tokens; discovery mode costs
 ~1,386 — a 92% reduction. A recall-gate test

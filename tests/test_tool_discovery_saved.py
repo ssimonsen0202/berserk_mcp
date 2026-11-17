@@ -243,7 +243,8 @@ class DiscoveryModeListingTest(_SavedDiscoveryBase):
         self.seed_many()
         names = self.listed_names()
         saved = [n for n in names if n.startswith("saved__")]
-        self.assertEqual(saved, ["saved__q6", "saved__q7", "saved__q8"])
+        # WP4: projection order is rank order; with no usage that is newest first.
+        self.assertEqual(saved, ["saved__q8", "saved__q7", "saved__q6"])
         self.assertTrue(set(bm._ANCHOR_TOOL_NAMES) <= set(names))
         self.assertEqual(len(names), len(bm._ANCHOR_TOOL_NAMES) + 3)
 
@@ -268,7 +269,9 @@ class DiscoveryModeListingTest(_SavedDiscoveryBase):
         bm.DISCOVERY_SAVED_CAP = 0
         self.seed_many(3)
         saved = [n for n in self.listed_names() if n.startswith("saved__")]
-        self.assertEqual(saved, ["saved__q1", "saved__q2", "saved__q3"])
+        # Same entries as before WP4; they now list best ranked first, and with
+        # no usage the ranking is newest first.
+        self.assertEqual(saved, ["saved__q3", "saved__q2", "saved__q1"])
         self.assertEqual(len(bm.saved_query_index_docs()), 3)
 
     def test_saved_cap_default_and_invalid_values(self):

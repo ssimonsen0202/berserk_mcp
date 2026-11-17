@@ -9,6 +9,7 @@ from berserk_mcp import learned as bm_learned
 from berserk_mcp import queries as bm_queries
 from berserk_mcp import runner as bm_runner
 from berserk_mcp import tools as bm_tools
+from berserk_mcp import usage as bm_usage
 import hmac
 import os
 import parser_factory
@@ -98,6 +99,7 @@ def _run_saved_entry(match, since_arg):
         if bm_runner._blocking_validation(report):
             return prefix + bm_runner._format_validation_rejection(report), True
     out, err = bm_runner.bzrk_search_json(match["kql"], since)
+    _record_usage(match, out, err)
     if err:
         return prefix + bm_fencing._fence_untrusted(out), err
     if not bm_config.ENVELOPE_ENABLED:
@@ -121,6 +123,25 @@ def _run_saved_entry(match, since_arg):
     return prefix + header + "\n\n" + body, err  # nosemgrep: unfenced-bzrk-output-reaches-return
 
 
+def _record_usage(entry, out, err):
+    """Count this run in usage_stats.json. Best effort: usage.record never
+    raises, and a failure to classify the result is only a missed count."""
+    try:
+        outcome = "error" if err else ("empty" if bm_tools.result_row_count(out) == 0 else "rows")
+        bm_usage.record(bm_learned.sanitize_name(entry["name"]), outcome)
+    except Exception as exc:
+        bm_config.log(f"usage not recorded: {type(exc).__name__}: {exc}")
+
+
+def _usage_suffix(item, snapshot):
+    """Server text after a list_saved line: how often and when the entry ran.
+    Built from counters and a validated timestamp only, so no stored text
+    reaches it. `snapshot` is one usage.snapshot() read for the whole list."""
+    stats = snapshot.get(bm_learned.sanitize_name(item["name"]), {})
+    last = bm_usage.valid_timestamp(stats.get("last_called")) or "never"
+    return f"  (calls={stats.get('calls', 0)}, last_called={last})"
+
+
 def _saved_header_extra(entry):
     """origin=, review= (generated only) and rows_verified=false for the header."""
     generated = bm_config.is_generated(entry)
@@ -141,6 +162,9 @@ def _empty_saved_text(entry, since):
             text + "This saved query has never been seen returning rows; "
             "do not treat an empty result as a clean answer."
         )
+    last_rows = bm_usage.last_rows_at(bm_learned.sanitize_name(entry["name"]))
+    if last_rows:
+        text += f"It last returned rows at {last_rows}. "
     return text + "Try since='24h ago'."
 
 
@@ -231,12 +255,34 @@ def _list_saved_ranked(query):
     ranked = bm_learned.search_saved_entries(query, LIST_SAVED_QUERY_LIMIT)
     if not ranked:
         return "No saved queries match that query.", False
+    snapshot = bm_usage.snapshot()
     lines = [
-        "- " + bm_learned.projectable_name(it) + ": " + bm_learned._saved_query_description(it)
+        "- "
+        + bm_learned.projectable_name(it)
+        + ": "
+        + bm_learned._saved_query_description(it)
+        + _usage_suffix(it, snapshot)
         for it in ranked
         if bm_learned.projectable_name(it)
     ]
     return "Saved queries (best match first):\n" + "\n".join(lines), False
+
+
+def _list_saved_all():
+    """list_saved without a query: every visible entry, in store order."""
+    items = [it for it in bm_learned.load_learned() if bm_config.item_visible(it) and bm_learned.projectable_name(it)]
+    if not items:
+        return "No saved queries yet.", False
+    lines = []
+    snapshot = bm_usage.snapshot()
+    for item in items:
+        # Same sanitising and fence as the tools/list projection, so a
+        # forged closing tag cannot end the fence early.
+        description = bm_learned._saved_query_description(item)
+        # Stored names are not trusted either; show the sanitised form,
+        # the same name saved__ dispatch and run_saved resolve.
+        lines.append("- " + bm_learned.projectable_name(item) + ": " + description + _usage_suffix(item, snapshot))
+    return "Saved queries:\n" + "\n".join(lines), False
 
 
 def _handle_learning_loop(name, arguments):
@@ -245,20 +291,7 @@ def _handle_learning_loop(name, arguments):
         ranked = _list_saved_ranked(arguments.get("query"))
         if ranked is not None:
             return ranked
-        items = [
-            it for it in bm_learned.load_learned() if bm_config.item_visible(it) and bm_learned.projectable_name(it)
-        ]
-        if not items:
-            return "No saved queries yet.", False
-        lines = []
-        for item in items:
-            # Same sanitising and fence as the tools/list projection, so a
-            # forged closing tag cannot end the fence early.
-            description = bm_learned._saved_query_description(item)
-            # Stored names are not trusted either; show the sanitised form,
-            # the same name saved__ dispatch and run_saved resolve.
-            lines.append("- " + bm_learned.projectable_name(item) + ": " + description)
-        return "Saved queries:\n" + "\n".join(lines), False
+        return _list_saved_all()
     if name == "run_saved":
         qn = bm_learned.sanitize_name(arguments.get("name", ""))
         items = [it for it in bm_learned.load_learned() if bm_config.item_visible(it)]
@@ -332,6 +365,9 @@ def _handle_learning_loop(name, arguments):
             bm_learned.persist_learned_query(entry, action_source="manual")
         except bm_learned.HiddenNameError:
             return bm_learned.HIDDEN_NAME_MESSAGE.format(name=nm), True
+        except bm_learned.StoreFullError as exc:
+            # Nothing was written: the store check runs before the save.
+            return f"NOT saved - {exc}", True
         verdict = "Verified: returned rows." if rows_verified else "NOT verified to return rows (allow_empty)."
         return "Saved '" + nm + "'. " + verdict + " Reusable now via run_saved name=" + nm + ".", False
     return None
