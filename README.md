@@ -42,10 +42,18 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.37.12**. This is a bullet-point overview, most recent
+Current version: **1.37.13**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.37.13** (2026-11-17) — `find_tool` now finds saved queries as well as
+  built-in tools, in every mode. It searches all visible saved queries, not
+  only the 25 listed as tools. At most two of the five candidates come from
+  saved queries when a built-in tool matches. Discovery mode now lists up to five
+  recent saved tools next to the anchor tools; set
+  `BERSERK_MCP_DISCOVERY_SAVED_CAP` to change that, or `0` to list none.
+  `list_saved` takes an optional `query` and returns the ten best matches.
+  See [docs/releases/v1.37.13.md](docs/releases/v1.37.13.md).
 - **v1.37.12** (2026-11-17) — The author ladder now passes failure history
   up. When one model fails validation, the next model sees a short note about
   what went wrong. The ladder keeps at most three notes, redacts each one, and
@@ -941,17 +949,26 @@ this is discovery over berserk-mcp's own *tool catalog*.
 
 | Tool | What it does |
 |---|---|
-| `find_tool` | Search-by-intent over the full tool catalog. Returns the best-matching candidates with their complete `inputSchema` inline, so a model can call a tool it was never shown up front. |
+| `find_tool` | Search-by-intent over the full tool catalog and every visible saved query. Returns the best-matching candidates with their complete `inputSchema` inline, so a model can call a tool it was never shown up front. |
 
 By default, the server lists the full tool catalog up front. Set
 `BERSERK_MCP_DISCOVERY=1` to list only 8 fixed anchor tools plus
-`find_tool`, which finds every other tool (v1.26.0, issue #14). Measured against a real
+`find_tool`, which finds every other tool (v1.26.0, issue #14). Discovery mode also
+lists the five most recent saved tools; `BERSERK_MCP_DISCOVERY_SAVED_CAP` sets that
+number. Measured against a real
 MCP handshake: the full schema costs ~17,560 tokens; discovery mode costs
 ~1,386 — a 92% reduction. A recall-gate test
 (`tests/test_tool_discovery.py`) requires that at least one realistic
 phrasing finds each shipped tool. Measured recall is 100%, across 210
 phrasings that cover all 70 tools. Off by
-default — every tool stays directly listed unless you opt in. See
+default — every tool stays directly listed unless you opt in.
+
+`find_tool` works in every mode, not only in discovery mode. It searches the
+built-in tools and all saved queries that your role and tier can see. A saved
+query that no list shows is still findable by intent. At most two of the five
+candidates come from saved queries when a built-in tool matches. A saved
+description cannot crowd out the built-in tools. The saved-query index rebuilds
+when the store file changes. See
 [Choosing a model](#choosing-a-model) for why this matters most for
 smaller models.
 

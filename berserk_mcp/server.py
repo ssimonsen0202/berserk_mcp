@@ -405,11 +405,15 @@ def _task_id_from_params(params):
 
 
 def _tool_list_result(mode):
-    allt = [
-        t for t in bm_tools.TOOLS + bm_tools.MGMT_TOOLS + bm_learned._saved_query_tools() if bm_config.tool_visible(t)
-    ]
+    builtin_tools = [t for t in bm_tools.TOOLS + bm_tools.MGMT_TOOLS if bm_config.tool_visible(t)]
+    saved_tools = [t for t in bm_learned._saved_query_tools() if bm_config.tool_visible(t)]
     if bm_tools.BERSERK_MCP_DISCOVERY:
-        allt = [t for t in allt if t["name"] in bm_tools._ANCHOR_TOOL_NAMES]
+        # Anchors plus the most recent saved tools, up to the discovery cap.
+        # Every other saved tool stays reachable through find_tool.
+        builtin_tools = [t for t in builtin_tools if t["name"] in bm_tools._ANCHOR_TOOL_NAMES]
+        cap = bm_learned.DISCOVERY_SAVED_CAP
+        saved_tools = saved_tools[-cap:] if cap > 0 else []
+    allt = builtin_tools + saved_tools
     tl = []
     hidden = bm_tools._hidden_tool_names()
     builtin = {t["name"] for t in bm_tools.TOOLS + bm_tools.MGMT_TOOLS}

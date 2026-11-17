@@ -16,9 +16,12 @@ import ai_finops
 import hashlib
 import ingestion_advisor
 import investigation
+import os
 import parser_factory
 import re
 import secret_scan
+import threading
+import tool_discovery
 import unicodedata
 
 
@@ -41,6 +44,20 @@ def load_learned():
 def save_learned(items):
     bm_config._validate_store_path(bm_config.LEARNED_PATH, "LEARNED_PATH")
     return _store.save_json_list(bm_config.LEARNED_PATH, items, logger=bm_config.log)
+
+
+# MCP clients limit tool names to 64 characters; "saved__" takes 7.
+MAX_SAVED_NAME_CHARS = 64 - len("saved__")
+
+
+def projectable_name(item):
+    """The sanitised name of a saved entry, or None when it has no usable
+    name or saved__<name> would exceed the 64-character tool-name limit."""
+    try:
+        nm = sanitize_name(item["name"])
+    except (KeyError, TypeError):
+        return None
+    return nm if len(nm) <= MAX_SAVED_NAME_CHARS else None
 
 
 def sanitize_name(n):
@@ -96,6 +113,22 @@ LEARNED_STORE_CAP = 500
 SAVED_TOOL_PROJECTION_CAP = bm_config._nonnegative_int_env("BERSERK_MCP_SAVED_TOOL_CAP", 25)
 
 
+# Saved tools listed next to the anchor tools in discovery mode (WP2). 0 lists
+# none; an unset, non-numeric or negative value gives the default.
+DISCOVERY_SAVED_CAP_DEFAULT = 5
+
+
+def discovery_saved_cap_from_env(raw):
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return DISCOVERY_SAVED_CAP_DEFAULT
+    return value if value >= 0 else DISCOVERY_SAVED_CAP_DEFAULT
+
+
+DISCOVERY_SAVED_CAP = discovery_saved_cap_from_env(os.environ.get("BERSERK_MCP_DISCOVERY_SAVED_CAP"))
+
+
 # FR-4: a generated entry's description was authored by an LLM and is
 # therefore untrusted (list_saved already fences it for the same reason).
 # Projecting it into tools/list moves that untrusted text into a model's
@@ -118,7 +151,10 @@ _DESCRIPTION_STRUCTURAL_TOKENS = ("inputSchema", '"tools"', "\n\n---")
 SAVE_QUERY_DESCRIPTION_MAX_CHARS = 2000
 
 
-def _saved_query_description(item):
+def _saved_query_description(item, fenced=True):
+    """The sanitised description of a saved query. fenced=False omits the
+    generated-description fence; only the search index uses that, and index
+    text is never shown to a caller."""
     text = str(item.get("description", ""))
     # tools/call output (e.g. list_saved) is redacted via
     # secret_scan.apply_output_filter at the dispatch() boundary; tools/list
@@ -171,9 +207,26 @@ def _saved_query_description(item):
     # text, before the fence is added, so it can never cut the fence.
     filtered = bm_tools._without_hidden_tool_sentences(text, bm_tools._hidden_tool_names())
     text = filtered if filtered is text or filtered.strip() else "Saved query."
-    if bm_config.is_generated(item):
+    if fenced and bm_config.is_generated(item):
         text = "<generated-description>" + text + "</generated-description>"
     return text
+
+
+def _project_saved_entry(item):
+    """The tool definition one saved entry projects to, or None when the
+    entry has no usable name. The one place a saved entry becomes a tool, so
+    tools/list and find_tool return the same definition."""
+    nm = projectable_name(item)
+    if nm is None:
+        return None
+    tool = {
+        "name": "saved__" + nm,
+        "description": _saved_query_description(item),
+        "inputSchema": {"type": "object", "properties": bm_tools._since()},
+    }
+    if item.get("roles"):
+        tool["roles"] = item["roles"]
+    return tool
 
 
 def _saved_query_tools():
@@ -188,19 +241,145 @@ def _saved_query_tools():
         return []
     tools = []
     for item in items[-SAVED_TOOL_PROJECTION_CAP:]:
-        try:
-            nm = sanitize_name(item["name"])
-        except (KeyError, TypeError):
-            continue
-        tool = {
-            "name": "saved__" + nm,
-            "description": _saved_query_description(item),
-            "inputSchema": {"type": "object", "properties": bm_tools._since()},
-        }
-        if item.get("roles"):
-            tool["roles"] = item["roles"]
-        tools.append(tool)
+        tool = _project_saved_entry(item)
+        if tool is not None:
+            tools.append(tool)
     return tools
+
+
+_ALIASES_IN_INDEX = 10
+
+
+def _saved_index_text(item):
+    """Search text for one saved entry: the sanitised description plus any
+    aliases, each sanitised the same way and without the fence."""
+    parts = [_saved_query_description(item, fenced=False)]
+    aliases = item.get("aliases")
+    if isinstance(aliases, (list, tuple)):
+        for alias in aliases[:_ALIASES_IN_INDEX]:
+            if isinstance(alias, str):
+                parts.append(_saved_query_description({"description": alias}, fenced=False))
+    return " ".join(p for p in parts if p)
+
+
+# The combined discovery index, rebuilt only when the store, the role or the
+# tier changes. Role and tier are in the key because the index holds only the
+# entries item_visible accepts for them.
+_INDEX_LOCK = threading.Lock()
+_INDEX_CACHE = {"key": None, "value": None}
+
+
+def _store_stamp():
+    try:
+        st = os.stat(bm_config.LEARNED_PATH)
+    except OSError:
+        return None
+    # inode and ctime too: a rewrite can keep the same mtime and size.
+    return (st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns)
+
+
+def _build_saved_index():
+    """(docs, items_by_tool) for every visible saved entry. Never raises."""
+    try:
+        items = [it for it in load_learned() if bm_config.item_visible(it)]
+    except Exception:
+        return [], {}
+    docs = []
+    by_tool = {}
+    # Most recent first, so equal scores among saved tools favour the newest.
+    for item in reversed(items):
+        if len(docs) >= LEARNED_STORE_CAP:
+            # A hand-edited store can exceed the write cap; never index more.
+            break
+        nm = projectable_name(item)
+        if nm is None:
+            continue
+        name = "saved__" + nm
+        if name in by_tool:
+            continue
+        docs.append({"name": name, "description": _saved_index_text(item)})
+        by_tool[name] = item
+    return docs, by_tool
+
+
+def saved_query_index_docs():
+    """One {"name", "description"} index document per visible saved entry.
+    The description is search text only and is never shown to a caller."""
+    return list(_saved_search_state()["docs"])
+
+
+def _saved_search_state():
+    """The cached search state: {"docs", "items", "index", "order"}. Falls
+    back to built-in tools only when the store is missing or unreadable."""
+    key = (str(bm_config.LEARNED_PATH), _store_stamp(), bm_config.ACTIVE_ROLE, bm_config.ACTIVE_TIER_RESOLVED)
+    with _INDEX_LOCK:
+        if _INDEX_CACHE["key"] == key:
+            return _INDEX_CACHE["value"]
+        docs, by_tool = _build_saved_index()
+        builtin = bm_tools.TOOLS + bm_tools.MGMT_TOOLS
+        index = tool_discovery.build_index(builtin + docs) if docs else bm_tools._DISCOVERY_INDEX
+        value = {
+            "docs": docs,
+            "items": by_tool,
+            "index": index,
+            # Weights come from the built-in tools alone, so saved entries
+            # never change a built-in tool's score.
+            "weights_from": bm_tools._DISCOVERY_INDEX,
+            # Built-in tools first: an equal score ranks a built-in tool ahead.
+            "order": [t["name"] for t in builtin] + [d["name"] for d in docs],
+        }
+        _INDEX_CACHE["key"] = key
+        _INDEX_CACHE["value"] = value
+        return value
+
+
+def rank_discovery(query):
+    """Rank every built-in and visible saved tool for `query`. Returns
+    (ranked, saved_tools): ranked is [(name, score)], best first; saved_tools
+    maps each saved tool name in it to its projected tool definition. An
+    entry that item_visible rejects now is dropped here as well."""
+    state = _saved_search_state()
+    ranked = tool_discovery.search(
+        state["index"],
+        query,
+        top_k=len(state["order"]),
+        tool_order=state["order"],
+        weights_from=state["weights_from"],
+    )
+    saved_tools = {}
+    kept = []
+    for name, score in ranked:
+        if name.startswith("saved__"):
+            item = state["items"].get(name)
+            if item is None or not bm_config.item_visible(item):
+                continue
+            tool = _project_saved_entry(item)
+            if tool is None:
+                continue
+            saved_tools[name] = tool
+        kept.append((name, score))
+    return kept, saved_tools
+
+
+def search_saved_entries(query, limit):
+    """Visible saved entries ranked for `query` by the shared index, best
+    first, at most `limit`. Each is the stored entry (as list_saved shows)."""
+    state = _saved_search_state()
+    ranked = tool_discovery.search(
+        state["index"],
+        query,
+        top_k=len(state["order"]),
+        tool_order=state["order"],
+        weights_from=state["weights_from"],
+    )
+    out = []
+    for name, _score in ranked:
+        item = state["items"].get(name)
+        if item is not None and bm_config.item_visible(item):
+            out.append(item)
+            if len(out) >= limit:
+                break
+    return out
 
 
 def approve_generated_query(name):

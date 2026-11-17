@@ -172,6 +172,11 @@ def _save_query_input_error(name, desc, kql):
     runs, else None."""
     if not kql or not desc:
         return "save_query needs name, description, and kql."
+    if len(name) > bm_learned.MAX_SAVED_NAME_CHARS:
+        return (
+            f"name is too long (maximum {bm_learned.MAX_SAVED_NAME_CHARS} characters after "
+            "sanitising), because saved__<name> must fit the 64-character tool-name limit."
+        )
     if len(desc) > bm_learned.SAVE_QUERY_DESCRIPTION_MAX_CHARS:
         return (
             f"description is too long (maximum {bm_learned.SAVE_QUERY_DESCRIPTION_MAX_CHARS} "
@@ -206,10 +211,43 @@ def _visible_duplicate(all_items, name, kql):
     )
 
 
+LIST_SAVED_QUERY_MAX_CHARS = 200
+LIST_SAVED_QUERY_LIMIT = 10
+
+
+def _list_saved_ranked(query):
+    """list_saved with a query: (text, is_error) for the best matches, or None
+    when no query was given and the caller lists every entry."""
+    if query is None:
+        return None
+    if not isinstance(query, str):
+        return "query must be a string", True
+    if len(query) > LIST_SAVED_QUERY_MAX_CHARS:
+        return f"query is too long (maximum {LIST_SAVED_QUERY_MAX_CHARS} characters)", True
+    if not query.strip():
+        return None
+    # Same index as find_tool, so a client that ignores list_changed can
+    # still find a saved query added mid-session.
+    ranked = bm_learned.search_saved_entries(query, LIST_SAVED_QUERY_LIMIT)
+    if not ranked:
+        return "No saved queries match that query.", False
+    lines = [
+        "- " + bm_learned.projectable_name(it) + ": " + bm_learned._saved_query_description(it)
+        for it in ranked
+        if bm_learned.projectable_name(it)
+    ]
+    return "Saved queries (best match first):\n" + "\n".join(lines), False
+
+
 def _handle_learning_loop(name, arguments):
     """list_saved / run_saved / save_query. Returns (text, is_error) or None."""
     if name == "list_saved":
-        items = [it for it in bm_learned.load_learned() if bm_config.item_visible(it)]
+        ranked = _list_saved_ranked(arguments.get("query"))
+        if ranked is not None:
+            return ranked
+        items = [
+            it for it in bm_learned.load_learned() if bm_config.item_visible(it) and bm_learned.projectable_name(it)
+        ]
         if not items:
             return "No saved queries yet.", False
         lines = []
@@ -217,7 +255,9 @@ def _handle_learning_loop(name, arguments):
             # Same sanitising and fence as the tools/list projection, so a
             # forged closing tag cannot end the fence early.
             description = bm_learned._saved_query_description(item)
-            lines.append("- " + item["name"] + ": " + description)
+            # Stored names are not trusted either; show the sanitised form,
+            # the same name saved__ dispatch and run_saved resolve.
+            lines.append("- " + bm_learned.projectable_name(item) + ": " + description)
         return "Saved queries:\n" + "\n".join(lines), False
     if name == "run_saved":
         qn = bm_learned.sanitize_name(arguments.get("name", ""))
