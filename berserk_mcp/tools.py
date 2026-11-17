@@ -267,6 +267,46 @@ def result_is_empty(out):
     return count is not None and count <= 1 and bm_runner.count_result_is_zero(out)
 
 
+def display_since(since):
+    """`since` as it may appear in server text outside the fence: every run
+    of whitespace (newline, tab, vertical tab, form feed, U+2028 ...)
+    becomes one space. valid_since() accepts such whitespace."""
+    return " ".join(str(since).split())
+
+
+def _envelope_header(source, ref_key, since, out, extra=()):
+    """Return the one-line evidence header for a result. Never raises on
+    well-formed text.
+
+    header = "window=<since>[  rows=<n>][  <extra>...]  source=<source>"
+             "  redaction=<mode>  at=<iso>  ref=<ref_key>#<digest>"
+    `extra` is a sequence of "key=value" strings placed after rows= and before
+    source=. rows comes from result_row_count(out) and is omitted when None.
+    The ref hashes the rows as the client receives them (after the same output
+    filter dispatch applies), never the raw rows, so it cannot confirm a guess
+    at a redacted value."""
+    since = display_since(since)
+    rows = result_row_count(out)
+    header = f"window={since}"
+    if rows is not None:
+        header = f"{header}  rows={rows}"
+    for item in extra:
+        header = f"{header}  {item}"
+    # Evidence fields (review 2026-09-26): where the rows came from, the
+    # redaction policy the MCP boundary (dispatch) applies to this result,
+    # when the rows were queried (a cached result keeps its original
+    # time), and a stable reference: identical key, window and delivered
+    # rows always give the same ref.
+    delivered = secret_scan.apply_output_filter(
+        out,
+        mode=bm_config.REDACT_MODE,
+        include_entropy=bm_config.REDACT_ENTROPY,
+        pii_types=bm_config.REDACT_PII_TYPES,
+    )
+    digest = hashlib.sha256(f"{ref_key}\n{since}\n{delivered}".encode("utf-8", "replace")).hexdigest()[:12]
+    return f"{header}  source={source}  redaction={bm_config.REDACT_MODE}  at={bm_config.now_iso()}  ref={ref_key}#{digest}"
+
+
 def _envelope(tool, since, out, fence_body=False):
     """Wrap SIMPLE tool output with a window/rows header. Never raises.
 
@@ -279,26 +319,8 @@ def _envelope(tool, since, out, fence_body=False):
             next_step = _EMPTY_NEXT_STEP.get(tool, _DEFAULT_EMPTY_NEXT_STEP)
             if _names_hidden_tool(next_step, _hidden_tool_names()):
                 next_step = _DEFAULT_EMPTY_NEXT_STEP
-            return f"No rows in window {since}. {next_step}"
-        rows = result_row_count(out)
-        header = f"window={since}"
-        if rows is not None:
-            header = f"{header}  rows={rows}"
-        # Evidence fields (review 2026-09-26): where the rows came from, the
-        # redaction policy the MCP boundary (dispatch) applies to this result,
-        # when the rows were queried (a cached result keeps its original
-        # time), and a stable reference: identical tool, window and delivered
-        # rows always give the same ref. The ref hashes the rows as the client
-        # receives them (after the same output filter dispatch applies), never
-        # the raw rows, so it cannot confirm a guess at a redacted value.
-        delivered = secret_scan.apply_output_filter(
-            out,
-            mode=bm_config.REDACT_MODE,
-            include_entropy=bm_config.REDACT_ENTROPY,
-            pii_types=bm_config.REDACT_PII_TYPES,
-        )
-        digest = hashlib.sha256(f"{tool}\n{since}\n{delivered}".encode("utf-8", "replace")).hexdigest()[:12]
-        header = f"{header}  source=fixed:{tool}  redaction={bm_config.REDACT_MODE}  at={bm_config.now_iso()}  ref={tool}#{digest}"
+            return f"No rows in window {display_since(since)}. {next_step}"
+        header = _envelope_header("fixed:" + tool, tool, since, out)
         body = bm_fencing._fence_untrusted(out) if fence_body else out
         return f"{header}\n\n{body}"
     except Exception:

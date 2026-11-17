@@ -82,7 +82,9 @@ def _run_saved_entry(match, since_arg):
     saved__<name> projected-tool dispatch (issue #5) so the two code paths
     can never drift -- see docs/claude-code-review-feedback-loop.md fault 2
     for what happens when a fix lands at only one call site."""
-    since = since_arg or match.get("since") or "1h ago"
+    # Whitespace collapsed: valid_since() accepts it, and since is
+    # written into the server-text header, outside the fence.
+    since = bm_tools.display_since(since_arg or match.get("since") or "1h ago")
     prefix = ""
     if bm_config.KQL_VALIDATION_MODE != "off":
         report = bm_runner._validate_user_kql(match["kql"], since)
@@ -98,7 +100,48 @@ def _run_saved_entry(match, since_arg):
     out, err = bm_runner.bzrk_search_json(match["kql"], since)
     if err:
         return prefix + bm_fencing._fence_untrusted(out), err
-    return prefix + bm_fencing._fence_limited(out), err
+    if not bm_config.ENVELOPE_ENABLED:
+        return prefix + bm_fencing._fence_limited(out), err
+    try:
+        # Empty means zero rows only: a saved count() of 0 is an answer.
+        if bm_tools.result_row_count(out) == 0:
+            return prefix + _empty_saved_text(match, since), err
+        header = bm_tools._envelope_header(
+            "saved:" + bm_learned.sanitize_name(match["name"]),
+            "saved__" + bm_learned.sanitize_name(match["name"]),
+            since,
+            out,
+            extra=_saved_header_extra(match),
+        )
+    except Exception:
+        return prefix + bm_fencing._fence_limited(out), err
+    # The header holds only counts, a sanitised name and a digest of the rows,
+    # so no telemetry text reaches it; the rows themselves are fenced.
+    body = bm_fencing._fence_limited(out)
+    return prefix + header + "\n\n" + body, err  # nosemgrep: unfenced-bzrk-output-reaches-return
+
+
+def _saved_header_extra(entry):
+    """origin=, review= (generated only) and rows_verified=false for the header."""
+    generated = bm_config.is_generated(entry)
+    extra = ["origin=generated" if generated else "origin=manual"]
+    if generated:
+        approved = entry.get("status") == bm_config.GENERATED_APPROVED
+        extra.append("review=approved" if approved else "review=pending")
+    if not bm_learned.entry_rows_verified(entry):
+        extra.append("rows_verified=false")
+    return extra
+
+
+def _empty_saved_text(entry, since):
+    """Server text for a saved query that returned zero rows."""
+    text = f"No rows in window {since}. "
+    if not bm_learned.entry_rows_verified(entry):
+        return (
+            text + "This saved query has never been seen returning rows; "
+            "do not treat an empty result as a clean answer."
+        )
+    return text + "Try since='24h ago'."
 
 
 def _empty_result_check(kql, out, allow_empty):
@@ -179,7 +222,8 @@ def _handle_learning_loop(name, arguments):
     if name == "run_saved":
         qn = bm_learned.sanitize_name(arguments.get("name", ""))
         items = [it for it in bm_learned.load_learned() if bm_config.item_visible(it)]
-        match = next((it for it in items if it["name"] == qn), None)
+        # Same lookup as saved__* dispatch, so both resolve the same entry.
+        match = next((it for it in items if bm_learned.sanitize_name(it["name"]) == qn), None)
         if not match:
             avail = ", ".join(it["name"] for it in items) or "(none)"
             return "No saved query named '" + qn + "'. Available: " + avail, True

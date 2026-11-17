@@ -42,10 +42,15 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.37.9**. This is a bullet-point overview, most recent
+Current version: **1.37.10**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.37.10** (2026-11-17) — Saved query results now carry the same
+  evidence header as the built-in tools. The header shows the window, row
+  count, origin, source and a stable reference. An empty result says so in
+  plain words, and warns when the query has never returned rows. See
+  [docs/releases/v1.37.10.md](docs/releases/v1.37.10.md).
 - **v1.37.9** (2026-11-17) — `save_query` no longer reveals or replaces a
   saved query that the caller's role or tier cannot see. Such a name gets a
   short "not available" reply, and `overwrite=true` cannot replace the entry.
@@ -869,6 +874,16 @@ then carries `rows_verified: false`. `save_query` also refuses KQL that matches
 a visible saved query under another name. It ignores extra whitespace outside
 quoted text. `overwrite=true` replaces a query of the same name only. It does
 not bypass this check.
+
+`run_saved` and the `saved__*` tools wrap a successful result in a one-line
+header. The header shows `window=`, `rows=`, `origin=`, `source=saved:<name>`,
+`redaction=`, `at=` and `ref=`. A generated entry also shows `review=`. An entry
+saved with `allow_empty=true` shows `rows_verified=false`. The header sits
+outside the untrusted-data fence, and the rows stay inside it. An empty result
+returns a short sentence instead of the rows. For an entry that never returned
+rows, the sentence warns that an empty result is not a clean answer. A saved
+count of 0 is an answer and appears as normal. Set `BERSERK_MCP_ENVELOPE=0` to
+remove the header.
 
 ### Ingestion advisor
 
