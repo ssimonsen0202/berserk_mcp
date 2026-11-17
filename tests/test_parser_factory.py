@@ -521,7 +521,7 @@ class SourceProfileTest(ParserFactoryTestBase):
         self.responses[f"{bm.TABLE} | take 1"] = ("password=dummy-backend-secret-987654", True)
         captured_prompts = []
 
-        def spy_llm_complete(provider, system_prompt, user_prompt):
+        def spy_llm_complete(provider, system_prompt, user_prompt, model=None):
             captured_prompts.append(user_prompt)
             return json.dumps(
                 {
@@ -594,7 +594,7 @@ class SourceProfileTest(ParserFactoryTestBase):
         captured_prompts = []
         orig_llm_complete = pf.llm_complete
 
-        def spy_llm_complete(provider, system_prompt, user_prompt):
+        def spy_llm_complete(provider, system_prompt, user_prompt, model=None):
             captured_prompts.append(user_prompt)
             return None, "stub: no completion needed for this test"
 
@@ -638,7 +638,7 @@ class SourceProfileTest(ParserFactoryTestBase):
         self.responses["bag_keys(resource)"] = (forged, False)
         captured_prompts = []
 
-        def spy_llm_complete(provider, system_prompt, user_prompt):
+        def spy_llm_complete(provider, system_prompt, user_prompt, model=None):
             captured_prompts.append(user_prompt)
             return None, "stub: no completion needed for this test"
 
@@ -910,6 +910,103 @@ class GenerationPipelineTest(ParserFactoryTestBase):
         amendments = bm.load_json_list(Path(bm.LEARNED_PATH).parent / "amendments_log.json")
         gen_actions = [a for a in amendments if a["action"] == "generated"]
         self.assertEqual(len(gen_actions), 2)
+
+    # ---- WP5: the recorded model id is the real id, resolved once ----
+    def _one_good_query_reply(self):
+        return self._reply(
+            [
+                {
+                    "name": "overview",
+                    "description": "overview",
+                    "kql": f"{bm.TABLE} | where resource['service.name'] == 'mysvc' | summarize n=count() | take 1",
+                    "since": "1h ago",
+                }
+            ]
+        )
+
+    def _generate_and_get_model(self, ladder):
+        os.environ["BERSERK_LLM_LADDER"] = ladder
+        self._stub_profile_responses()
+        self.default_response = ("row1 col\nval 5", False)
+        reply = self._one_good_query_reply()
+        if ladder == "anthropic":
+            reply = {"content": [{"text": reply["choices"][0]["message"]["content"]}]}
+        self.llm_responses = [(reply, None)]
+        report, ok = pf.generate_parser_for({"source": "mysvc", "kind": "service", "role_hint": ""})
+        self.assertTrue(ok, report)
+        entry = bm.load_learned()[0]
+        return entry["generated_by"]["model"]
+
+    def _assert_default_model_recorded(self, provider, key_env, default):
+        os.environ[key_env] = "k"
+        model = self._generate_and_get_model(provider)
+        self.assertEqual(model, default)
+        self.assertNotIn(model, (provider, "unknown"))
+
+    def test_generated_by_model_is_default_id_when_env_unset_anthropic(self):
+        self._assert_default_model_recorded("anthropic", "ANTHROPIC_API_KEY", pf._DEFAULT_ANTHROPIC_MODEL)
+
+    def test_generated_by_model_is_default_id_when_env_unset_openai(self):
+        self._assert_default_model_recorded("openai", "OPENAI_API_KEY", pf._DEFAULT_OPENAI_MODEL)
+
+    def test_generated_by_model_is_discovered_hermes_id(self):
+        # BERSERK_LLM_HERMES_MODEL unset: the id comes from GET /models.
+        model_from, err = pf._provider_model("hermes")
+        self.assertIsNone(err)
+        pf._reset_hermes_model_cache()
+        model = self._generate_and_get_model("hermes")
+        self.assertEqual(model, "discovered-model")
+        self.assertEqual(model, model_from)
+        self.assertEqual(self._llm_calls[-1][2]["model"], "discovered-model")
+
+    def test_llm_complete_and_provenance_use_same_default(self):
+        os.environ["ANTHROPIC_API_KEY"] = "k"
+        self.llm_responses = [({"content": [{"text": "x"}]}, None)]
+        pf.llm_complete("anthropic", "s", "u", model=None)
+        sent = self._llm_calls[-1][2]["model"]
+        self.assertEqual(sent, pf._provider_model("anthropic")[0])
+        self.assertEqual(sent, pf._DEFAULT_ANTHROPIC_MODEL)
+        recorded = self._generate_and_get_model("anthropic")
+        self.assertEqual(recorded, sent)
+
+    def test_model_is_resolved_once_per_attempt_and_recorded_value_is_the_one_sent(self):
+        from unittest import mock
+
+        os.environ["BERSERK_LLM_LADDER"] = "hermes"
+        self._stub_profile_responses()
+        self.default_response = ("row1 col\nval 5", False)
+        resolved = []
+        gets = []
+
+        def fake_get(url, headers, timeout=pf.LLM_TIMEOUT):
+            gets.append(url)
+            return {"data": [{"id": f"model-{len(gets)}"}]}, None
+
+        real = pf._provider_model
+
+        def counting(provider):
+            result = real(provider)
+            resolved.append(result[0])
+            return result
+
+        # First reply fails parsing (attempt 1), second validates (attempt 2).
+        self.llm_responses = [({"choices": [{"message": {"content": "not json"}}]}, None)]
+        self.llm_responses.append((self._one_good_query_reply(), None))
+        pf._http_get_json = fake_get
+        with (
+            mock.patch.object(pf, "HERMES_MODEL_CACHE_TTL", 0),
+            mock.patch.object(pf, "_provider_model", counting),
+        ):
+            report, ok = pf.generate_parser_for({"source": "mysvc", "kind": "service", "role_hint": ""})
+        self.assertTrue(ok, report)
+        sent = [call[2]["model"] for call in self._llm_calls]
+        self.assertEqual(len(sent), 2)
+        # Exactly one lookup per attempt: none extra after the call.
+        self.assertEqual(len(gets), 2)
+        self.assertEqual(sent, resolved)
+        self.assertNotEqual(sent[0], sent[1])
+        recorded = bm.load_learned()[0]["generated_by"]["model"]
+        self.assertEqual(recorded, sent[-1])
 
     def test_invalid_kql_prefix_feeds_back_and_succeeds_next_attempt(self):
         os.environ["BERSERK_LLM_LADDER"] = "hermes"

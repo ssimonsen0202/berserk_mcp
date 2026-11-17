@@ -473,9 +473,25 @@ def _hermes_model():
 
 _CLOUD_PROVIDERS = frozenset({"openai", "anthropic"})
 
+_DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"
+_DEFAULT_OPENAI_MODEL = "gpt-4o"
 
-def llm_complete(provider, system_prompt, user_prompt):
-    """One chat completion. Returns (text, None) or (None, error)."""
+
+def _provider_model(provider):
+    """The model id a provider call uses. Returns (model_id, None) or (None, error)."""
+    if provider == "anthropic":
+        return os.environ.get("BERSERK_LLM_ANTHROPIC_MODEL", _DEFAULT_ANTHROPIC_MODEL), None
+    if provider == "openai":
+        return os.environ.get("BERSERK_LLM_OPENAI_MODEL", _DEFAULT_OPENAI_MODEL), None
+    if provider == "hermes":
+        return _hermes_model()
+    return None, f"unknown provider: {provider}"
+
+
+def llm_complete(provider, system_prompt, user_prompt, model=None):
+    """One chat completion. Returns (text, None) or (None, error).
+
+    `model` is the id to send. When None, it is resolved here."""
     if provider in _CLOUD_PROVIDERS and _http.local_only_enabled():
         # An inherited API key must not silently re-enable cloud generation.
         return None, f"{provider}: refused by BERSERK_LOCAL_ONLY"
@@ -483,8 +499,10 @@ def llm_complete(provider, system_prompt, user_prompt):
         key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not key:
             return None, "anthropic: no ANTHROPIC_API_KEY"
+        if model is None:
+            model, _ = _provider_model(provider)
         payload = {
-            "model": os.environ.get("BERSERK_LLM_ANTHROPIC_MODEL", "claude-opus-4-8"),
+            "model": model,
             "max_tokens": 4096,
             "system": system_prompt,
             "messages": [{"role": "user", "content": user_prompt}],
@@ -505,8 +523,10 @@ def llm_complete(provider, system_prompt, user_prompt):
         key = os.environ.get("OPENAI_API_KEY", "")
         if not key:
             return None, "openai: no OPENAI_API_KEY"
+        if model is None:
+            model, _ = _provider_model(provider)
         payload = {
-            "model": os.environ.get("BERSERK_LLM_OPENAI_MODEL", "gpt-4o"),
+            "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -527,9 +547,10 @@ def llm_complete(provider, system_prompt, user_prompt):
     if provider == "hermes":
         url = _hermes_url()
         key = os.environ.get("HERMES_API_KEY", "")
-        model, err = _hermes_model()
-        if err:
-            return None, err
+        if model is None:
+            model, err = _provider_model(provider)
+            if err:
+                return None, err
         payload = {
             "model": model,
             "messages": [
@@ -1286,7 +1307,9 @@ def _run_provider_ladder(user_prompt_base, deadline, source):
                 budget_exhausted = True
                 break
             attempts_used += 1
-            text, llm_err = llm_complete(provider, GEN_SYSTEM, user_prompt_base + feedback)
+            model, llm_err = _provider_model(provider)
+            if not llm_err:
+                text, llm_err = llm_complete(provider, GEN_SYSTEM, user_prompt_base + feedback, model=model)
             if llm_err:
                 last_errors = [llm_err]
                 provider_failed_immediately = attempt == 1
@@ -1317,7 +1340,7 @@ def _run_provider_ladder(user_prompt_base, deadline, source):
                 validated_queries = queries
                 warnings = attempt_warnings
                 used_provider = provider
-                used_model = os.environ.get(f"BERSERK_LLM_{provider.upper()}_MODEL", provider)
+                used_model = model
                 break
 
             last_errors = attempt_errors

@@ -42,10 +42,15 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.37.10**. This is a bullet-point overview, most recent
+Current version: **1.37.11**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.37.11** (2026-11-17) — Generated queries now record the real model id
+  in `generated_by.model`. Before, a missing model setting stored the provider
+  name, such as "hermes". The ladder resolves the model once per attempt,
+  sends that id, and records the same id.
+  See [docs/releases/v1.37.11.md](docs/releases/v1.37.11.md).
 - **v1.37.10** (2026-11-17) — Saved query results now carry the same
   evidence header as the built-in tools. The header shows the window, row
   count, origin, source and a stable reference. An empty result says so in
