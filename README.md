@@ -42,10 +42,15 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.37.7**. This is a bullet-point overview, most recent
+Current version: **1.37.8**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.37.8** (2026-11-17) — `save_query` now checks that a query returns
+  rows. It rejects a query that matches nothing in 24 hours, unless the
+  caller passes `allow_empty=true`. Then the entry carries an unverified
+  mark. It also refuses the same KQL under a second name, and the pipeline
+  skips such duplicates. See [docs/releases/v1.37.8.md](docs/releases/v1.37.8.md).
 - **v1.37.7** (2026-11-17) — A saved query that carries `generated_by` but no
   `origin` now gets the generated-description fence. The server already
   treated such an entry as generated when it decided who sees it, but showed
@@ -850,7 +855,16 @@ rotate any exposed credentials.
 |---|---|
 | `list_saved` | List saved queries visible to the current role. Check here before authoring new KQL. |
 | `run_saved` | Run a saved query by name — deterministic, no KQL authoring. |
-| `save_query` | Verify a KQL query runs, then persist it under a name (with optional role tag). Logs every write to the amendments log. |
+| `save_query` | Verify a KQL query runs and returns rows, then persist it under a name (with optional role tag). Logs every write to the amendments log. |
+
+`save_query` runs the query once to verify it. If the result is empty, it runs
+the query again over 24 hours. It rejects a query that still matches nothing,
+because a wrong field name silently matches zero rows. Pass `allow_empty=true`
+(a JSON boolean) to save it anyway when an empty result is normal. The entry
+then carries `rows_verified: false`. `save_query` also refuses KQL that matches
+a visible saved query under another name. It ignores extra whitespace outside
+quoted text. `overwrite=true` replaces a query of the same name only. It does
+not bypass this check.
 
 ### Ingestion advisor
 

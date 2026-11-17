@@ -955,7 +955,7 @@ class GenerationPipelineTest(ParserFactoryTestBase):
         os.environ["BERSERK_LLM_HERMES_MODEL"] = "test-model"
         self._stub_profile_responses()
         self.default_response = ("row1\nval 5", False)
-        queries = [{"name": "overview", "description": "d", "kql": f"{bm.TABLE} | take 1", "since": "1h ago"}]
+        queries = [{"name": "overview", "description": "d", "kql": f"{bm.TABLE} | take 2", "since": "1h ago"}]
         self.llm_responses = [(self._reply(queries), None)]
 
         report, ok = pf.generate_parser_for({"source": "x", "kind": "service", "role_hint": ""})

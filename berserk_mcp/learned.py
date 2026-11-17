@@ -13,6 +13,7 @@ import _store
 import _tag_guard
 import agent_analytics
 import ai_finops
+import hashlib
 import ingestion_advisor
 import investigation
 import parser_factory
@@ -218,6 +219,54 @@ def approve_generated_query(name):
     return match, None
 
 
+KQL_FINGERPRINT_VERSION = 1
+
+
+def kql_fingerprint(kql):
+    """SHA-256 of the KQL with whitespace runs outside quoted literals
+    collapsed to one space and surrounding whitespace removed."""
+    text = str(kql)
+    out = []
+    i, n = 0, len(text)
+    gap = False
+    while i < n:
+        c = text[i]
+        if c.isspace():
+            gap = True
+            i += 1
+            continue
+        if gap and out:
+            out.append(" ")
+        gap = False
+        if c in ("'", '"'):
+            j = i + 1
+            while j < n and text[j] != c:
+                j += 2 if text[j] == "\\" and j + 1 < n else 1
+            j = min(j + 1, n)
+            out.append(text[i:j])
+            i = j
+            continue
+        out.append(c)
+        i += 1
+    return hashlib.sha256("".join(out).encode("utf-8")).hexdigest()
+
+
+def entry_fingerprint(item):
+    """Fingerprint of a stored entry. A stored kql_sha256 counts only when
+    its kql_fp_v equals KQL_FINGERPRINT_VERSION; otherwise it is recomputed
+    from the entry's kql and the stored value is never compared."""
+    stored = item.get("kql_sha256")
+    if isinstance(stored, str) and stored and item.get("kql_fp_v") == KQL_FINGERPRINT_VERSION:
+        return stored
+    return kql_fingerprint(item.get("kql", ""))
+
+
+def entry_rows_verified(item):
+    """True unless the entry was saved with allow_empty on an empty result.
+    Entries that predate rows_verified cannot be known and count as verified."""
+    return item.get("rows_verified") is not False
+
+
 def persist_learned_query(entry, action_source):
     """Storage core shared by the save_query tool and the parser-factory
     pipeline: dedupe by name, append, cap at 500, and log the amendment.
@@ -230,6 +279,12 @@ def persist_learned_query(entry, action_source):
     to have already resolved any overwrite confirmation before calling
     this helper, so a same-name entry here simply replaces, matching the
     pre-refactor behavior.
+
+    Every write stores kql_sha256 / kql_fp_v. A generated write whose KQL
+    matches another entry's fingerprint under a different name writes nothing
+    and returns {"name", "action": "duplicate", "duplicate_of"}; the same name
+    with the same KQL as a stored generated entry returns
+    {"name", "action": "unchanged"} and keeps the stored entry as it is.
     """
     # F-007: the whole load-modify-save cycle is one critical section --
     # locking only around save_learned() would still let two concurrent
@@ -239,6 +294,7 @@ def persist_learned_query(entry, action_source):
     with bm_config._FileLock(bm_config.LEARNED_PATH):
         all_items = load_learned()
         nm = entry["name"]
+        fingerprint = kql_fingerprint(entry.get("kql", ""))
         existing = next((it for it in all_items if it["name"] == nm), None)
         is_amendment = existing is not None
         if action_source == "generated":
@@ -273,6 +329,18 @@ def persist_learned_query(entry, action_source):
                 nm = chosen
                 entry = {**entry, "name": nm}
             is_amendment = nm in by_name
+            # Duplicate KQL under another name, visible or not (server code,
+            # not a tool reply): write nothing -- no eviction, no log line,
+            # no list_changed.
+            for it in all_items:
+                if it["name"] != nm and entry_fingerprint(it) == fingerprint:
+                    return {"name": it["name"], "action": "duplicate", "duplicate_of": it["name"]}
+            # Same name and same KQL as a stored generated entry: the KQL an
+            # operator approved has not changed, so the approval stands.
+            same = by_name.get(nm)
+            if same is not None and same.get("origin") == "generated" and entry_fingerprint(same) == fingerprint:
+                return {"name": nm, "action": "unchanged"}
+        entry = {**entry, "kql_sha256": fingerprint, "kql_fp_v": KQL_FINGERPRINT_VERSION}
 
         items = [it for it in all_items if it["name"] != nm]
         room_needed = (len(items) + 1) - LEARNED_STORE_CAP

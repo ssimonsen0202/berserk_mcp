@@ -39,6 +39,20 @@ can be reviewed, tested, and cited as one thing.
   reference agent's own accumulated field notes. Locking tests:
   `test_base_instructions_warn_about_search_term_boundaries`,
   `test_base_instructions_recommend_case_insensitive_operator`.
+- **`save_query` refuses a query that returns no rows.** Before v1.37.7
+  `save_query` saved any query that ran without error, so a query with a
+  wrong field name entered the store as if it worked. Now an empty result
+  triggers one more run over 24 hours. A query that still matches nothing is
+  not saved. The error names `discover_schema`. An empty result means the
+  `(no rows)` sentinel, a JSON result with no rows, or a single count of
+  zero. A text table of several rows that ends in `0` is not empty. The
+  caller can pass `allow_empty=true` (a JSON boolean only) when an empty
+  result is the normal state. The entry then carries `rows_verified: false`,
+  and the success text says it is not verified. Entries saved before this
+  change count as verified. `save_query` also refuses the same KQL under a
+  second name, matched by a whitespace-insensitive fingerprint, and the
+  generation pipeline skips such duplicates. Locking tests are in
+  `tests/test_learning_loop_save.py`.
 - **KQL validation rejects blockers before execution.** A query against the
   wrong table, or one carrying a source-introducing operator, is rejected
   by static validation before it reaches `bzrk` — rather than running and

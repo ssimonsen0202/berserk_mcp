@@ -6,6 +6,7 @@ Split out of berserk_mcp.py in v1.37.0.
 from berserk_mcp import config as bm_config
 from berserk_mcp import fencing as bm_fencing
 from berserk_mcp import queries as bm_queries
+from berserk_mcp import runner as bm_runner
 import _http
 import agent_analytics
 import hashlib
@@ -221,6 +222,51 @@ _EMPTY_NEXT_STEP = {
 }
 
 
+def result_row_count(out):
+    """Rows in a bzrk result, or None when they cannot be counted.
+    "(no rows)" -> 0. JSON (first non-space char is [ or {): parse with
+    agent_analytics._json_records; a list -> its length; None or a parse
+    error -> None. Any other text: non-empty lines minus one header line,
+    never below 0 (the rule _envelope uses today)."""
+    stripped = out.strip()
+    if stripped == "(no rows)":
+        return 0
+    if stripped and stripped[0] in "[{":
+        try:
+            records = agent_analytics._json_records(json.loads(stripped))
+        except Exception:
+            return None
+        return len(records) if records is not None else None
+    data_lines = [ln for ln in stripped.splitlines() if ln.strip()]
+    return max(0, len(data_lines) - 1)
+
+
+def result_is_empty(out):
+    """True when a save-time check must treat the result as "no data".
+    1. result_row_count(out) == 0, or
+    2. JSON with exactly one record that has exactly one value, and that
+       value is an int or float (not a bool) equal to 0, or
+    3. text (not JSON) with result_row_count(out) <= 1 and
+       bm_runner.count_result_is_zero(out)."""
+    count = result_row_count(out)
+    if count == 0:
+        return True
+    stripped = out.strip()
+    if stripped and stripped[0] in "[{":
+        try:
+            records = agent_analytics._json_records(json.loads(stripped))
+        except Exception:
+            return False
+        if isinstance(records, list) and len(records) == 1:
+            record = records[0]
+            values = list(record.values()) if isinstance(record, dict) else None
+            if values is not None and len(values) == 1:
+                value = values[0]
+                return isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0
+        return False
+    return count is not None and count <= 1 and bm_runner.count_result_is_zero(out)
+
+
 def _envelope(tool, since, out, fence_body=False):
     """Wrap SIMPLE tool output with a window/rows header. Never raises.
 
@@ -234,16 +280,7 @@ def _envelope(tool, since, out, fence_body=False):
             if _names_hidden_tool(next_step, _hidden_tool_names()):
                 next_step = _DEFAULT_EMPTY_NEXT_STEP
             return f"No rows in window {since}. {next_step}"
-        stripped = out.strip()
-        if stripped and stripped[0] in "[{":
-            try:
-                records = agent_analytics._json_records(json.loads(stripped))
-                rows = len(records) if records is not None else None
-            except Exception:
-                rows = None
-        else:
-            data_lines = [ln for ln in stripped.splitlines() if ln.strip()]
-            rows = max(0, len(data_lines) - 1)
+        rows = result_row_count(out)
         header = f"window={since}"
         if rows is not None:
             header = f"{header}  rows={rows}"
