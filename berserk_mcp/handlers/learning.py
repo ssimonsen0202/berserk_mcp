@@ -7,6 +7,7 @@ from berserk_mcp import config as bm_config
 from berserk_mcp import fencing as bm_fencing
 from berserk_mcp import learned as bm_learned
 from berserk_mcp import queries as bm_queries
+from berserk_mcp import requests as bm_requests
 from berserk_mcp import runner as bm_runner
 from berserk_mcp import tools as bm_tools
 from berserk_mcp import usage as bm_usage
@@ -373,8 +374,76 @@ def _handle_learning_loop(name, arguments):
     return None
 
 
+def _saved_match_for(question, tried):
+    """The `saved__<name>` of the best visible saved tool for `question`, or
+    None. Uses the shared discovery ranking (rank_discovery already drops any
+    entry item_visible rejects). Only the top saved tool counts: a request
+    that names it in `tried` skips the offer and is queued."""
+    ranked, _tools = bm_learned.rank_discovery(question)
+    for name, score in ranked:
+        if name.startswith("saved__"):
+            if score < bm_requests.SAVED_MATCH_MIN_SCORE or name in tried:
+                return None
+            return name
+    return None
+
+
+def _visible_saved_tool(result):
+    """`saved__<name>` for the first tool in a done request's result that
+    item_visible accepts now, else None. The name comes from the stored
+    entry, never from the request text."""
+    names = result.get("queries_saved") if isinstance(result, dict) else None
+    if not isinstance(names, list):
+        return None
+    entries = [it for it in bm_learned.load_learned() if isinstance(it, dict)]
+    for wanted in names:
+        if not isinstance(wanted, str):
+            continue
+        for it in entries:
+            nm = bm_learned.projectable_name(it)
+            if nm is not None and nm == bm_learned.sanitize_name(wanted) and bm_config.item_visible(it):
+                return "saved__" + nm
+    return None
+
+
+def _handle_request_query(arguments):
+    """request_query. Every reply is server text: the caller's question,
+    service, KQL and error are stored (redacted) but never echoed."""
+    clean, error = bm_requests.validate_arguments(arguments)
+    if error:
+        return error, True
+    saved = _saved_match_for(clean["question"], set(clean["tried"]))
+    if saved:
+        return (
+            f"A saved query may already answer this: {saved}. "
+            "Call it; request again with tried including it if it does not fit.",
+            False,
+        )
+    state, entry = bm_requests.submit(clean, bm_requests.active_role())
+    if state == "queued":
+        return (
+            f"Queued ({entry['id']}). An author pass will write and verify a query. "
+            "Tell the user it is not available yet.",
+            False,
+        )
+    if state in ("pending", "running"):
+        return f"Already queued ({entry['id']}). Do not ask again.", False
+    if state == "done":
+        tool = _visible_saved_tool(entry.get("result"))
+        return (f"Already answered: call {tool}." if tool else "Answered, awaiting operator approval."), False
+    if state == "failed_recent":
+        return "Could not be answered automatically; an operator has been notified. Do not ask again.", False
+    if state == "rate_limited":
+        return "Too many requests this hour; try later.", True
+    if state == "queue_full":
+        return "The request queue is full; try later.", True
+    return "Requests cannot be accepted right now; the operator has been told.", True
+
+
 def _handle_discovery(name, arguments):
-    """request_discovery / discovery_status. Returns (text, is_error) or None."""
+    """request_discovery / request_query / discovery_status. Returns (text, is_error) or None."""
+    if name == "request_query":
+        return _handle_request_query(arguments)
     if name == "request_discovery":
         service = str(arguments.get("service") or "").strip()
         metric = str(arguments.get("metric") or "").strip()

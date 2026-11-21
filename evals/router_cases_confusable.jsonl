@@ -19,3 +19,11 @@
 {"id": "conf_token_burn", "prompt": "How many tokens did Claude Code burn per tool and file target in the last 6 hours, and do the high-burn targets show loop signals?", "expect_tool": "claude_token_burn"}
 {"id": "conf_cost_daily", "prompt": "Give me the daily Claude Code cost trend for the last 7 days.", "expect_tool": "claude_cost_report"}
 {"id": "conf_spend_team", "prompt": "Show enterprise Claude spend grouped by team using the pricing catalog.", "expect_tool": "claude_spend_overview"}
+{"id": "conf_rq_new_source", "prompt": "We began shipping logs from a brand new source called pay-gateway today. Queue it for onboarding.", "expect_tool": "request_discovery", "expect_args": {"service": "pay-gateway"}}
+{"id": "conf_rq_existing_data_question", "prompt": "The ledger-sync service already reports to Berserk, but no tool shows how long its nightly batch takes. Queue that question.", "expect_tool": "request_query"}
+{"id": "conf_rq_need_a_tool", "prompt": "Is there a tool that can compare cost before and after a harness change?", "expect_tool": "find_tool"}
+{"id": "conf_rq_searched_nothing_fits", "prompt": "I already searched for a tool and nothing answers this. Queue the question: which tenants have the slowest logins?", "expect_tool": "request_query"}
+{"id": "conf_rq_new_metric", "prompt": "A new metric called queue_depth started arriving today. Register it for integration.", "expect_tool": "request_discovery", "expect_args": {"metric": "queue_depth"}}
+{"id": "conf_rq_existing_metric_question", "prompt": "The queue_depth metric is already in Berserk, but no tool shows its weekly peak by host. Queue that question.", "expect_tool": "request_query"}
+{"id": "conf_rq_find_a_tool_for_task", "prompt": "Can you find a tool that lists the stale saved queries?", "expect_tool": "find_tool"}
+{"id": "conf_rq_tools_exhausted", "prompt": "I checked every tool and saved query and none fits. Queue the question: how many retries did each job need last night?", "expect_tool": "request_query"}

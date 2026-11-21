@@ -147,7 +147,7 @@ class LaneRunTest(unittest.TestCase):
     def test_all_role_skips_nothing(self):
         _, report = self._run("all")
         self.assertEqual(report["not_applicable"], [])
-        self.assertEqual(len(report["rows"]), 21)
+        self.assertEqual(len(report["rows"]), 29)
 
 
 if __name__ == "__main__":

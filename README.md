@@ -42,10 +42,19 @@ LLM answer [Berserk](https://bzrk.dev) observability questions. The LLM
 
 ## Release history
 
-Current version: **1.37.14**. This is a bullet-point overview, most recent
+Current version: **1.38.0**. This is a bullet-point overview, most recent
 first — full detail for each notable release lives in
 [`docs/releases/`](docs/releases/).
 
+- **v1.38.0** (2026-11-21) — New tool `request_query`. A small model that
+  cannot answer a question now queues it, once, and tells the user. The server
+  stores the question, with secrets and personal data removed, in
+  `query_requests.json`. It answers a repeat of the same question with its
+  state. If a visible saved query already fits, the reply names it instead.
+  The server writes no query yet: a queued request stays pending until a later
+  release adds the author pass. Two new settings: `BERSERK_MCP_REQUEST_NEGATIVE_TTL_HOURS`
+  and `BERSERK_MCP_REQUESTS_PER_HOUR`. See
+  [docs/releases/v1.38.0.md](docs/releases/v1.38.0.md).
 - **v1.37.14** (2026-11-17) — The server now counts how often each saved query
   runs. `run_saved` and the `saved__*` tools record a call, and whether it
   returned rows, returned none or failed. `list_saved` shows `calls` and
@@ -893,6 +902,7 @@ rotate any exposed credentials.
 | `list_saved` | List saved queries visible to the current role. Check here before authoring new KQL. |
 | `run_saved` | Run a saved query by name — deterministic, no KQL authoring. |
 | `save_query` | Verify a KQL query runs and returns rows, then persist it under a name (with optional role tag). Logs every write to the amendments log. |
+| `request_query` | Queue a question that no fixed or saved tool answers. Every role and both tiers can call it. |
 
 `save_query` runs the query once to verify it. If the result is empty, it runs
 the query again over 24 hours. It rejects a query that still matches nothing,
@@ -902,6 +912,17 @@ then carries `rows_verified: false`. `save_query` also refuses KQL that matches
 a visible saved query under another name. It ignores extra whitespace outside
 quoted text. `overwrite=true` replaces a query of the same name only. It does
 not bypass this check.
+
+`request_query` is the fallback when no fixed or saved tool fits a question. The
+model sends the question and may add a service, the tools it tried, the failed
+KQL and the error. The server first looks for a visible saved query that fits
+and names it if one does. Otherwise it queues the question and replies that
+the answer is not available yet. Asking the same question again returns its
+state instead of a second request. The store removes secrets and personal data
+from the text before it writes the file. No reply repeats the question. The server accepts at most 20 new requests an hour
+(`BERSERK_MCP_REQUESTS_PER_HOUR`). A request that fails blocks the same question
+for one hour (`BERSERK_MCP_REQUEST_NEGATIVE_TTL_HOURS`). This release only
+queues requests. A later release adds the author pass that writes the query.
 
 `run_saved` and the `saved__*` tools wrap a successful result in a one-line
 header. The header shows `window=`, `rows=`, `origin=`, `source=saved:<name>`,
@@ -974,7 +995,7 @@ this is discovery over berserk-mcp's own *tool catalog*.
 | `find_tool` | Search-by-intent over the full tool catalog and every visible saved query. Returns the best-matching candidates with their complete `inputSchema` inline, so a model can call a tool it was never shown up front. |
 
 By default, the server lists the full tool catalog up front. Set
-`BERSERK_MCP_DISCOVERY=1` to list only 8 fixed anchor tools plus
+`BERSERK_MCP_DISCOVERY=1` to list only 9 fixed anchor tools plus
 `find_tool`, which finds every other tool (v1.26.0, issue #14). Discovery mode also
 lists the five best-ranked saved tools; `BERSERK_MCP_DISCOVERY_SAVED_CAP` sets that
 number. Measured against a real

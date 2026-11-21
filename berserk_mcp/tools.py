@@ -448,9 +448,10 @@ if _instruction_hidden_refs:
 
 # ---------- tool metadata: titles + behavioral annotations (MCP 2025-06-18) ----------
 # Annotations are advisory hints that let clients reason about a tool's behavior.
-# Every tool here is read-only against Berserk (KQL cannot mutate) EXCEPT save_query
-# and request_discovery, which write to local stores (learned-query store / discovery
-# queue) rather than any external system, so both carry openWorldHint=false.
+# Every tool here is read-only against Berserk (KQL cannot mutate) EXCEPT save_query,
+# request_discovery and request_query, which write to local stores (learned-query store /
+# discovery queue / request queue) rather than any external system, so all three carry
+# openWorldHint=false.
 _READ = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
 
 
@@ -472,6 +473,7 @@ _ANNOTATIONS = {
     "save_query": _WRITE_LOCAL,
     "list_saved": _READ_LOCAL,
     "request_discovery": _WRITE_LOCAL,
+    "request_query": _WRITE_LOCAL,
     "discovery_status": _READ_LOCAL,
     "detect_new_sources": _WRITE_EXTERNAL,
     "generate_parser": _WRITE_EXTERNAL,
@@ -505,6 +507,10 @@ _ANCHOR_TOOL_NAMES = frozenset(
         "list_hosts",
         "discovery_status",
         "self_check",
+        # The one write tool in the set, and a documented exception to the
+        # stated rule above: it has a required parameter. It is the fallback
+        # when nothing else fits, so it must be listed in discovery mode too.
+        "request_query",
     }
 )
 

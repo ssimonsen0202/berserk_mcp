@@ -24,6 +24,8 @@ All configuration is via environment variables. All are optional:
 | `BERSERK_TABLE` | `default` | The Berserk table to query. |
 | `BERSERK_MCP_LEARNED_PATH` | platform config dir | Where saved queries persist (`~/.config/berserk-mcp/learned.json` on Linux). |
 | `BERSERK_MCP_DISCOVERY_SAVED_CAP` | `5` | Saved tools listed next to the anchor tools in discovery mode (`BERSERK_MCP_DISCOVERY=1`), best ranked first (most calls, then latest call; v1.37.14). `0` lists none. A non-numeric or negative value gives the default. `find_tool` finds every visible saved query whatever this value is (v1.37.13). |
+| `BERSERK_MCP_REQUESTS_PER_HOUR` | `20` | New `request_query` requests accepted per hour, across all callers (v1.38.0). Past the cap the tool replies `Too many requests this hour; try later.` A repeat of a queued question is not a new request. A non-numeric value, or one below 1, gives the default. |
+| `BERSERK_MCP_REQUEST_NEGATIVE_TTL_HOURS` | `1` | Hours a failed `request_query` request blocks the same question (v1.38.0). After that the question queues again. A non-numeric value, or one below 1, gives the default. |
 | `BERSERK_MCP_ROLE` | `all` | Active role lane: `sre`, `soc`, `claude`, `ops`, or `all`. Controls tool visibility and primer injection. |
 | `BERSERK_MCP_PRIMERS_DIR` | adjacent `primers/` dir | Optional absolute directory containing `<role>.md`. When explicitly set for an active lane, a missing/unreadable primer is a startup error. |
 | `BERSERK_MCP_REDACT` | `redact` | Output handling: `redact` (safest, default), `flag`, or `off`. An unrecognized value fails closed to `redact`. Setting `flag` or `off` logs a startup warning, because both weaken the default. |
