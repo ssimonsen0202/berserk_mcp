@@ -830,7 +830,7 @@ def build_mgmt_tools(*, TABLE, MAX_INTERPOLATED_NAME_CHARS, MAX_SEARCH_TERM_CHAR
         },
         {
             "name": "request_discovery",
-            "description": "Queue a newly-added service or metric for author-lane integration. Validates the source is currently visible in Berserk, then records a job for the discovery worker to drain. Use when a user says 'I added / connected / started shipping SOURCE'.",
+            "description": "Queue a newly-added service or metric for author-lane integration. Validates the source is currently visible in Berserk, then records a job for the discovery worker to drain. Use when a user says 'I added / connected / started shipping SOURCE'. For a question about data that already exists and that no tool answers, use request_query instead.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -848,6 +848,46 @@ def build_mgmt_tools(*, TABLE, MAX_INTERPOLATED_NAME_CHARS, MAX_SEARCH_TERM_CHAR
                     "requested_by": {"type": "string", "description": "optional requester label"},
                     **_since(),
                 },
+            },
+        },
+        {
+            "name": "request_query",
+            "description": "Queue a QUESTION about data Berserk already holds that no fixed or saved tool answers, so a verified query can be written for it later. Nothing is answered now: tell the user it is queued. Use only after the fixed tools and find_tool found nothing that fits. Not for onboarding a new service or metric: that is request_discovery. Replies: queued, already queued, already answered (names a saved tool), or could not be answered.",
+            "inputSchema": {
+                "type": "object",
+                "properties": dict(
+                    {
+                        "question": {
+                            "type": "string",
+                            "minLength": 10,
+                            "maxLength": 500,
+                            "description": "the user's question, in plain words (10-500 characters, one line)",
+                        },
+                        "service": {
+                            "type": "string",
+                            "maxLength": MAX_INTERPOLATED_NAME_CHARS,
+                            "description": "optional service.name the question is about",
+                        },
+                        "tried": {
+                            "type": "array",
+                            "maxItems": 5,
+                            "items": {"type": "string", "pattern": "^[a-z0-9_]{1,64}$", "maxLength": 64},
+                            "description": "optional tool names already tried, such as a saved__ tool that did not fit",
+                        },
+                        "failed_kql": {
+                            "type": "string",
+                            "maxLength": 2000,
+                            "description": "optional KQL that did not answer the question",
+                        },
+                        "error": {
+                            "type": "string",
+                            "maxLength": 400,
+                            "description": "optional error text that query returned",
+                        },
+                    },
+                    **_since(),
+                ),
+                "required": ["question"],
             },
         },
         {
@@ -998,6 +1038,7 @@ TITLES = {
     "run_saved": "Run Saved Query",
     "save_query": "Save Query",
     "request_discovery": "Request Discovery",
+    "request_query": "Request Query",
     "discovery_status": "Discovery Status",
     "detect_new_sources": "Detect New Sources",
     "generate_parser": "Generate Parser",

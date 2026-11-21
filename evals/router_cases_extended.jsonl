@@ -43,3 +43,7 @@
 {"id": "run_worker", "prompt": "Drain the queued discovery jobs and author query packs for them.", "expect_tool": "run_discovery_worker"}
 {"id": "review_generated", "prompt": "Before I trust them, list the LLM-generated saved queries and which model wrote each.", "expect_tool": "review_generated"}
 {"id": "find_tool", "prompt": "I don't see a tool for this in my list. Find me a tool that can compare cost before and after a harness change.", "expect_tool": "find_tool"}
+{"id": "request_query_hourly_users", "prompt": "No tool I have answers this: how many distinct users hit the login endpoint in each hour today? Queue the question so someone writes a query for it.", "expect_tool": "request_query"}
+{"id": "request_query_reboots", "prompt": "Nothing in my tool list covers which hosts rebooted overnight. Record that question so an operator can get a verified query written.", "expect_tool": "request_query"}
+{"id": "request_query_retry_header", "prompt": "I tried the fixed tools and find_tool and none fit: what share of requests carried the retry header last week? Please queue this question.", "expect_tool": "request_query"}
+{"id": "request_query_failed_kql", "prompt": "My query for pod restarts returned an unknown column error. Hand the question, the failed KQL and the error on so a proper query gets written: which pods restarted more than twice this week?", "expect_tool": "request_query"}

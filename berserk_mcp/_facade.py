@@ -18,6 +18,7 @@ LAYERS = (
     "fencing",
     "queries",
     "runner",
+    "requests",
     "tools",
     "usage",
     "learned",

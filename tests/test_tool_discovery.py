@@ -315,6 +315,11 @@ PHRASINGS = {
     "run_saved": ["run a saved query", "execute a saved query by name", "re-run a saved query"],
     "save_query": ["save this query for later", "persist a kql query", "store a named query"],
     "request_discovery": ["kick off telemetry discovery", "request source discovery", "start discovering new sources"],
+    "request_query": [
+        "queue a question that no tool answers",
+        "no tool answers this question, ask for a query to be written",
+        "request a verified query for my question",
+    ],
     "discovery_status": ["what is the discovery job status", "check discovery progress", "is discovery still running"],
     "detect_new_sources": [
         "were any new telemetry sources found",
